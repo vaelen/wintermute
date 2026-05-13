@@ -164,15 +164,23 @@ func TestParsePromptResponse(t *testing.T) {
 	}{
 		{"", def, true},
 		{"\n", def, true},
-		{"u", EncodingUTF8, true},
-		{"U", EncodingUTF8, true},
-		{"d", EncodingCP437, true},
-		{"M", EncodingMacRoman, true},
-		{"L", EncodingISO88591, true},
-		{"P", EncodingPETSCII, true},
-		{"A", EncodingASCII, true},
+		// Each of the six options must be accepted in BOTH cases.
+		{"u", EncodingUTF8, true}, {"U", EncodingUTF8, true},
+		{"d", EncodingCP437, true}, {"D", EncodingCP437, true},
+		{"m", EncodingMacRoman, true}, {"M", EncodingMacRoman, true},
+		{"l", EncodingISO88591, true}, {"L", EncodingISO88591, true},
+		{"p", EncodingPETSCII, true}, {"P", EncodingPETSCII, true},
+		{"a", EncodingASCII, true}, {"A", EncodingASCII, true},
+		// Trailing CR / whitespace are stripped.
+		{"u\r", EncodingUTF8, true},
+		{" u ", EncodingUTF8, true},
+		// First-letter rule still applies for longer inputs.
+		{"unicode", EncodingUTF8, true},
+		{"PETSCII", EncodingPETSCII, true},
+		{"ascii", EncodingASCII, true},
+		// Garbage falls back to default with ok=false so the caller re-prompts.
 		{"X", def, false},
-		{"unicode", EncodingUTF8, true}, // first letter wins
+		{"123", def, false},
 	}
 	for _, c := range cases {
 		got, ok := ParsePromptResponse(c.in, def)
