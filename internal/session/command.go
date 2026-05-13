@@ -36,6 +36,8 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 			h.cmdHelp(s)
 		case "terminal":
 			h.cmdTerminal(ctx, s, rest)
+		case "motd":
+			h.cmdMOTD(s)
 		case "look":
 			_ = s.writeString("You are in the void. Rooms arrive in milestone 2.\r\n")
 		default:
@@ -62,11 +64,20 @@ func (h *Handler) cmdHelp(s *Session) {
 		"  terminal height <n>",
 		"  terminal color on|off",
 		"  terminal lines vt100|native",
+		"  motd               — re-display the message of the day",
 		"  look               — placeholder (real rooms arrive in milestone 2)",
 		"  quit               — disconnect",
 		"",
 	}, "\r\n")
 	_ = s.writeString(help)
+}
+
+func (h *Handler) cmdMOTD(s *Session) {
+	if h.MOTD == "" {
+		_ = s.writeString("No message of the day.\r\n")
+		return
+	}
+	_ = s.writeString(h.MOTD + "\r\n")
 }
 
 func (h *Handler) cmdTerminal(ctx context.Context, s *Session, args string) {

@@ -222,6 +222,28 @@ func TestRawTCPFullFlow(t *testing.T) {
 	}
 }
 
+func TestMOTDCommand(t *testing.T) {
+	srv := startServer(t)
+	out := driveClient(t, srv, []step{
+		{expect: "TERMINAL TYPE:", send: "u\r\n"},
+		{expect: "Username", send: "new\r\n"},
+		{expect: "Choose a username", send: "eve\r\n"},
+		{expect: "Choose a password", send: "hunter22\r\n"},
+		{expect: "Username", send: "eve\r\n"},
+		{expect: "Password", send: "hunter22\r\n"},
+		{expect: "MOTD", send: ""},
+		{expect: ">", send: "motd\r\n"},
+		// The MOTD body ("MOTD\r\n") should appear a second time.
+		{expect: ">", send: "quit\r\n"},
+	})
+	// Login prints one MOTD; the `motd` command prints a second. Count
+	// occurrences to confirm.
+	count := bytes.Count(out, []byte("MOTD\r\n"))
+	if count < 2 {
+		t.Errorf("expected MOTD body to appear at least twice (login + command); saw %d in:\n%s", count, out)
+	}
+}
+
 func TestRawTCPInvalidLogin(t *testing.T) {
 	srv := startServer(t)
 	// Create an account out of band so the login attempt has something to fail
