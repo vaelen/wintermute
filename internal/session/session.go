@@ -99,9 +99,14 @@ func (s *Session) writef(format string, args ...any) error {
 	return s.writeString(fmt.Sprintf(format, args...))
 }
 
-// readLine reads one line of input (terminated by '\n'), strips CRLF, and
-// decodes the wire bytes through the current Encoder. Returns io.EOF if
-// the connection closes.
+// readLine reads one line of input (terminated by '\n'), strips CRLF,
+// decodes the wire bytes through the current Encoder, and removes any
+// ANSI CSI escape sequences. Returns io.EOF if the connection closes.
+//
+// The CSI strip protects against terminal auto-responses — Device
+// Attributes, cursor position reports — that some terminals
+// line-buffer alongside the user's typed input. Without it the first
+// line on connect can be `\x1B[?1;2cu` instead of just `u`.
 func (s *Session) readLine() (string, error) {
 	if s.in == nil {
 		s.in = bufio.NewReader(s.reader())
@@ -111,14 +116,15 @@ func (s *Session) readLine() (string, error) {
 		return "", err
 	}
 	line = strings.TrimRight(line, "\r\n")
-	if s.enc == nil {
-		return line, nil
+	decoded := line
+	if s.enc != nil {
+		out, decErr := s.enc.DecodeIn([]byte(line))
+		if decErr != nil {
+			return "", decErr
+		}
+		decoded = string(out)
 	}
-	decoded, decErr := s.enc.DecodeIn([]byte(line))
-	if decErr != nil {
-		return "", decErr
-	}
-	return string(decoded), err
+	return term.StripCSI(decoded), err
 }
 
 // finalize flushes any encoder state. Always safe to call.

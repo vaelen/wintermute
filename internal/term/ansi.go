@@ -3,6 +3,45 @@
 
 package term
 
+// StripCSI returns s with all ANSI CSI escape sequences removed.
+// Useful at the session input boundary to drop terminal auto-responses
+// (Device Attributes, cursor position reports, etc.) that get
+// line-buffered into typed input.
+//
+// Unterminated sequences are also dropped, defensively — if a CSI starts
+// but does not terminate inside s, everything from the introducer onward
+// is discarded.
+func StripCSI(s string) string {
+	if !hasESC(s) {
+		return s
+	}
+	out := make([]byte, 0, len(s))
+	p := []byte(s)
+	i := 0
+	for i < len(p) {
+		if looksLikeCSI(p, i) {
+			end := findCSITerminator(p, i)
+			if end == -1 {
+				return string(out)
+			}
+			i = end + 1
+			continue
+		}
+		out = append(out, p[i])
+		i++
+	}
+	return string(out)
+}
+
+func hasESC(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1B {
+			return true
+		}
+	}
+	return false
+}
+
 // findCSITerminator returns the index of the byte that ends the ANSI CSI
 // sequence beginning at start (which must point at ESC). Returns -1 if the
 // buffer ends before the sequence terminates.

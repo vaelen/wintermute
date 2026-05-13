@@ -69,8 +69,14 @@ func RenderPromptOnly(defaultEnc Encoding) string {
 // prompt. Empty input accepts the default. A single-letter response
 // (case-insensitive) chooses that encoding. Anything else returns
 // the default and ok=false so the caller can re-prompt.
+//
+// The session input layer strips ANSI CSI sequences from incoming
+// lines already, but ParsePromptResponse is defensive: it strips CSI
+// itself so callers that bypass the session layer (tests, future
+// uses) still get correct behavior on inputs prefixed with a stray
+// terminal auto-response like \x1B[?1;2c.
 func ParsePromptResponse(line string, defaultEnc Encoding) (enc Encoding, ok bool) {
-	line = strings.TrimSpace(line)
+	line = strings.TrimSpace(StripCSI(line))
 	if line == "" {
 		return defaultEnc, true
 	}

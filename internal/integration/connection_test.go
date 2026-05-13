@@ -303,6 +303,27 @@ func TestPersistedPrefsAppliedOnLogin(t *testing.T) {
 	}
 }
 
+func TestDAResponsePrefixInFirstLine(t *testing.T) {
+	// Some terminals line-buffer their Device Attributes auto-response,
+	// so the first line that arrives at the server can start with the
+	// terminal's DA bytes. The session layer must strip those before
+	// passing the input to the prompt parser; otherwise the user has
+	// to type their selection twice.
+	srv := startServer(t)
+	out := driveClient(t, srv, []step{
+		// Note the leading DA response — this is what `nc` would send
+		// when the terminal's auto-response was line-buffered together
+		// with the user's keystroke.
+		{expect: "TERMINAL TYPE:", send: "\x1B[?1;2cu\r\n"},
+		// We should be at the username prompt; if the parser had
+		// rejected the line we'd see PLEASE CHOOSE ONE OF... instead.
+		{expect: "Username", send: ""},
+	})
+	if bytes.Contains(out, []byte("PLEASE CHOOSE ONE OF")) {
+		t.Errorf("DA-response-prefixed input was rejected; output:\n%s", out)
+	}
+}
+
 func TestPETSCIISelectionEmitsShiftOut(t *testing.T) {
 	srv := startServer(t)
 
