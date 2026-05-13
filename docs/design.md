@@ -131,14 +131,20 @@ If a softcode-flavored DSL is desired for nostalgia/UX reasons, it can be a thin
 
 ### Connection acceptance
 
-The engine accepts **both telnet and raw-TCP clients**. Telnet support is opt-in per-session: on a new connection, a brief detection window reads the first bytes. If they begin with IAC (`0xFF`), the session enters telnet mode and responds to option negotiation. Otherwise the session is treated as a raw byte stream — useful for hardware modems, telnet-incapable BBS clients, classic-computer dialers, and netcat-style debug sessions.
+Every connection is wrapped in a telnet layer immediately on accept. The server sends its initial IAC option offers (WILL ECHO, WILL SGA, DONT LINEMODE, DO TTYPE, DO NAWS, WILL CHARSET) right away, without waiting to see whether the client speaks telnet. Telnet clients respond with their own IAC and drop into character mode. Non-telnet clients (netcat, hardware modems, telnet-incapable BBS clients) ignore the offers — they render as a brief garble of ~18 bytes before the readable banner. The trade-off is intentional: BSD `telnet`, for example, does not send IAC until the server speaks first, so any "detect telnet by waiting for client IAC" strategy fails for it.
 
-Telnet options supported when enabled:
+The session tracks two facts independently:
+
+- **Negotiated** — flips true the first time *any* IAC command arrives from the client. Used to decide whether server-side echo is safe to enable by default and whether 8-bit-clean binary streams need their IAC bytes escaped. Exposed as `tc.Negotiated()`.
+- **Server echo** — controllable independently via `SetEcho`. Auto-enabled on the first negotiated transition (if `OfferEcho` was set), suppressed during password entry, and toggleable by user command in the future. Decoupled from `Negotiated()` so a non-telnet user could enable echo manually (with the understood double-echo trade-off).
+
+Telnet options supported when negotiated:
 
 - **CHARSET** — recorded as a hint; the engine's own encoding handshake (see below) is authoritative.
 - **NAWS** — window size; updates the session's tracked screen size dynamically.
 - **TTYPE** — terminal type; used as a hint during capability auto-detect.
-- **ECHO / SGA** — used to suppress local echo for password entry.
+- **ECHO / SGA / LINEMODE** — together establish character-at-a-time mode with server-side echo.
+- Unknown / unsupported options receive a clean `WONT` / `DONT` reply so the negotiation completes; new options can be added by extending the small switch in `handleWILL` / `handleDO` / `handleSB`.
 - **GMCP / MSDP** — out-of-band structured data for modern MUD clients (Mudlet, MUSHclient); accepted but unused until a later milestone.
 
 ### TLS
@@ -203,23 +209,33 @@ Per-encoding specifics:
 On every connection, before login:
 
 1. **Telnet peek.** Block up to 200 ms reading the initial bytes. If the first byte is `IAC (0xFF)`, mark telnet on and enter option negotiation (offer DO/WILL for TTYPE, NAWS, CHARSET, ECHO, SGA). Otherwise mark telnet off and return the buffered bytes to the session's input stream.
-2. **ANSI probe.** Send the Device Attributes query (`ESC [ c`) and wait up to 300 ms for a response of the form `ESC [ ? … c`. Match → ANSI-capable.
-3. **TTYPE hint.** If telnet TTYPE returned a recognizable value (`xterm`, `vt100`, `ansi`, `petscii`, `c64`, etc.), bias the auto-detect default.
-4. **Compute defaults**:
+2. **TTYPE / NAWS hints.** If telnet is on, drain any IAC subnegotiation responses already buffered; TTYPE and NAWS values are recorded if the client supplied them.
+3. **Press-enter banner + ANSI probe.** Send:
+   ```
+   WINTERMUTE
+   PRESS ENTER TO BEGIN.
+   ```
+   immediately followed by the ANSI Device Attributes query (`ESC [ c`). The banner doubles as a synchronization point — cooked-mode terminals line-buffer their stdin until the user presses Enter, so any auto-response the terminal generates in response to the probe arrives together with that keystroke. This sidesteps the timing race that would otherwise force a probe timeout.
+4. **Read raw input line.** Read bytes from the connection until either `\r` or `\n` (CRLF consumed as one terminator). The captured bytes may contain an ANSI Device Attributes response (`ESC [ ? <digits and semicolons> c`), nothing, or unrelated terminal auto-responses. Scan for the DA response: if found, mark the session ANSI-capable.
+5. **Compute defaults.**
    - encoding: TTYPE-derived if obvious; else UTF-8 if ANSI-capable; else ASCII.
    - width / height: NAWS if reported; else 80×24, except PETSCII/ASCII default to 40×24.
    - telnet: as detected in step 1.
-   - if the connecting account has saved preferences from a prior session, prefer those over the auto-detected defaults.
-5. **Send Shift Out.** Emit PETSCII control code `0x0E` (Shift Out — "switch to mixed-case mode") immediately, before any rendered text. On PETSCII clients (C64 / VICE / similar) this switches them into mixed-case mode so subsequent ASCII letters render as readable text. On modern terminals `0x0E` is either ignored or interpreted as the (mostly moribund) NRCS shift, which in practice is a no-op. This single byte resolves the otherwise-unsolvable "the pre-selection prompt has to be readable on a default-mode C64" problem.
-6. **Confirmation prompt.** Send a mixed-case prompt asking the user to confirm or override:
+   - If the connecting account has saved preferences from a prior session, prefer those over the auto-detected defaults (applied after login).
+6. **Confirmation prompt.** Send an **all-uppercase** prompt asking the user to confirm or override:
 
    ```
-   Terminal Type: U - Unicode [modern, default], D - DOS [cp437],
-   M - Mac [classic], L - Latin-1, P - PETSCII, A - ASCII:
+   WELCOME TO WINTERMUTE.
+
+   TERMINAL TYPE: U - UNICODE [MODERN, DEFAULT], D - DOS [CP437],
+   M - MAC [CLASSIC], L - LATIN-1, P - PETSCII, A - ASCII:
    ```
 
-   The `[default]` marker attaches to whichever option was auto-detected (e.g. `P - PETSCII [default]` if the auto-detect chose PETSCII); pressing Enter accepts that choice. Mixed-case is intentional: after the Shift Out, PETSCII clients render uppercase ASCII positions as lowercase PETSCII letters and vice versa, so the prompt appears case-swapped but readable. All other encodings render mixed case normally.
-7. **Apply selection.** Force width to 40 columns for PETSCII and ASCII unless the user later overrides it. Rebuild the session's `Encoder` for the chosen encoding.
+   The `[DEFAULT]` marker attaches to whichever option was auto-detected (e.g. `P - PETSCII [DEFAULT]` if the auto-detect chose PETSCII); pressing Enter accepts that choice. The prompt uses only characters whose byte positions render correctly on a PETSCII client in its **default (uppercase / graphics) mode** — uppercase letters `A`–`Z`, digits, space, and the punctuation `: , - ( ) [ ]` — so no Shift Out is needed yet.
+7. **Apply selection.**
+   - Rebuild the session's `Encoder` for the chosen encoding.
+   - **If PETSCII was chosen**, emit PETSCII control code `0x0E` (Shift Out) so the C64 switches into mixed-case mode for all subsequent output. The engine emits Shift Out **every time the session transitions into PETSCII** — at the end of this prompt, after `terminal encoding petscii` post-login, or after a saved-prefs override loads PETSCII. Non-PETSCII encodings never see Shift Out from the engine.
+   - Force width to 40 columns for PETSCII and ASCII unless the user later overrides it.
 
 After login, the user can view or change any axis via a `terminal` command; preferences are persisted per-account and used as the auto-detect bias on next login.
 

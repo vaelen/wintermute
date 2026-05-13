@@ -16,12 +16,12 @@ None. This is the foundation milestone.
 - **Per-connection capability detection** before login:
   - **Telnet detection** — peek the first bytes; enter telnet mode iff IAC (`0xFF`) appears. Telnet support is a per-session flag.
   - **Telnet option negotiation** (when telnet is enabled) — CHARSET (recorded as a hint), NAWS, TTYPE, ECHO/SGA. Anything else is gracefully rejected.
-  - **ANSI probe** — send Device Attributes query (`ESC [ c`); wait up to 300 ms for a matching response.
+  - **Press-enter + ANSI probe** — send a `WINTERMUTE` banner + `PRESS ENTER TO BEGIN.` line + ANSI Device Attributes query (`ESC [ c`); read raw bytes until the user's Enter and scan the captured line for an `ESC [ ? … c` response. Cooked-mode terminals line-buffer their auto-response together with the user's Enter, so the response (if any) arrives in the same line.
   - **TTYPE hint** — use the telnet TTYPE response as a bias.
   - **Auto-detect defaults** — encoding, width, height, color.
-  - **Send Shift Out** (`0x0E`) on every connect, before the prompt, so PETSCII clients are in mixed-case mode for the prompt itself. Modern terminals ignore it.
-  - **Confirmation prompt** before login, mixed-case, with the auto-detected option flagged `[default]`. On PETSCII the prompt appears case-swapped (uppercase ↔ lowercase) but readable.
-  - **Apply selection** — force 40-column width for PETSCII and ASCII unless overridden. Rebuild the session's `Encoder`.
+  - **All-uppercase confirmation prompt** before login, with the auto-detected option flagged `[DEFAULT]`. Uppercase-only is what makes the prompt render natively on a PETSCII client in its default (uppercase / graphics) mode — no Shift Out is needed yet.
+  - **Apply selection** — rebuild the session's `Encoder`; force 40-column width for PETSCII and ASCII unless overridden.
+  - **Emit Shift Out (`0x0E`)** only when the session is transitioning **into** PETSCII (initial confirmation, `terminal encoding petscii` post-login, or a saved-prefs override that resolves to PETSCII). The byte is never sent for non-PETSCII encodings.
 - **Six supported encodings** with internal representation always UTF-8 + ANSI:
   - **UTF-8** — pass-through.
   - **CP437** — `golang.org/x/text/encoding` transcode; preserve ANSI; map UTF-8 box-drawing to CP437 box-drawing (single- and double-line covered natively); shade/semi-graphics 1:1.
@@ -126,18 +126,28 @@ func (s *Session) Close() error
 
 ```
 TCP accept
-  └─> peek up to 200 ms
-        ├─ first byte == IAC (0xFF) → telnet on; run option negotiation
-        └─ otherwise               → telnet off; return bytes to input
-  └─> ANSI probe (ESC[c, 300 ms timeout)
-  └─> send 0x0E (Shift Out)              # PETSCII clients → mixed-case mode;
-                                         # other terminals ignore it
-  └─> compute auto-detect defaults from (telnet caps + TTYPE + ANSI probe)
-  └─> render mixed-case confirmation prompt with detected default flagged
+  └─> wrap in telnet.Conn; send initial offers
+        (WILL ECHO, WILL SGA, DONT LINEMODE, DO TTYPE, DO NAWS, WILL CHARSET)
+  └─> brief settle (~200 ms); ProcessBuffered drains any IAC responses
+        - if any IAC arrived, tc.Negotiated() == true; serverEcho auto-on
+  └─> send "WINTERMUTE\r\n\r\nPRESS ENTER TO BEGIN.\r\n" + ESC[c (ANSI probe)
+  └─> read raw bytes until \r or \n; scan for ESC[?...c
+        - DA present → hints.ANSICapable = true
+        - absent     → hints.ANSICapable stays false
+        - hints.Telnet = tc.Negotiated()
+        - hints.TermType / NAWS pulled from tc.State()
+  └─> if hints.Telnet is FALSE:
+        - ask "ENABLE ECHO (Y/[N]): "
+        - Y → SetEcho(false) (server takes over echo)
+        - N (or empty) → leave serverEcho off
+  └─> compute auto-detect defaults from (telnet status + TTYPE + ANSI hint)
+  └─> open prompt encoder (ASCII; the prompt is uppercase-only ASCII)
+  └─> render uppercase confirmation prompt with detected default flagged
   └─> read user choice (single char + Enter, or Enter for default)
   └─> finalize Capabilities; rebuild Encoder
-  └─> login prompt → auth → load saved prefs; if they differ from the user's
-      pre-login choice, re-encode the next render → MOTD → void room
+  └─> if chosen encoding == PETSCII, send 0x0E (Shift Out) now
+  └─> login prompt → auth → load saved prefs; if they differ AND resolve to
+      PETSCII, send 0x0E before the re-render → MOTD → void room
 ```
 
 ### Per-encoding output pipeline
@@ -178,27 +188,27 @@ Two general rules at step 4:
 
 ### Confirmation prompt
 
-The prompt is sent after the connect-time `0x0E` Shift Out, so PETSCII clients are already in mixed-case mode. Concrete text:
+The prompt is **all uppercase**, constrained to characters whose byte positions render the same in every supported encoding **and** in PETSCII's default (uppercase / graphics) mode. Concrete text:
 
 ```
-Welcome to Wintermute.
+WELCOME TO WINTERMUTE.
 
-Terminal Type: U - Unicode [modern, default], D - DOS [cp437],
-M - Mac [classic], L - Latin-1, P - PETSCII, A - ASCII:
+TERMINAL TYPE: U - UNICODE [MODERN, DEFAULT], D - DOS [CP437],
+M - MAC [CLASSIC], L - LATIN-1, P - PETSCII, A - ASCII:
 ```
 
-The `[default]` marker attaches to whichever option auto-detect chose. Examples for the same prompt with different detected defaults:
+The `[DEFAULT]` marker attaches to whichever option auto-detect chose. Examples for the same prompt with different detected defaults:
 
-- ANSI/UTF-8 client → `U - Unicode [modern, default]`
-- DOS-style TTYPE   → `D - DOS [cp437, default]`
-- PETSCII TTYPE     → `P - PETSCII [default]`
-- nothing detected  → `A - ASCII [default]`
+- ANSI/UTF-8 client → `U - UNICODE [MODERN, DEFAULT]`
+- DOS-style TTYPE   → `D - DOS [CP437, DEFAULT]`
+- PETSCII TTYPE     → `P - PETSCII [DEFAULT]`
+- nothing detected  → `A - ASCII [DEFAULT]`
 
 Pressing Enter accepts the default. Single-letter responses (case-insensitive) override.
 
-On PETSCII (after Shift Out, in mixed-case mode), the bytes `T`, `e`, `r`, `m`, ... render as a case-swapped version of "Terminal" — uppercase ASCII bytes display as lowercase PETSCII letters and vice versa. It looks like `tERMINAL tYPE: u - uNICODE ...`. Awkward but unambiguously readable, which is the goal. Other encodings render mixed case normally.
+The prompt encoder is always ASCII regardless of what auto-detect chose. PETSCII clients in default mode render uppercase ASCII bytes as PETSCII uppercase letters; the punctuation set used (`:`, `,`, `-`, `(`, `)`, `[`, `]`, space, digits) is identical across all six encodings. So no Shift Out has been emitted yet, and the prompt is unambiguously readable on every kind of client we support.
 
-After selection, the same prompt is **not** redisplayed — the engine moves directly to the login prompt, which is the first thing rendered using the user's chosen encoding.
+After selection, the engine rebuilds the session encoder for the chosen encoding. **If the chosen encoding is PETSCII, `0x0E` (Shift Out) is emitted before any further output** so the C64 enters mixed-case mode and subsequent text — including the login prompt — renders correctly with PETSCII's case-swap.
 
 ## Schema changes
 
@@ -273,9 +283,9 @@ CREATE TABLE IF NOT EXISTS schema_version (
     - Double-line normalization table (`═` → `─`, etc.) used by all non-(UTF-8|CP437) encoders.
     - **DEC line-drawing emitter** with persistent `in_graphics` state. Single function that takes a UTF-8 run and a target encoding and emits the DEC-bracketed byte stream, never bracketing a single character at a time when adjacent chars are also line-drawing. Tested independently with golden outputs.
     - PETSCII tables: UTF-8 ↔ PETSCII shifted/unshifted, ANSI SGR → PETSCII color control bytes, PETSCII line graphics, PETSCII semi-graphics where they exist.
-    - `DetectCapabilities(ctx, conn, telnetState)`: runs the ANSI probe and combines all hints into a `Capabilities` default — including the encoding-driven defaults for `Color` and `DECLineDrawing`.
+    - `HasDAResponse([]byte) bool` and the ANSI probe byte sequence (`ANSIProbe`); the session layer drives the press-enter probe and feeds the scanned-out hint into `AutoDetect`.
     - `ConfirmPrompt(ctx, session, defaults)` — renders the prompt, parses the response, returns a confirmed `Capabilities`.
-11. Wire it all together in the connection acceptor: telnet peek → option negotiation if applicable → ANSI probe → **send `0x0E` Shift Out** → compute defaults → mixed-case confirmation prompt → finalize. Saved per-account prefs are loaded *after* login and applied to subsequent renders (the connect-time prompt always uses live auto-detect, since the user hasn't identified themselves yet).
+11. Wire it all together in the connection acceptor: telnet peek → option negotiation if applicable → press-enter banner + ANSI Device Attributes probe sent in one write → read raw input until \r or \n → scan the captured bytes for an `ESC [ ? … c` response to set the ANSI hint → compute defaults → render uppercase confirmation prompt via an ASCII prompt encoder → read selection → reconfigure the session encoder → **if chosen encoding is PETSCII, write `0x0E` Shift Out** → continue with login. Saved per-account prefs are loaded *after* login and applied to subsequent renders; if the applied encoding is PETSCII (and the pre-login choice wasn't), another `0x0E` is emitted before re-rendering.
 
 ### Login and session lifecycle
 
@@ -295,7 +305,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 15. Unit tests:
     - IAC parser: WILL/WONT/DO/DONT handshakes; subnegotiation framing; CHARSET parse; NAWS parse; TTYPE fetch.
     - Telnet peek: classifies IAC vs non-IAC correctly; returns buffered bytes intact for non-telnet.
-    - ANSI probe: receives matching reply; times out cleanly on no reply.
+    - DA response detection: `HasDAResponse` finds a complete `ESC [ ? … c` anywhere in a buffer; rejects malformed prefixes; ignores non-digit/semicolon bytes between `?` and `c`.
     - Each encoder's `EncodeOut`/`DecodeIn` round-trip for a representative string.
     - PETSCII: shifted-mode handling, ANSI SGR → PETSCII color mapping, box-drawing mapping, shade-block downgrade to space.
     - ASCII: ANSI stripping, box-drawing approximation, shade → space, non-drawing high-byte → `?`.
@@ -331,7 +341,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
    - CP437: native CP437 box-drawing (single and double), native shade blocks (0xB0/0xB1/0xB2/0xDB), ANSI color intact.
    - ISO-8859-1 / MacRoman, DEC on (default): single-line border rendered via DEC Special Graphics (`ESC ( 0` ... `ESC ( B`), double-line border normalized to single-line then rendered via DEC, shade blocks replaced with spaces, ANSI color intact.
    - ISO-8859-1 / MacRoman, DEC off: borders rendered as `-`/`|`/`+`, shade blocks as spaces.
-   - PETSCII: mixed-case mode active (the connect-time `0x0E`), single- and double-line borders both rendered via native PETSCII line graphics, shade blocks rendered via native PETSCII semi-graphics or spaces where there is no equivalent, PETSCII color codes in place of ANSI SGR.
+   - PETSCII: the engine emits `0x0E` (Shift Out) at the moment PETSCII is selected, putting the C64 into mixed-case mode for the rest of the session; single- and double-line borders both rendered via native PETSCII line graphics; shade blocks rendered via native PETSCII semi-graphics or spaces where there is no equivalent; PETSCII color codes in place of ANSI SGR. On selections that do **not** choose PETSCII, the engine never emits `0x0E`.
    - ASCII: no escape sequences in the byte stream, no high-bytes, borders rendered as `-`/`|`/`+`, shade blocks as spaces.
 4. NAWS during a telnet session updates `session.caps.Width/Height` and subsequent output wraps to the new width.
 5. A logged-in player running `terminal encoding ascii` sees subsequent output stripped of ANSI; running `terminal encoding utf8` restores full output. `terminal lines vt100` enables DEC line drawing regardless of encoding (verified by inspecting wire bytes for the `ESC ( 0` / `ESC ( B` brackets). All such changes persist across logout/login.
@@ -341,11 +351,11 @@ CREATE TABLE IF NOT EXISTS schema_version (
 
 ## Risks & open questions
 
-- **PETSCII pre-selection rendering (decided).** Send `0x0E` Shift Out on every connect, before the prompt. Modern terminals ignore it (or interpret it as the moribund NRCS shift, which is a no-op in practice). PETSCII clients enter mixed-case mode, so the mixed-case prompt is readable on them (with cases swapped). This is the simplest solution and avoids a separate PETSCII-detection probe. Watch for client-specific oddities during implementation, but do not pre-emptively add complexity.
+- **PETSCII pre-selection rendering (decided).** Use an **all-uppercase ASCII** prompt during the capability handshake. Uppercase ASCII letters and the punctuation set we use render natively on a PETSCII client in its default (uppercase / graphics) mode, so no protocol acrobatics are needed before the user has picked. `0x0E` (Shift Out) is then emitted *only* at the moment the session transitions into PETSCII: at the end of the prompt if PETSCII was chosen, on `terminal encoding petscii` post-login, or after a saved-prefs override that resolves to PETSCII. Non-PETSCII sessions never see Shift Out from the engine, which means modern clients get a clean byte stream from the start (no possibly-confusing `0x0E` on connect).
 - **DEC graphics designator choice (decided).** Use `ESC ( 0` (designate G0 → DEC Special Graphics) and `ESC ( B` (designate G0 → ASCII) rather than the alternative SO/SI mechanism. SO is already in use as the connect-time PETSCII switch; mixing it with line-drawing toggles invites confusion and would behave differently across clients. The `ESC ( 0` / `ESC ( B` pair is the canonical VT100 idiom for this use, is unambiguous, and does not conflict with the PETSCII path.
 - **DEC graphics trailing state (decided).** The encoder always emits a closing `ESC ( B` on session shutdown if it would otherwise leave the terminal in graphics mode. This falls out naturally of the "emit only at transitions" rule applied at close.
 - **Preference loading order (decided).** The connect-time confirmation prompt always uses live auto-detect, because the user hasn't authenticated yet. After login, if the account has saved preferences that differ from what the user picked at the prompt, apply them silently and re-render the MOTD. Players can override at any time with the `terminal` command. This keeps the prompt simple and avoids ordering the encoding prompt after the username.
-- **ANSI probe leakage.** If the user is on a terminal that does *not* answer `ESC[c`, the bytes we sent (`ESC [ c`) may render visibly as a stray escape sequence start. PETSCII clients will treat `0x1B` as an unsupported character. Mitigation: only send the ANSI probe when telnet TTYPE *didn't* already tell us the answer, and use a tight (~300 ms) timeout. On PETSCII clients the user just sees a tiny garble before the prompt — acceptable.
+- **ANSI probe leakage on non-ANSI terminals.** A terminal that doesn't recognize `ESC [ c` renders the three bytes as a stray escape-sequence start. On PETSCII clients in default mode this is also harmless garble (PETSCII just shows the bytes' glyphs and moves on). Because the probe is sent in the same write as the human-readable `PRESS ENTER TO BEGIN.`, the artifact appears on the *same line* and the next thing the user does is press Enter, so it scrolls away before they read the encoding prompt.
 - **Telnet ECHO during password entry on non-telnet sessions.** Without telnet, we can't suppress local echo. The password is still hashed server-side but is visible on the user's screen. Document this in the manpage; recommend telnet/TLS for production.
 - **40-column wrapping.** The MOTD and login text need to wrap at the chosen width. Some content is internal and not directly under the user's control. Wrap on whitespace; truncate long unbroken tokens with `…` (or `...` in ASCII).
 - **Argon2id parameters.** Pick defaults (e.g. `memory=64MB, time=3, parallelism=2`); document; revisit before public deployment.

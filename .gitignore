@@ -27,6 +27,8 @@ coverage.html
 .env.*
 *.local.toml
 wintermute.local.toml
+# User's runtime config; copy wintermute.example.toml to wintermute.toml.
+wintermute.toml
 
 # Runtime data — keep these *out* of the repo
 *.db
