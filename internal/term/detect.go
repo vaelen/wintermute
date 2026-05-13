@@ -110,7 +110,8 @@ func findDAResponseEnd(buf []byte) int {
 				break
 			}
 		}
-		return -1
+		// This ESC[? prefix didn't lead to a valid response; keep scanning
+		// in case a real one sits further along in the buffer.
 	}
 	return -1
 }

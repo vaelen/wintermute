@@ -118,6 +118,9 @@ func TestFindDAResponseEnd(t *testing.T) {
 		{"\x1B[?incomplete", -1}, // non-digit char after ? breaks the match
 		{"\x1B[c", -1},           // missing '?'
 		{"", -1},
+		// A malformed ESC[? prefix should not prevent recognition of a
+		// valid DA response that appears later in the buffer.
+		{"\x1B[?X\x1B[?1;2c", 10},
 	}
 	for _, c := range cases {
 		got := findDAResponseEnd([]byte(c.buf))
