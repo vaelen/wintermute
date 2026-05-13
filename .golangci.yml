@@ -1,0 +1,35 @@
+# Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
+# SPDX-License-Identifier: MIT
+
+run:
+  timeout: 3m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - gofmt
+    - goimports
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - unused
+
+linters-settings:
+  revive:
+    rules:
+      - name: var-naming
+      - name: error-return
+      - name: error-naming
+      - name: receiver-naming
+      - name: package-comments
+      - name: exported
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - revive
