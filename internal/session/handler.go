@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/vaelen/wintermute/internal/auth"
@@ -102,6 +103,31 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	hints.TermType = st.TermType
 	hints.NAWSWidth = st.Width
 	hints.NAWSHeight = st.Height
+
+	// For non-telnet sessions, the engine cannot tell whether the user's
+	// terminal is doing local echo. Ask them. Default is No, which matches
+	// the most common case (a cooked-mode `nc localhost 2323` with local
+	// echo already on at the terminal). Answering Yes makes the server
+	// take over echo — useful when the user has explicitly disabled local
+	// echo on their end. Telnet sessions skip this step entirely because
+	// negotiation already established server-side echo.
+	if !hints.Telnet {
+		s.enc = term.Open(term.Capabilities{Encoding: term.EncodingASCII})
+		if err := s.writeString("LOCAL ECHO (Y/[N]): "); err != nil {
+			return
+		}
+		resp, err := s.readLine()
+		if err != nil && resp == "" {
+			s.log.Debug("local echo prompt read failed", "err", err)
+			return
+		}
+		resp = strings.TrimSpace(resp)
+		if len(resp) > 0 && (resp[0] == 'Y' || resp[0] == 'y') {
+			// "Yes, my terminal has local echo off — please echo for me."
+			_ = s.setEcho(false)
+			_ = s.writeString("\r\n")
+		}
+	}
 
 	defaults := term.AutoDetect(hints)
 

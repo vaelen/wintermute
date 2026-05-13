@@ -136,6 +136,10 @@ TCP accept
         - absent     → hints.ANSICapable stays false
         - hints.Telnet = tc.Negotiated()
         - hints.TermType / NAWS pulled from tc.State()
+  └─> if hints.Telnet is FALSE:
+        - ask "LOCAL ECHO (Y/[N]): "
+        - Y → SetEcho(false) (server takes over echo)
+        - N (or empty) → leave serverEcho off
   └─> compute auto-detect defaults from (telnet status + TTYPE + ANSI hint)
   └─> open prompt encoder (ASCII; the prompt is uppercase-only ASCII)
   └─> render uppercase confirmation prompt with detected default flagged

@@ -160,6 +160,7 @@ func TestRawTCPFullFlow(t *testing.T) {
 	out := driveClient(t, srv, []step{
 		// 1. Press-enter banner appears with the ANSI probe.
 		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
+		{expect: "LOCAL ECHO", send: "\r\n"},
 		// 2. Encoding prompt; we override the auto-detected default
 		//    (ASCII, since this raw-TCP client didn't respond to the probe)
 		//    to UTF-8 via 'u'.
@@ -226,6 +227,7 @@ func TestMOTDCommand(t *testing.T) {
 	srv := startServer(t)
 	out := driveClient(t, srv, []step{
 		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
+		{expect: "LOCAL ECHO", send: "\r\n"},
 		{expect: "TERMINAL TYPE:", send: "u\r\n"},
 		{expect: "Username", send: "new\r\n"},
 		{expect: "Choose a username", send: "eve\r\n"},
@@ -255,6 +257,7 @@ func TestRawTCPInvalidLogin(t *testing.T) {
 
 	out := driveClient(t, srv, []step{
 		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
+		{expect: "LOCAL ECHO", send: "\r\n"},
 		{expect: "TERMINAL TYPE:", send: "u\r\n"},
 		{expect: "Username", send: "bob\r\n"},
 		{expect: "Password", send: "wrong\r\n"},
@@ -290,6 +293,7 @@ func TestPersistedPrefsAppliedOnLogin(t *testing.T) {
 	// applied silently after login.
 	out := driveClient(t, srv, []step{
 		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
+		{expect: "LOCAL ECHO", send: "\r\n"},
 		{expect: "TERMINAL TYPE:", send: "u\r\n"},
 		{expect: "Username", send: "carol\r\n"},
 		{expect: "Password", send: "passpasspass\r\n"},
@@ -306,6 +310,48 @@ func TestPersistedPrefsAppliedOnLogin(t *testing.T) {
 	}
 }
 
+func TestLocalEchoPromptDefaultsToNo(t *testing.T) {
+	srv := startServer(t)
+	out := driveClient(t, srv, []step{
+		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
+		// Accept the LOCAL ECHO default (N) by pressing Enter.
+		{expect: "LOCAL ECHO (Y/[N])", send: "\r\n"},
+		// We should now be at the encoding prompt.
+		{expect: "TERMINAL TYPE:", send: "u\r\n"},
+		{expect: "Username", send: ""},
+	})
+	if !bytes.Contains(out, []byte("LOCAL ECHO (Y/[N]):")) {
+		t.Errorf("expected the LOCAL ECHO prompt on a non-telnet session; got:\n%s", out)
+	}
+}
+
+func TestLocalEchoPromptAcceptingYesEnablesServerEcho(t *testing.T) {
+	srv := startServer(t)
+	out := driveClient(t, srv, []step{
+		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
+		// Answer Y — server should take over echo from here.
+		{expect: "LOCAL ECHO (Y/[N])", send: "y\r\n"},
+		// Encoding prompt: send a single 'u' (no CR yet); the server's
+		// echo should bounce a 'u' back to us before we send Enter.
+		{expect: "TERMINAL TYPE:", send: "u"},
+		// Wait for the echoed 'u' to land.
+		{expect: "u", send: "\r\n"},
+		{expect: "Username", send: ""},
+	})
+	// The byte stream must contain the echoed 'u' AFTER the encoding
+	// prompt's trailing ": " (we sent only 'u', no \r, so the only way
+	// it appears between the prompt and the next server output is via
+	// server-side echo).
+	promptEnd := bytes.Index(out, []byte("ASCII [DEFAULT]: "))
+	if promptEnd == -1 {
+		t.Fatalf("encoding prompt not found:\n%s", out)
+	}
+	tail := out[promptEnd+len("ASCII [DEFAULT]: "):]
+	if !bytes.HasPrefix(tail, []byte("u")) {
+		t.Errorf("expected echoed 'u' immediately after the encoding prompt; tail:\n% X", tail[:min(32, len(tail))])
+	}
+}
+
 func TestPressEnterDetectsANSI(t *testing.T) {
 	// The press-enter banner doubles as an ANSI Device Attributes probe.
 	// A cooked-mode terminal will line-buffer its DA auto-response with
@@ -316,6 +362,7 @@ func TestPressEnterDetectsANSI(t *testing.T) {
 	srv := startServer(t)
 	out := driveClient(t, srv, []step{
 		{expect: "PRESS ENTER TO BEGIN", send: "\x1B[?1;2c\r\n"},
+		{expect: "LOCAL ECHO", send: "\r\n"},
 		// At the encoding prompt; pressing Enter should accept the
 		// (now Unicode) default. Username prompt follows.
 		{expect: "TERMINAL TYPE:", send: "\r\n"},
@@ -332,6 +379,7 @@ func TestPressEnterWithoutDAStaysASCIIDefault(t *testing.T) {
 	srv := startServer(t)
 	out := driveClient(t, srv, []step{
 		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
+		{expect: "LOCAL ECHO", send: "\r\n"},
 		{expect: "TERMINAL TYPE:", send: "\r\n"},
 		{expect: "Username", send: ""},
 	})
@@ -345,6 +393,7 @@ func TestPETSCIISelectionEmitsShiftOut(t *testing.T) {
 
 	out := driveClient(t, srv, []step{
 		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
+		{expect: "LOCAL ECHO", send: "\r\n"},
 		// Wait for the uppercase prompt, then select PETSCII.
 		{expect: "TERMINAL TYPE:", send: "p\r\n"},
 		// Once Shift Out (0x0E) appears, the step is satisfied. We do not
@@ -383,6 +432,7 @@ func TestPETSCIIPersistedPrefsEmitShiftOut(t *testing.T) {
 
 	out := driveClient(t, srv, []step{
 		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
+		{expect: "LOCAL ECHO", send: "\r\n"},
 		{expect: "TERMINAL TYPE:", send: "u\r\n"},
 		{expect: "Username", send: "dave\r\n"},
 		{expect: "Password", send: "passpasspass\r\n"},
