@@ -6,7 +6,6 @@ package telnet
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"net"
 	"sync"
 	"testing"
@@ -21,56 +20,92 @@ func pipeConn(t *testing.T) (server, client net.Conn) {
 	return net.Pipe()
 }
 
-func TestDetectIAC(t *testing.T) {
+func TestNegotiatedStartsFalse(t *testing.T) {
 	s, c := pipeConn(t)
 	defer s.Close()
 	defer c.Close()
-	go func() {
-		_, _ = c.Write([]byte{cmdIAC, cmdDO, optEcho})
-	}()
+	_ = newCaptureClient(t, c) // drain initial offers
 	br := bufio.NewReader(s)
-	ok, err := Detect(context.Background(), s, br, 200*time.Millisecond)
+	conn, err := Wrap(s, br, DefaultOptions())
 	if err != nil {
-		t.Fatalf("Detect: %v", err)
+		t.Fatalf("Wrap: %v", err)
 	}
-	if !ok {
-		t.Errorf("Detect should report telnet")
+	if conn.Negotiated() {
+		t.Errorf("Negotiated() should be false before any IAC arrives")
 	}
 }
 
-func TestDetectNoIAC(t *testing.T) {
+func TestNegotiatedFlipsOnIACCommand(t *testing.T) {
 	s, c := pipeConn(t)
 	defer s.Close()
 	defer c.Close()
+	_ = newCaptureClient(t, c)
+	br := bufio.NewReader(s)
+	conn, err := Wrap(s, br, Options{}) // no offers — keep wire focused on input
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+
+	// Client speaks telnet: sends IAC WONT some-unknown-option, then data.
+	go func() {
+		_, _ = c.Write([]byte{cmdIAC, cmdWONT, 99, 'X'})
+	}()
+	buf := make([]byte, 4)
+	_, err = conn.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !conn.Negotiated() {
+		t.Errorf("Negotiated() should flip true after an IAC command")
+	}
+}
+
+func TestNegotiatedStaysFalseForRawTraffic(t *testing.T) {
+	s, c := pipeConn(t)
+	defer s.Close()
+	defer c.Close()
+	_ = newCaptureClient(t, c)
+	br := bufio.NewReader(s)
+	conn, err := Wrap(s, br, Options{})
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+
+	// Plain data, no IAC commands.
 	go func() {
 		_, _ = c.Write([]byte("hello\r\n"))
 	}()
-	br := bufio.NewReader(s)
-	ok, err := Detect(context.Background(), s, br, 200*time.Millisecond)
+	buf := make([]byte, 16)
+	_, err = conn.Read(buf)
 	if err != nil {
-		t.Fatalf("Detect: %v", err)
+		t.Fatalf("Read: %v", err)
 	}
-	if ok {
-		t.Errorf("Detect should not report telnet for raw bytes")
-	}
-	// Bytes should still be visible to subsequent reads.
-	peek, _ := br.Peek(5)
-	if string(peek) != "hello" {
-		t.Errorf("after Detect, peek = %q, want hello", peek)
+	if conn.Negotiated() {
+		t.Errorf("Negotiated() should stay false on raw data")
 	}
 }
 
-func TestDetectTimeout(t *testing.T) {
+func TestDoubledIACDoesNotFlipNegotiated(t *testing.T) {
+	// An IAC IAC sequence is a literal 0xFF data byte — not a telnet command.
 	s, c := pipeConn(t)
 	defer s.Close()
 	defer c.Close()
+	_ = newCaptureClient(t, c)
 	br := bufio.NewReader(s)
-	ok, err := Detect(context.Background(), s, br, 50*time.Millisecond)
+	conn, err := Wrap(s, br, Options{})
 	if err != nil {
-		t.Fatalf("Detect: %v", err)
+		t.Fatalf("Wrap: %v", err)
 	}
-	if ok {
-		t.Errorf("Detect should report not-telnet on timeout")
+	go func() {
+		_, _ = c.Write([]byte{'A', cmdIAC, cmdIAC, 'B', '\n'})
+	}()
+	buf := make([]byte, 8)
+	_, err = conn.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if conn.Negotiated() {
+		t.Errorf("Negotiated() should not flip on doubled IAC (literal data)")
 	}
 }
 
@@ -339,7 +374,13 @@ func TestEchoesReceivedDataBytes(t *testing.T) {
 		}
 	}()
 
-	// Client types "Hi" then Enter then a backspace, all in one write.
+	// Real telnet client first acknowledges our WILL ECHO with a DO ECHO
+	// (any IAC command is enough to flip Negotiated()). Because OfferEcho
+	// is set, that flip also auto-enables server echoing. Then the client
+	// sends the user's keystrokes: "Hi" + Enter + Backspace.
+	if _, err := c.Write([]byte{cmdIAC, cmdDO, optEcho}); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
 	if _, err := c.Write([]byte{'H', 'i', '\r', 0x08}); err != nil {
 		t.Fatalf("client write: %v", err)
 	}
@@ -349,6 +390,82 @@ func TestEchoesReceivedDataBytes(t *testing.T) {
 	wantSubseq := []byte{cmdIAC, cmdWILL, optEcho, 'H', 'i', '\r', '\n', '\b', ' ', '\b'}
 	if !cc.waitContains(t, wantSubseq, 1*time.Second) {
 		t.Errorf("expected echo subsequence in capture; got % X", cc.snapshot())
+	}
+}
+
+func TestSetEchoWorksWithoutNegotiation(t *testing.T) {
+	// A user could enable echo from a `terminal echo on` command on a
+	// non-telnet (nc) session. SetEcho(false) must enable echo regardless
+	// of whether any IAC has been received.
+	s, c := pipeConn(t)
+	defer s.Close()
+	defer c.Close()
+	cc := newCaptureClient(t, c)
+
+	br := bufio.NewReader(s)
+	conn, err := Wrap(s, br, Options{OfferEcho: true})
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	go func() {
+		buf := make([]byte, 16)
+		for {
+			if _, err := conn.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	if conn.Negotiated() {
+		t.Fatalf("test precondition: Negotiated() should be false")
+	}
+	if err := conn.SetEcho(false); err != nil {
+		t.Fatalf("SetEcho(false): %v", err)
+	}
+	if _, err := c.Write([]byte("ok")); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	if !cc.waitContains(t, []byte{'o', 'k'}, 500*time.Millisecond) {
+		t.Errorf("expected echoed 'ok' on the wire even without negotiation; got % X", cc.snapshot())
+	}
+}
+
+func TestNoEchoBeforeNegotiation(t *testing.T) {
+	// A non-telnet client (no IAC responses) should not see any server
+	// echo of its data bytes — the terminal at the other end is almost
+	// certainly doing its own local echo.
+	s, c := pipeConn(t)
+	defer s.Close()
+	defer c.Close()
+	cc := newCaptureClient(t, c)
+
+	br := bufio.NewReader(s)
+	conn, err := Wrap(s, br, Options{OfferEcho: true})
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	go func() {
+		buf := make([]byte, 16)
+		for {
+			if _, err := conn.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Wait for the initial WILL ECHO offer so we don't mistakenly count it
+	// as an "echo of received data."
+	if !cc.waitContains(t, []byte{cmdIAC, cmdWILL, optEcho}, 500*time.Millisecond) {
+		t.Fatal("initial WILL ECHO never arrived on the wire")
+	}
+	preLen := len(cc.snapshot())
+	if _, err := c.Write([]byte("hi\n")); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	post := cc.snapshot()
+	if len(post) != preLen {
+		t.Errorf("expected no echo before negotiation; server wrote % X", post[preLen:])
 	}
 }
 

@@ -131,14 +131,20 @@ If a softcode-flavored DSL is desired for nostalgia/UX reasons, it can be a thin
 
 ### Connection acceptance
 
-The engine accepts **both telnet and raw-TCP clients**. Telnet support is opt-in per-session: on a new connection, a brief detection window reads the first bytes. If they begin with IAC (`0xFF`), the session enters telnet mode and responds to option negotiation. Otherwise the session is treated as a raw byte stream — useful for hardware modems, telnet-incapable BBS clients, classic-computer dialers, and netcat-style debug sessions.
+Every connection is wrapped in a telnet layer immediately on accept. The server sends its initial IAC option offers (WILL ECHO, WILL SGA, DONT LINEMODE, DO TTYPE, DO NAWS, WILL CHARSET) right away, without waiting to see whether the client speaks telnet. Telnet clients respond with their own IAC and drop into character mode. Non-telnet clients (netcat, hardware modems, telnet-incapable BBS clients) ignore the offers — they render as a brief garble of ~18 bytes before the readable banner. The trade-off is intentional: BSD `telnet`, for example, does not send IAC until the server speaks first, so any "detect telnet by waiting for client IAC" strategy fails for it.
 
-Telnet options supported when enabled:
+The session tracks two facts independently:
+
+- **Negotiated** — flips true the first time *any* IAC command arrives from the client. Used to decide whether server-side echo is safe to enable by default and whether 8-bit-clean binary streams need their IAC bytes escaped. Exposed as `tc.Negotiated()`.
+- **Server echo** — controllable independently via `SetEcho`. Auto-enabled on the first negotiated transition (if `OfferEcho` was set), suppressed during password entry, and toggleable by user command in the future. Decoupled from `Negotiated()` so a non-telnet user could enable echo manually (with the understood double-echo trade-off).
+
+Telnet options supported when negotiated:
 
 - **CHARSET** — recorded as a hint; the engine's own encoding handshake (see below) is authoritative.
 - **NAWS** — window size; updates the session's tracked screen size dynamically.
 - **TTYPE** — terminal type; used as a hint during capability auto-detect.
-- **ECHO / SGA** — used to suppress local echo for password entry.
+- **ECHO / SGA / LINEMODE** — together establish character-at-a-time mode with server-side echo.
+- Unknown / unsupported options receive a clean `WONT` / `DONT` reply so the negotiation completes; new options can be added by extending the small switch in `handleWILL` / `handleDO` / `handleSB`.
 - **GMCP / MSDP** — out-of-band structured data for modern MUD clients (Mudlet, MUSHclient); accepted but unused until a later milestone.
 
 ### TLS

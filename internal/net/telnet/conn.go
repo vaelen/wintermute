@@ -48,14 +48,22 @@ type State struct {
 	Charset  string
 }
 
-// Conn wraps a net.Conn that speaks the telnet protocol. The Read /
-// Write methods present a clean byte stream to the engine; IAC sequences
-// are consumed and replied to internally.
+// Conn wraps a net.Conn for clients that may or may not speak the telnet
+// protocol. Read / Write present a clean byte stream to the engine; IAC
+// sequences are consumed and replied to internally; any data bytes written
+// out have their IAC bytes doubled.
 //
-// Conn handles server-side echo: when serverEcho is true (the default
-// after Wrap), every data byte received is echoed back to the client
-// with the usual cooked-mode translations (CR → CRLF, BS/DEL → "\b \b").
-// Callers suppress echo for password entry via SetEcho.
+// On Wrap the conn proactively sends its initial telnet option offers
+// (WILL ECHO, WILL SGA, DONT LINEMODE, DO TTYPE, DO NAWS, WILL CHARSET).
+// A telnet-speaking client responds with IAC of its own; a non-telnet
+// client (e.g. netcat) ignores the bytes (or renders them as a brief
+// garble). The conn observes incoming bytes for any IAC sequence and
+// flips its Negotiated() flag the first time it sees one — callers can
+// use that to distinguish telnet from raw and decide whether things like
+// server-side echo or 8-bit-clean binary mode are safe to enable.
+//
+// Server-side echo is gated on Negotiated() to avoid double-echo with
+// non-telnet clients (whose terminals usually do their own local echo).
 type Conn struct {
 	raw net.Conn
 	br  *bufio.Reader
@@ -65,6 +73,12 @@ type Conn struct {
 	smu        sync.Mutex
 	state      State
 	serverEcho bool
+	negotiated bool
+	// offerEcho remembers whether the engine WANTS echo to be on for
+	// telnet sessions. Used to auto-enable serverEcho the first time
+	// the remote is observed speaking telnet. After that, callers can
+	// flip serverEcho freely via SetEcho regardless of negotiated.
+	offerEcho bool
 
 	// Parser state. The parser is byte-at-a-time and lives on the Conn
 	// rather than as a local in Read so it survives across Read calls.
@@ -73,13 +87,17 @@ type Conn struct {
 	sbBuf      []byte
 }
 
-// Wrap returns a Conn that uses raw for I/O and br for buffered reads.
-// The initial set of option offers is sent immediately.
+// Wrap returns a Conn that uses raw for I/O and br for buffered reads
+// and sends the initial set of option offers immediately.
 //
-// br must be the same buffered reader passed to Detect; otherwise the
-// bytes already buffered for option negotiation would be lost.
+// serverEcho starts off; it auto-enables the first time the remote sends
+// any IAC command (i.e. when the conn observes that it's talking to a
+// real telnet client) AND opts.OfferEcho is true. SetEcho can override
+// the state at any time, independently of negotiation status, so for
+// example a user-facing "terminal echo on" command can still take effect
+// on a connection that never negotiated.
 func Wrap(raw net.Conn, br *bufio.Reader, opts Options) (*Conn, error) {
-	c := &Conn{raw: raw, br: br, serverEcho: opts.OfferEcho}
+	c := &Conn{raw: raw, br: br, offerEcho: opts.OfferEcho}
 	return c, c.sendInitialOffers(opts)
 }
 
@@ -88,6 +106,30 @@ func (c *Conn) State() State {
 	c.smu.Lock()
 	defer c.smu.Unlock()
 	return c.state
+}
+
+// Negotiated reports whether at least one IAC command has been received
+// from the remote end. Use it to distinguish a telnet-speaking client
+// from a raw-TCP client.
+func (c *Conn) Negotiated() bool {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	return c.negotiated
+}
+
+func (c *Conn) markNegotiated() {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	if c.negotiated {
+		return
+	}
+	c.negotiated = true
+	// Sensible default for telnet clients: enable server-side echo if the
+	// engine asked for it via Options. Callers can still override later
+	// via SetEcho.
+	if c.offerEcho {
+		c.serverEcho = true
+	}
 }
 
 // SetEcho controls whether the server echoes received data bytes back
@@ -105,7 +147,10 @@ func (c *Conn) SetEcho(suppress bool) error {
 	return nil
 }
 
-// echoEnabled returns the current server-echo state.
+// echoEnabled returns whether the server is currently echoing received
+// data bytes back to the client. The flag defaults to off and auto-flips
+// on the first IAC from the remote (when OfferEcho is set); SetEcho can
+// flip it independently at any time.
 func (c *Conn) echoEnabled() bool {
 	c.smu.Lock()
 	defer c.smu.Unlock()
@@ -259,6 +304,11 @@ func (c *Conn) feed(b byte, out []byte) (int, error) {
 			c.echoByte(cmdIAC)
 			out[0] = cmdIAC
 			return 1, nil
+		}
+		// Any IAC followed by something other than another IAC means the
+		// remote is speaking telnet protocol.
+		c.markNegotiated()
+		switch b {
 		case cmdWILL:
 			c.parseState = stWILL
 		case cmdWONT:

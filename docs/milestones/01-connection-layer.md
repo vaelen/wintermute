@@ -126,15 +126,17 @@ func (s *Session) Close() error
 
 ```
 TCP accept
-  └─> peek up to 200 ms
-        ├─ first byte == IAC (0xFF) → telnet on; run option negotiation
-        └─ otherwise               → telnet off; return bytes to input
-  └─> (telnet only) settle IAC; collect TTYPE / NAWS hints
+  └─> wrap in telnet.Conn; send initial offers
+        (WILL ECHO, WILL SGA, DONT LINEMODE, DO TTYPE, DO NAWS, WILL CHARSET)
+  └─> brief settle (~200 ms); ProcessBuffered drains any IAC responses
+        - if any IAC arrived, tc.Negotiated() == true; serverEcho auto-on
   └─> send "WINTERMUTE\r\n\r\nPRESS ENTER TO BEGIN.\r\n" + ESC[c (ANSI probe)
   └─> read raw bytes until \r or \n; scan for ESC[?...c
         - DA present → hints.ANSICapable = true
         - absent     → hints.ANSICapable stays false
-  └─> compute auto-detect defaults from (telnet caps + TTYPE + ANSI hint)
+        - hints.Telnet = tc.Negotiated()
+        - hints.TermType / NAWS pulled from tc.State()
+  └─> compute auto-detect defaults from (telnet status + TTYPE + ANSI hint)
   └─> open prompt encoder (ASCII; the prompt is uppercase-only ASCII)
   └─> render uppercase confirmation prompt with detected default flagged
   └─> read user choice (single char + Enter, or Enter for default)

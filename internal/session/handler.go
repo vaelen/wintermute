@@ -41,39 +41,37 @@ func DefaultHandler(a *auth.Store, log *slog.Logger, motd string) *Handler {
 }
 
 // Handle drives a single accepted connection through the full lifecycle:
-// telnet detection, optional IAC negotiation, ANSI probe, capability
-// prompt, login, MOTD, then the placeholder command loop.
+// always-on telnet wrap + initial IAC offers, press-enter banner + ANSI
+// probe, capability prompt, login, MOTD, then the placeholder command
+// loop.
+//
+// The connection is always wrapped in a telnet.Conn so any IAC bytes a
+// client sends are parsed (and any IAC bytes we emit are doubled).
+// telnet vs. raw is determined *after* we observe the client's
+// response: tc.Negotiated() reports whether any IAC came back.
 func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	br := bufio.NewReader(conn)
-	s := newSession(conn, br, h.Auth, h.Logger)
+	s := newSession(conn, h.Auth, h.Logger)
 	defer s.finalize()
 
-	// --- Capability detection ---------------------------------------------
-	isTelnet, err := wtelnet.Detect(ctx, conn, br, h.TelnetDetectTimeout)
+	br := bufio.NewReader(conn)
+	tc, err := wtelnet.Wrap(conn, br, wtelnet.DefaultOptions())
 	if err != nil {
-		s.log.Debug("telnet detect failed", "err", err)
+		s.log.Warn("telnet wrap failed", "err", err)
+		return
 	}
-	hints := term.DetectHints{Telnet: isTelnet}
+	s.tc = tc
 
-	if isTelnet {
-		tc, terr := wtelnet.Wrap(conn, br, wtelnet.DefaultOptions())
-		if terr != nil {
-			s.log.Warn("telnet wrap failed", "err", terr)
-			return
-		}
-		s.tc = tc
-		// Give the client a moment to send its negotiation responses, then
-		// drain whatever IAC bytes are already in the buffer.
-		time.Sleep(h.NegotiationSettleTimeout)
-		if err := tc.ProcessBuffered(); err != nil {
-			s.log.Debug("process buffered IAC failed", "err", err)
-		}
-		st := tc.State()
-		hints.TermType = st.TermType
-		hints.NAWSWidth = st.Width
-		hints.NAWSHeight = st.Height
+	// Give telnet-speaking clients a moment to respond to our initial
+	// offers, then drain any IAC sequences that are already buffered. By
+	// the time this returns, tc.Negotiated() reflects whether we're talking
+	// to a real telnet client or something simpler.
+	time.Sleep(h.NegotiationSettleTimeout)
+	if err := tc.ProcessBuffered(); err != nil {
+		s.log.Debug("process buffered IAC failed", "err", err)
 	}
+
+	hints := term.DetectHints{}
 
 	// --- Press-enter banner + ANSI probe ---------------------------------
 	// Display a tiny banner and an ANSI Device Attributes query in one
@@ -95,6 +93,15 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	if term.HasDAResponse(raw) {
 		hints.ANSICapable = true
 	}
+
+	// Telnet status / TTYPE / NAWS hints reflect whatever the conn has
+	// learned by now (initial offers + any negotiation that completed
+	// before / during the press-enter read).
+	hints.Telnet = tc.Negotiated()
+	st := tc.State()
+	hints.TermType = st.TermType
+	hints.NAWSWidth = st.Width
+	hints.NAWSHeight = st.Height
 
 	defaults := term.AutoDetect(hints)
 

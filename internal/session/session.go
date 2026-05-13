@@ -17,14 +17,18 @@ import (
 )
 
 // Session represents one connected user across the engine. It owns the
-// underlying connection, the buffered input reader, the telnet wrapper
-// (if any), the chosen encoder, and the post-login account.
+// underlying connection, the telnet wrapper (always non-nil after
+// handler setup), the buffered line reader, the chosen encoder, and the
+// post-login account.
+//
+// Every connection is wrapped in a telnet.Conn at handler setup time so
+// IAC parsing and IAC-doubled writes are always in effect. Whether the
+// remote actually speaks telnet is reported by s.tc.Negotiated().
 type Session struct {
 	id      string
 	conn    net.Conn
-	tc      *wtelnet.Conn   // nil if not telnet
-	in      *bufio.Reader   // line-oriented input; sourced from tc or raw
-	rawBR   *bufio.Reader   // the original buffered reader, used during detection
+	tc      *wtelnet.Conn
+	in      *bufio.Reader
 	enc     *term.Encoder
 	account *auth.Account
 	log     *slog.Logger
@@ -32,44 +36,31 @@ type Session struct {
 }
 
 // newSession constructs a Session given an already-accepted connection
-// and the shared dependencies. The encoder and account are nil until the
-// pre-login prompt and login flow have completed.
-func newSession(conn net.Conn, br *bufio.Reader, a *auth.Store, log *slog.Logger) *Session {
+// and the shared dependencies. The handler is expected to attach s.tc
+// before any I/O happens.
+func newSession(conn net.Conn, a *auth.Store, log *slog.Logger) *Session {
 	return &Session{
-		id:    conn.RemoteAddr().String(),
-		conn:  conn,
-		rawBR: br,
-		log:   log.With("session", conn.RemoteAddr().String()),
-		auth:  a,
+		id:   conn.RemoteAddr().String(),
+		conn: conn,
+		log:  log.With("session", conn.RemoteAddr().String()),
+		auth: a,
 	}
 }
 
-// reader returns the byte source for the session: either the telnet Conn
-// (which strips IAC inline) or the raw bufio.Reader.
-func (s *Session) reader() io.Reader {
-	if s.tc != nil {
-		return s.tc
-	}
-	return s.rawBR
-}
+// reader returns the session's byte source — always the telnet Conn,
+// which strips IAC sequences inline.
+func (s *Session) reader() io.Reader { return s.tc }
 
-// writer returns the byte sink. The telnet path doubles IAC bytes
-// automatically.
-func (s *Session) writer() io.Writer {
-	if s.tc != nil {
-		return s.tc
-	}
-	return s.conn
-}
+// writer returns the byte sink — always the telnet Conn, which doubles
+// IAC bytes in the outbound data.
+func (s *Session) writer() io.Writer { return s.tc }
 
-// setEcho asks the client to suppress its local echo when suppress is true.
-// On non-telnet sessions this is a no-op (the user will see their typed
-// password on screen).
+// setEcho toggles whether the server echoes received data bytes back to
+// the client. suppress=true suppresses echo (password entry);
+// suppress=false enables echo. Works independently of whether the
+// remote has been observed speaking telnet.
 func (s *Session) setEcho(suppress bool) error {
-	if s.tc != nil {
-		return s.tc.SetEcho(suppress)
-	}
-	return nil
+	return s.tc.SetEcho(suppress)
 }
 
 // writeRaw writes bytes directly to the connection without going through
