@@ -3,18 +3,13 @@
 
 package term
 
-import (
-	"bufio"
-	"context"
-	"net"
-	"strings"
-	"time"
-)
+import "strings"
 
 // DetectHints carries information gathered during connection acceptance,
 // before the user has been prompted to confirm capabilities. The fields
 // are filled in by the network layer (telnet peek, IAC subnegotiation)
-// and by ProbeANSI.
+// and by scanning the press-enter response for terminal auto-responses
+// (ANSI Device Attributes, primarily).
 type DetectHints struct {
 	Telnet      bool
 	TermType    string
@@ -80,41 +75,21 @@ func encodingFromTTYPE(ttype string) (Encoding, bool) {
 	return 0, false
 }
 
-// ProbeANSI sends the Device Attributes query (ESC [ c) and waits up to
-// timeout for an ESC [ ? ... c response. Returns true if such a response
-// is observed. The bytes that form the response are consumed from br;
-// any other peeked bytes remain in the buffer for subsequent reads.
+// ANSIProbe is the byte sequence the engine sends to elicit a Device
+// Attributes response from an ANSI-capable terminal. The terminal
+// auto-replies with ESC [ ? <digits and semicolons> c if it understands
+// the query. Non-ANSI terminals send nothing.
 //
-// br must be the buffered reader that the session uses for all input;
-// otherwise consumed response bytes would be invisible to the next read.
-//
-// conn is used solely to set a read deadline. The deadline is cleared
-// before this function returns.
-func ProbeANSI(ctx context.Context, conn net.Conn, br *bufio.Reader, timeout time.Duration) (bool, error) {
-	if _, err := conn.Write([]byte("\x1B[c")); err != nil {
-		return false, err
-	}
-	deadline := time.Now().Add(timeout)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	if err := conn.SetReadDeadline(deadline); err != nil {
-		return false, err
-	}
-	defer func() {
-		_ = conn.SetReadDeadline(time.Time{})
-	}()
+// The engine sends ANSIProbe alongside the "press enter to begin"
+// prompt: cooked-mode terminals line-buffer the response together with
+// the user's Enter keystroke, so by the time the server reads the
+// resulting line the response (if any) is right there at the start.
+var ANSIProbe = []byte("\x1B[c")
 
-	// Peek up to 32 bytes. Peek blocks until that many bytes arrive or the
-	// underlying read errors (which it will at the deadline). We ignore the
-	// error and inspect the partial buffer.
-	peeked, _ := br.Peek(32)
-	idx := findDAResponseEnd(peeked)
-	if idx == -1 {
-		return false, nil
-	}
-	_, _ = br.Discard(idx + 1)
-	return true, nil
+// HasDAResponse reports whether buf contains a complete ANSI Device
+// Attributes response.
+func HasDAResponse(buf []byte) bool {
+	return findDAResponseEnd(buf) != -1
 }
 
 // findDAResponseEnd returns the index of the 'c' that terminates an

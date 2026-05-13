@@ -27,7 +27,6 @@ type Handler struct {
 	// Tuning knobs (intentionally exported so tests / config can lower them).
 	TelnetDetectTimeout      time.Duration
 	NegotiationSettleTimeout time.Duration
-	ANSIProbeTimeout         time.Duration
 }
 
 // DefaultHandler returns a Handler with sensible defaults wired in.
@@ -38,7 +37,6 @@ func DefaultHandler(a *auth.Store, log *slog.Logger, motd string) *Handler {
 		MOTD:                     motd,
 		TelnetDetectTimeout:      200 * time.Millisecond,
 		NegotiationSettleTimeout: 200 * time.Millisecond,
-		ANSIProbeTimeout:         300 * time.Millisecond,
 	}
 }
 
@@ -75,14 +73,27 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		hints.TermType = st.TermType
 		hints.NAWSWidth = st.Width
 		hints.NAWSHeight = st.Height
-	} else {
-		// Non-telnet path: probe for ANSI capability. We can only do this
-		// safely when there are no concurrent IAC bytes mixed into the stream.
-		ansi, err := term.ProbeANSI(ctx, conn, br, h.ANSIProbeTimeout)
-		if err != nil {
-			s.log.Debug("ANSI probe failed", "err", err)
-		}
-		hints.ANSICapable = ansi
+	}
+
+	// --- Press-enter banner + ANSI probe ---------------------------------
+	// Display a tiny banner and an ANSI Device Attributes query in one
+	// write. Cooked-mode terminals line-buffer their auto-response with
+	// the user's Enter keystroke, so when we read the next line both
+	// arrive together — no timing race, no probe timeout to tune.
+	pressEnter := []byte("WINTERMUTE\r\n\r\nPRESS ENTER TO BEGIN.\r\n")
+	if _, err := s.writer().Write(pressEnter); err != nil {
+		return
+	}
+	if _, err := s.writer().Write(term.ANSIProbe); err != nil {
+		return
+	}
+	raw, err := s.readRawUntilNewline()
+	if err != nil && len(raw) == 0 {
+		s.log.Debug("pre-prompt read failed", "err", err)
+		return
+	}
+	if term.HasDAResponse(raw) {
+		hints.ANSICapable = true
 	}
 
 	defaults := term.AutoDetect(hints)

@@ -127,6 +127,43 @@ func (s *Session) readLine() (string, error) {
 	return term.StripCSI(decoded), err
 }
 
+// readRawUntilNewline reads bytes from the session input until either
+// '\r' or '\n' arrives, then returns the bytes preceding the terminator.
+// CRLF is consumed atomically. No encoder decode or CSI stripping is
+// applied — the caller gets the raw byte stream so it can scan for
+// terminal auto-responses.
+//
+// Used during the pre-prompt capability detection phase, where the user's
+// Enter keystroke flushes their terminal's stdin buffer (potentially
+// including any auto-responses like the ANSI Device Attributes reply).
+func (s *Session) readRawUntilNewline() ([]byte, error) {
+	if s.in == nil {
+		s.in = bufio.NewReader(s.reader())
+	}
+	var buf []byte
+	for {
+		b, err := s.in.ReadByte()
+		if err != nil {
+			return buf, err
+		}
+		if b == '\n' {
+			return buf, nil
+		}
+		if b == '\r' {
+			// Eat an optional immediately-following '\n' so the CRLF pair
+			// counts as one line terminator.
+			if next, _ := s.in.Peek(1); len(next) > 0 && next[0] == '\n' {
+				_, _ = s.in.ReadByte()
+			}
+			return buf, nil
+		}
+		buf = append(buf, b)
+		if len(buf) > 4096 {
+			return buf, nil // defensive cap
+		}
+	}
+}
+
 // finalize flushes any encoder state. Always safe to call.
 func (s *Session) finalize() {
 	if s.enc != nil {

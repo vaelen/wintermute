@@ -48,7 +48,6 @@ func startServer(t *testing.T) *testServer {
 	// Speed up the tests by collapsing the detection windows.
 	handler.TelnetDetectTimeout = 50 * time.Millisecond
 	handler.NegotiationSettleTimeout = 50 * time.Millisecond
-	handler.ANSIProbeTimeout = 50 * time.Millisecond
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -159,11 +158,12 @@ func TestRawTCPFullFlow(t *testing.T) {
 	srv := startServer(t)
 
 	out := driveClient(t, srv, []step{
-		// 1. Uppercase prompt arrives.
-		{expect: "TERMINAL TYPE:", send: ""},
-		// 2. Choose Unicode (auto-detect default for raw TCP without ANSI probe
-		//    is ASCII; we override to UTF-8 explicitly).
-		{expect: "", send: "u\r\n"},
+		// 1. Press-enter banner appears with the ANSI probe.
+		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
+		// 2. Encoding prompt; we override the auto-detected default
+		//    (ASCII, since this raw-TCP client didn't respond to the probe)
+		//    to UTF-8 via 'u'.
+		{expect: "TERMINAL TYPE:", send: "u\r\n"},
 		// 3. Login or create. First connection — create.
 		{expect: "Username", send: "new\r\n"},
 		{expect: "Choose a username", send: "alice\r\n"},
@@ -225,6 +225,7 @@ func TestRawTCPFullFlow(t *testing.T) {
 func TestMOTDCommand(t *testing.T) {
 	srv := startServer(t)
 	out := driveClient(t, srv, []step{
+		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
 		{expect: "TERMINAL TYPE:", send: "u\r\n"},
 		{expect: "Username", send: "new\r\n"},
 		{expect: "Choose a username", send: "eve\r\n"},
@@ -253,6 +254,7 @@ func TestRawTCPInvalidLogin(t *testing.T) {
 	}
 
 	out := driveClient(t, srv, []step{
+		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
 		{expect: "TERMINAL TYPE:", send: "u\r\n"},
 		{expect: "Username", send: "bob\r\n"},
 		{expect: "Password", send: "wrong\r\n"},
@@ -287,6 +289,7 @@ func TestPersistedPrefsAppliedOnLogin(t *testing.T) {
 	// Connect as carol; pick UTF-8 at the prompt; expect saved prefs to be
 	// applied silently after login.
 	out := driveClient(t, srv, []step{
+		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
 		{expect: "TERMINAL TYPE:", send: "u\r\n"},
 		{expect: "Username", send: "carol\r\n"},
 		{expect: "Password", send: "passpasspass\r\n"},
@@ -303,24 +306,37 @@ func TestPersistedPrefsAppliedOnLogin(t *testing.T) {
 	}
 }
 
-func TestDAResponsePrefixInFirstLine(t *testing.T) {
-	// Some terminals line-buffer their Device Attributes auto-response,
-	// so the first line that arrives at the server can start with the
-	// terminal's DA bytes. The session layer must strip those before
-	// passing the input to the prompt parser; otherwise the user has
-	// to type their selection twice.
+func TestPressEnterDetectsANSI(t *testing.T) {
+	// The press-enter banner doubles as an ANSI Device Attributes probe.
+	// A cooked-mode terminal will line-buffer its DA auto-response with
+	// the user's Enter, so the bytes arriving on the wire look like:
+	//     \x1B[?1;2c\n
+	// The server must recognize the DA inside that line and treat the
+	// session as ANSI-capable, surfacing UTF-8 as the encoding default.
 	srv := startServer(t)
 	out := driveClient(t, srv, []step{
-		// Note the leading DA response — this is what `nc` would send
-		// when the terminal's auto-response was line-buffered together
-		// with the user's keystroke.
-		{expect: "TERMINAL TYPE:", send: "\x1B[?1;2cu\r\n"},
-		// We should be at the username prompt; if the parser had
-		// rejected the line we'd see PLEASE CHOOSE ONE OF... instead.
+		{expect: "PRESS ENTER TO BEGIN", send: "\x1B[?1;2c\r\n"},
+		// At the encoding prompt; pressing Enter should accept the
+		// (now Unicode) default. Username prompt follows.
+		{expect: "TERMINAL TYPE:", send: "\r\n"},
 		{expect: "Username", send: ""},
 	})
-	if bytes.Contains(out, []byte("PLEASE CHOOSE ONE OF")) {
-		t.Errorf("DA-response-prefixed input was rejected; output:\n%s", out)
+	if !bytes.Contains(out, []byte("U - UNICODE [MODERN, DEFAULT]")) {
+		t.Errorf("expected ANSI auto-detect to make Unicode the default; output:\n%s", out)
+	}
+}
+
+func TestPressEnterWithoutDAStaysASCIIDefault(t *testing.T) {
+	// Same flow without a DA response in the press-enter line should
+	// keep ASCII as the auto-detected default.
+	srv := startServer(t)
+	out := driveClient(t, srv, []step{
+		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
+		{expect: "TERMINAL TYPE:", send: "\r\n"},
+		{expect: "Username", send: ""},
+	})
+	if !bytes.Contains(out, []byte("A - ASCII [DEFAULT]")) {
+		t.Errorf("expected ASCII to remain the default; output:\n%s", out)
 	}
 }
 
@@ -328,6 +344,7 @@ func TestPETSCIISelectionEmitsShiftOut(t *testing.T) {
 	srv := startServer(t)
 
 	out := driveClient(t, srv, []step{
+		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
 		// Wait for the uppercase prompt, then select PETSCII.
 		{expect: "TERMINAL TYPE:", send: "p\r\n"},
 		// Once Shift Out (0x0E) appears, the step is satisfied. We do not
@@ -365,6 +382,7 @@ func TestPETSCIIPersistedPrefsEmitShiftOut(t *testing.T) {
 	}
 
 	out := driveClient(t, srv, []step{
+		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
 		{expect: "TERMINAL TYPE:", send: "u\r\n"},
 		{expect: "Username", send: "dave\r\n"},
 		{expect: "Password", send: "passpasspass\r\n"},

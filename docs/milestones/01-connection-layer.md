@@ -16,7 +16,7 @@ None. This is the foundation milestone.
 - **Per-connection capability detection** before login:
   - **Telnet detection** — peek the first bytes; enter telnet mode iff IAC (`0xFF`) appears. Telnet support is a per-session flag.
   - **Telnet option negotiation** (when telnet is enabled) — CHARSET (recorded as a hint), NAWS, TTYPE, ECHO/SGA. Anything else is gracefully rejected.
-  - **ANSI probe** — send Device Attributes query (`ESC [ c`); wait up to 300 ms for a matching response.
+  - **Press-enter + ANSI probe** — send a `WINTERMUTE` banner + `PRESS ENTER TO BEGIN.` line + ANSI Device Attributes query (`ESC [ c`); read raw bytes until the user's Enter and scan the captured line for an `ESC [ ? … c` response. Cooked-mode terminals line-buffer their auto-response together with the user's Enter, so the response (if any) arrives in the same line.
   - **TTYPE hint** — use the telnet TTYPE response as a bias.
   - **Auto-detect defaults** — encoding, width, height, color.
   - **All-uppercase confirmation prompt** before login, with the auto-detected option flagged `[DEFAULT]`. Uppercase-only is what makes the prompt render natively on a PETSCII client in its default (uppercase / graphics) mode — no Shift Out is needed yet.
@@ -129,8 +129,12 @@ TCP accept
   └─> peek up to 200 ms
         ├─ first byte == IAC (0xFF) → telnet on; run option negotiation
         └─ otherwise               → telnet off; return bytes to input
-  └─> ANSI probe (ESC[c, 300 ms timeout)
-  └─> compute auto-detect defaults from (telnet caps + TTYPE + ANSI probe)
+  └─> (telnet only) settle IAC; collect TTYPE / NAWS hints
+  └─> send "WINTERMUTE\r\n\r\nPRESS ENTER TO BEGIN.\r\n" + ESC[c (ANSI probe)
+  └─> read raw bytes until \r or \n; scan for ESC[?...c
+        - DA present → hints.ANSICapable = true
+        - absent     → hints.ANSICapable stays false
+  └─> compute auto-detect defaults from (telnet caps + TTYPE + ANSI hint)
   └─> open prompt encoder (ASCII; the prompt is uppercase-only ASCII)
   └─> render uppercase confirmation prompt with detected default flagged
   └─> read user choice (single char + Enter, or Enter for default)
@@ -273,9 +277,9 @@ CREATE TABLE IF NOT EXISTS schema_version (
     - Double-line normalization table (`═` → `─`, etc.) used by all non-(UTF-8|CP437) encoders.
     - **DEC line-drawing emitter** with persistent `in_graphics` state. Single function that takes a UTF-8 run and a target encoding and emits the DEC-bracketed byte stream, never bracketing a single character at a time when adjacent chars are also line-drawing. Tested independently with golden outputs.
     - PETSCII tables: UTF-8 ↔ PETSCII shifted/unshifted, ANSI SGR → PETSCII color control bytes, PETSCII line graphics, PETSCII semi-graphics where they exist.
-    - `DetectCapabilities(ctx, conn, telnetState)`: runs the ANSI probe and combines all hints into a `Capabilities` default — including the encoding-driven defaults for `Color` and `DECLineDrawing`.
+    - `HasDAResponse([]byte) bool` and the ANSI probe byte sequence (`ANSIProbe`); the session layer drives the press-enter probe and feeds the scanned-out hint into `AutoDetect`.
     - `ConfirmPrompt(ctx, session, defaults)` — renders the prompt, parses the response, returns a confirmed `Capabilities`.
-11. Wire it all together in the connection acceptor: telnet peek → option negotiation if applicable → ANSI probe → compute defaults → render uppercase confirmation prompt via an ASCII prompt encoder → read selection → reconfigure the session encoder → **if chosen encoding is PETSCII, write `0x0E` Shift Out** → continue with login. Saved per-account prefs are loaded *after* login and applied to subsequent renders; if the applied encoding is PETSCII (and the pre-login choice wasn't), another `0x0E` is emitted before re-rendering.
+11. Wire it all together in the connection acceptor: telnet peek → option negotiation if applicable → press-enter banner + ANSI Device Attributes probe sent in one write → read raw input until \r or \n → scan the captured bytes for an `ESC [ ? … c` response to set the ANSI hint → compute defaults → render uppercase confirmation prompt via an ASCII prompt encoder → read selection → reconfigure the session encoder → **if chosen encoding is PETSCII, write `0x0E` Shift Out** → continue with login. Saved per-account prefs are loaded *after* login and applied to subsequent renders; if the applied encoding is PETSCII (and the pre-login choice wasn't), another `0x0E` is emitted before re-rendering.
 
 ### Login and session lifecycle
 
@@ -295,7 +299,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 15. Unit tests:
     - IAC parser: WILL/WONT/DO/DONT handshakes; subnegotiation framing; CHARSET parse; NAWS parse; TTYPE fetch.
     - Telnet peek: classifies IAC vs non-IAC correctly; returns buffered bytes intact for non-telnet.
-    - ANSI probe: receives matching reply; times out cleanly on no reply.
+    - DA response detection: `HasDAResponse` finds a complete `ESC [ ? … c` anywhere in a buffer; rejects malformed prefixes; ignores non-digit/semicolon bytes between `?` and `c`.
     - Each encoder's `EncodeOut`/`DecodeIn` round-trip for a representative string.
     - PETSCII: shifted-mode handling, ANSI SGR → PETSCII color mapping, box-drawing mapping, shade-block downgrade to space.
     - ASCII: ANSI stripping, box-drawing approximation, shade → space, non-drawing high-byte → `?`.
@@ -345,7 +349,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 - **DEC graphics designator choice (decided).** Use `ESC ( 0` (designate G0 → DEC Special Graphics) and `ESC ( B` (designate G0 → ASCII) rather than the alternative SO/SI mechanism. SO is already in use as the connect-time PETSCII switch; mixing it with line-drawing toggles invites confusion and would behave differently across clients. The `ESC ( 0` / `ESC ( B` pair is the canonical VT100 idiom for this use, is unambiguous, and does not conflict with the PETSCII path.
 - **DEC graphics trailing state (decided).** The encoder always emits a closing `ESC ( B` on session shutdown if it would otherwise leave the terminal in graphics mode. This falls out naturally of the "emit only at transitions" rule applied at close.
 - **Preference loading order (decided).** The connect-time confirmation prompt always uses live auto-detect, because the user hasn't authenticated yet. After login, if the account has saved preferences that differ from what the user picked at the prompt, apply them silently and re-render the MOTD. Players can override at any time with the `terminal` command. This keeps the prompt simple and avoids ordering the encoding prompt after the username.
-- **ANSI probe leakage.** If the user is on a terminal that does *not* answer `ESC[c`, the bytes we sent (`ESC [ c`) may render visibly as a stray escape sequence start. PETSCII clients will treat `0x1B` as an unsupported character. Mitigation: only send the ANSI probe when telnet TTYPE *didn't* already tell us the answer, and use a tight (~300 ms) timeout. On PETSCII clients the user just sees a tiny garble before the prompt — acceptable.
+- **ANSI probe leakage on non-ANSI terminals.** A terminal that doesn't recognize `ESC [ c` renders the three bytes as a stray escape-sequence start. On PETSCII clients in default mode this is also harmless garble (PETSCII just shows the bytes' glyphs and moves on). Because the probe is sent in the same write as the human-readable `PRESS ENTER TO BEGIN.`, the artifact appears on the *same line* and the next thing the user does is press Enter, so it scrolls away before they read the encoding prompt.
 - **Telnet ECHO during password entry on non-telnet sessions.** Without telnet, we can't suppress local echo. The password is still hashed server-side but is visible on the user's screen. Document this in the manpage; recommend telnet/TLS for production.
 - **40-column wrapping.** The MOTD and login text need to wrap at the chosen width. Some content is internal and not directly under the user's control. Wrap on whitespace; truncate long unbroken tokens with `…` (or `...` in ASCII).
 - **Argon2id parameters.** Pick defaults (e.g. `memory=64MB, time=3, parallelism=2`); document; revisit before public deployment.

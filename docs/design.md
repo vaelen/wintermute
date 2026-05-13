@@ -203,14 +203,20 @@ Per-encoding specifics:
 On every connection, before login:
 
 1. **Telnet peek.** Block up to 200 ms reading the initial bytes. If the first byte is `IAC (0xFF)`, mark telnet on and enter option negotiation (offer DO/WILL for TTYPE, NAWS, CHARSET, ECHO, SGA). Otherwise mark telnet off and return the buffered bytes to the session's input stream.
-2. **ANSI probe.** Send the Device Attributes query (`ESC [ c`) and wait up to 300 ms for a response of the form `ESC [ ? … c`. Match → ANSI-capable.
-3. **TTYPE hint.** If telnet TTYPE returned a recognizable value (`xterm`, `vt100`, `ansi`, `petscii`, `c64`, etc.), bias the auto-detect default.
-4. **Compute defaults**:
+2. **TTYPE / NAWS hints.** If telnet is on, drain any IAC subnegotiation responses already buffered; TTYPE and NAWS values are recorded if the client supplied them.
+3. **Press-enter banner + ANSI probe.** Send:
+   ```
+   WINTERMUTE
+   PRESS ENTER TO BEGIN.
+   ```
+   immediately followed by the ANSI Device Attributes query (`ESC [ c`). The banner doubles as a synchronization point — cooked-mode terminals line-buffer their stdin until the user presses Enter, so any auto-response the terminal generates in response to the probe arrives together with that keystroke. This sidesteps the timing race that would otherwise force a probe timeout.
+4. **Read raw input line.** Read bytes from the connection until either `\r` or `\n` (CRLF consumed as one terminator). The captured bytes may contain an ANSI Device Attributes response (`ESC [ ? <digits and semicolons> c`), nothing, or unrelated terminal auto-responses. Scan for the DA response: if found, mark the session ANSI-capable.
+5. **Compute defaults.**
    - encoding: TTYPE-derived if obvious; else UTF-8 if ANSI-capable; else ASCII.
    - width / height: NAWS if reported; else 80×24, except PETSCII/ASCII default to 40×24.
    - telnet: as detected in step 1.
-   - if the connecting account has saved preferences from a prior session, prefer those over the auto-detected defaults.
-5. **Confirmation prompt.** Send an **all-uppercase** prompt asking the user to confirm or override:
+   - If the connecting account has saved preferences from a prior session, prefer those over the auto-detected defaults (applied after login).
+6. **Confirmation prompt.** Send an **all-uppercase** prompt asking the user to confirm or override:
 
    ```
    WELCOME TO WINTERMUTE.
@@ -220,7 +226,7 @@ On every connection, before login:
    ```
 
    The `[DEFAULT]` marker attaches to whichever option was auto-detected (e.g. `P - PETSCII [DEFAULT]` if the auto-detect chose PETSCII); pressing Enter accepts that choice. The prompt uses only characters whose byte positions render correctly on a PETSCII client in its **default (uppercase / graphics) mode** — uppercase letters `A`–`Z`, digits, space, and the punctuation `: , - ( ) [ ]` — so no Shift Out is needed yet.
-6. **Apply selection.**
+7. **Apply selection.**
    - Rebuild the session's `Encoder` for the chosen encoding.
    - **If PETSCII was chosen**, emit PETSCII control code `0x0E` (Shift Out) so the C64 switches into mixed-case mode for all subsequent output. The engine emits Shift Out **every time the session transitions into PETSCII** — at the end of this prompt, after `terminal encoding petscii` post-login, or after a saved-prefs override loads PETSCII. Non-PETSCII encodings never see Shift Out from the engine.
    - Force width to 40 columns for PETSCII and ASCII unless the user later overrides it.
