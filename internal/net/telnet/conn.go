@@ -98,6 +98,32 @@ func (c *Conn) Close() error {
 func (c *Conn) LocalAddr() net.Addr  { return c.raw.LocalAddr() }
 func (c *Conn) RemoteAddr() net.Addr { return c.raw.RemoteAddr() }
 
+// ProcessBuffered drains any IAC sequences that are already buffered on
+// the underlying reader. Returns immediately when the buffer is empty or
+// when the next byte would be data (so subsequent Read calls still see
+// it). Used during connection setup to give option negotiation a chance
+// to settle before computing capability defaults.
+func (c *Conn) ProcessBuffered() error {
+	for c.br.Buffered() > 0 {
+		peek, err := c.br.Peek(1)
+		if err != nil || len(peek) == 0 {
+			return err
+		}
+		if c.parseState == stNormal && peek[0] != cmdIAC {
+			return nil
+		}
+		b, err := c.br.ReadByte()
+		if err != nil {
+			return err
+		}
+		scratch := [1]byte{}
+		if _, ferr := c.feed(b, scratch[:]); ferr != nil {
+			return ferr
+		}
+	}
+	return nil
+}
+
 // Read implements io.Reader. Returned bytes are data only; IAC commands
 // are consumed and replied to as a side effect.
 //

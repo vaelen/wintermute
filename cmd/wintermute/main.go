@@ -1,19 +1,195 @@
 // Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
 // SPDX-License-Identifier: MIT
 
-// Command wintermute is the Wintermute MUD/MUSH server.
-//
-// The full server is built incrementally across the milestones documented
-// under docs/milestones/. Milestone 1 replaces this stub with the real entry
-// point (config loading, listener startup, signal handling).
+// Command wintermute is the entry point for the Wintermute MUD/MUSH server.
 package main
 
 import (
+	"context"
+	"errors"
+	"flag"
 	"fmt"
+	"io"
+	"log/slog"
+	"net"
 	"os"
+	"os/signal"
+	"strconv"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/vaelen/wintermute/internal/auth"
+	"github.com/vaelen/wintermute/internal/config"
+	wnettls "github.com/vaelen/wintermute/internal/net/tls"
+	"github.com/vaelen/wintermute/internal/session"
+	"github.com/vaelen/wintermute/internal/store"
 )
 
 func main() {
-	fmt.Fprintln(os.Stderr, "wintermute: not yet implemented — see docs/milestones/01-connection-layer.md")
-	os.Exit(1)
+	cfgPath := flag.String("config", "", "path to wintermute.toml (optional)")
+	flag.Parse()
+
+	if err := run(*cfgPath); err != nil {
+		fmt.Fprintf(os.Stderr, "wintermute: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(cfgPath string) error {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+
+	logger := buildLogger(cfg.Log)
+	logger.Info("starting wintermute",
+		"config", cfgPath,
+		"telnet_port", cfg.Server.TelnetPort,
+		"tls_port", cfg.Server.TLSPort,
+		"db", cfg.DB.Path,
+	)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	db, err := store.Open(ctx, cfg.DB.Path, logger)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	authStore := auth.NewStore(db)
+
+	motd := defaultMOTD()
+	handler := session.DefaultHandler(authStore, logger, motd)
+
+	var wg sync.WaitGroup
+	if cfg.Server.TelnetPort > 0 {
+		ln, err := net.Listen("tcp", joinHostPort("0.0.0.0", cfg.Server.TelnetPort))
+		if err != nil {
+			return fmt.Errorf("listen tcp: %w", err)
+		}
+		logger.Info("listening", "kind", "tcp", "addr", ln.Addr().String())
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			acceptLoop(ctx, ln, handler, logger)
+		}()
+		go func() { <-ctx.Done(); _ = ln.Close() }()
+	}
+
+	if cfg.Server.TLSPort > 0 {
+		tlsLn, err := openTLS(cfg)
+		if err != nil {
+			return fmt.Errorf("listen tls: %w", err)
+		}
+		logger.Info("listening", "kind", "tls", "addr", tlsLn.Addr().String(), "mode", cfg.TLS.Mode)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			acceptLoop(ctx, tlsLn, handler, logger)
+		}()
+		go func() { <-ctx.Done(); _ = tlsLn.Close() }()
+	}
+
+	<-ctx.Done()
+	logger.Info("shutdown requested")
+	// Give in-flight sessions a moment to drain before closing the DB.
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		logger.Warn("forced shutdown after 2s")
+	}
+	return nil
+}
+
+func buildLogger(c config.LogConfig) *slog.Logger {
+	var lvl slog.Level
+	switch c.Level {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	opts := &slog.HandlerOptions{Level: lvl}
+	var handler slog.Handler
+	if c.Format == "json" {
+		handler = slog.NewJSONHandler(os.Stderr, opts)
+	} else {
+		handler = slog.NewTextHandler(os.Stderr, opts)
+	}
+	return slog.New(handler)
+}
+
+func openTLS(cfg *config.Config) (net.Listener, error) {
+	wcfg := wnettls.Config{
+		CertPath:  cfg.TLS.CertPath,
+		KeyPath:   cfg.TLS.KeyPath,
+		CacheDir:  cfg.TLS.CacheDir,
+		Hostnames: cfg.TLS.Hostnames,
+	}
+	switch cfg.TLS.Mode {
+	case "self-signed":
+		wcfg.Mode = wnettls.ModeSelfSigned
+		if wcfg.CertPath == "" {
+			home, err := os.UserHomeDir()
+			if err == nil {
+				wcfg.CertPath = home + "/.wintermute/dev-cert.pem"
+				wcfg.KeyPath = home + "/.wintermute/dev-key.pem"
+			}
+		}
+	case "files":
+		wcfg.Mode = wnettls.ModeFiles
+	case "autocert":
+		wcfg.Mode = wnettls.ModeAutocert
+	}
+	return wnettls.Listen(joinHostPort("0.0.0.0", cfg.Server.TLSPort), wcfg)
+}
+
+func joinHostPort(host string, port int) string {
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func acceptLoop(ctx context.Context, ln net.Listener, h *session.Handler, logger *slog.Logger) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			logger.Warn("accept failed", "err", err)
+			continue
+		}
+		go func(c net.Conn) {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("session panic", "err", r, "remote", c.RemoteAddr())
+				}
+			}()
+			h.Handle(ctx, c)
+		}(conn)
+	}
+}
+
+func defaultMOTD() string {
+	return "" +
+		"┌───────────────────────────────────────────────┐\r\n" +
+		"│           ▓▒░ WINTERMUTE  v0.0 ░▒▓            │\r\n" +
+		"│                                               │\r\n" +
+		"│  Milestone 1: connection layer only.          │\r\n" +
+		"│  The world arrives in milestone 2.            │\r\n" +
+		"└───────────────────────────────────────────────┘\r\n"
 }

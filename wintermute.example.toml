@@ -1,0 +1,38 @@
+# Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
+# SPDX-License-Identifier: MIT
+#
+# Example Wintermute configuration. Copy to wintermute.toml and edit.
+
+[server]
+telnet_port = 2323
+tls_port    = 2424
+http_port   = 8443       # used in milestone 6
+public_host = "localhost"
+
+[db]
+path = "wintermute.db"
+
+[log]
+level  = "info"          # debug | info | warn | error
+format = "text"          # text | json
+
+[tls]
+# mode = "self-signed" generates a long-lived dev cert at ~/.wintermute/dev-cert.pem
+# mode = "files"       reads cert_path and key_path
+# mode = "autocert"    provisions via Let's Encrypt; requires hostnames
+mode = "self-signed"
+
+# [tls] for autocert:
+# mode      = "autocert"
+# cache_dir = "/var/lib/wintermute/acme-cache"
+# hostnames = ["mud.example.com"]
+
+# Parsed but unused until milestone 3.
+[llm.default]
+backend = "ollama"
+
+[llm.default.opts]
+url             = "http://localhost:11434"
+model           = "llama3.2:3b"
+gate_model      = "llama3.2:1b"
+embedding_model = "nomic-embed-text"

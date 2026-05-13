@@ -9,11 +9,15 @@ package term
 // References used at design time: standard PETSCII tables (Mapping
 // PETSCII to Unicode wikis, CBM hardware reference). Approximate.
 
+// PETSCIIShiftOut is the byte the engine sends on every connect to put
+// PETSCII clients into mixed-case mode. Modern terminals ignore it.
+const PETSCIIShiftOut byte = 0x0E
+
 // PETSCII control codes (subset).
 const (
 	petsciiNUL      byte = 0x00
 	petsciiCR       byte = 0x0D
-	petsciiShiftOut byte = 0x0E // switch to mixed-case (lowercase/uppercase) mode
+	petsciiShiftOut      = PETSCIIShiftOut
 	petsciiHome     byte = 0x13
 	petsciiClear    byte = 0x93
 	petsciiCursorDn byte = 0x11
