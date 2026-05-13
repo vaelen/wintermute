@@ -297,27 +297,107 @@ func TestWriteEscapesIAC(t *testing.T) {
 	}
 }
 
-func TestSetEcho(t *testing.T) {
+func TestDefaultOffersIncludeEchoAndDontLinemode(t *testing.T) {
 	s, c := pipeConn(t)
 	defer s.Close()
 	defer c.Close()
 	cc := newCaptureClient(t, c)
 
 	br := bufio.NewReader(s)
-	conn, err := Wrap(s, br, Options{})
+	if _, err := Wrap(s, br, DefaultOptions()); err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+	if !cc.waitContains(t, []byte{cmdIAC, cmdWILL, optEcho}, 500*time.Millisecond) {
+		t.Errorf("did not see WILL ECHO in initial offers: % X", cc.snapshot())
+	}
+	if !cc.waitContains(t, []byte{cmdIAC, cmdDONT, optLINEMODE}, 500*time.Millisecond) {
+		t.Errorf("did not see DONT LINEMODE in initial offers: % X", cc.snapshot())
+	}
+}
+
+func TestEchoesReceivedDataBytes(t *testing.T) {
+	s, c := pipeConn(t)
+	defer s.Close()
+	defer c.Close()
+	cc := newCaptureClient(t, c)
+
+	br := bufio.NewReader(s)
+	// Options with echo on but no other offers, to keep the wire quiet.
+	conn, err := Wrap(s, br, Options{OfferEcho: true})
 	if err != nil {
 		t.Fatalf("Wrap: %v", err)
 	}
-	if err := conn.SetEcho(true); err != nil {
-		t.Fatalf("SetEcho true: %v", err)
+
+	// Drain conn.Read in the background so feed() can run. We don't care
+	// about the exact byte count; we just need echoes to be emitted.
+	go func() {
+		buf := make([]byte, 16)
+		for {
+			if _, err := conn.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Client types "Hi" then Enter then a backspace, all in one write.
+	if _, err := c.Write([]byte{'H', 'i', '\r', 0x08}); err != nil {
+		t.Fatalf("client write: %v", err)
 	}
+
+	// Echo expectations: initial WILL ECHO, then "Hi", then "\r\n" for CR,
+	// then "\b \b" for backspace.
+	wantSubseq := []byte{cmdIAC, cmdWILL, optEcho, 'H', 'i', '\r', '\n', '\b', ' ', '\b'}
+	if !cc.waitContains(t, wantSubseq, 1*time.Second) {
+		t.Errorf("expected echo subsequence in capture; got % X", cc.snapshot())
+	}
+}
+
+func TestSetEchoSuppressesEcho(t *testing.T) {
+	s, c := pipeConn(t)
+	defer s.Close()
+	defer c.Close()
+	cc := newCaptureClient(t, c)
+
+	br := bufio.NewReader(s)
+	conn, err := Wrap(s, br, Options{OfferEcho: true})
+	if err != nil {
+		t.Fatalf("Wrap: %v", err)
+	}
+
+	// Wait for the initial WILL ECHO to be visible.
 	if !cc.waitContains(t, []byte{cmdIAC, cmdWILL, optEcho}, 500*time.Millisecond) {
-		t.Errorf("did not see WILL ECHO")
+		t.Fatalf("initial WILL ECHO missing")
 	}
+
+	if err := conn.SetEcho(true); err != nil {
+		t.Fatalf("SetEcho(true): %v", err)
+	}
+
+	// Capture a snapshot length so we can verify nothing new is echoed
+	// after we send a data byte.
+	preLen := len(cc.snapshot())
+
+	go func() { _, _ = c.Write([]byte("S")) }()
+	buf := make([]byte, 4)
+	n, err := conn.Read(buf)
+	if err != nil || n != 1 || buf[0] != 'S' {
+		t.Fatalf("Read = %v %d %q, want 'S'", err, n, buf[:n])
+	}
+
+	// Give time for any unwanted echo to appear.
+	time.Sleep(50 * time.Millisecond)
+	post := cc.snapshot()
+	if len(post) != preLen {
+		t.Errorf("expected no echo when suppressed; wrote % X", post[preLen:])
+	}
+
+	// Re-enable and verify echo resumes.
 	if err := conn.SetEcho(false); err != nil {
-		t.Fatalf("SetEcho false: %v", err)
+		t.Fatalf("SetEcho(false): %v", err)
 	}
-	if !cc.waitContains(t, []byte{cmdIAC, cmdWONT, optEcho}, 500*time.Millisecond) {
-		t.Errorf("did not see WONT ECHO")
+	go func() { _, _ = c.Write([]byte("R")) }()
+	_, _ = conn.Read(buf)
+	if !cc.waitContains(t, []byte{'R'}, 500*time.Millisecond) {
+		t.Errorf("expected 'R' to be echoed after un-suppressing")
 	}
 }

@@ -18,11 +18,12 @@ const (
 
 // Option codes for the small subset we care about.
 const (
-	optEcho    byte = 1
-	optSGA     byte = 3  // Suppress Go Ahead (RFC 858)
-	optTTYPE   byte = 24 // Terminal Type (RFC 1091)
-	optNAWS    byte = 31 // Negotiate About Window Size (RFC 1073)
-	optCHARSET byte = 42 // CHARSET (RFC 2066)
+	optEcho     byte = 1
+	optSGA      byte = 3  // Suppress Go Ahead (RFC 858)
+	optTTYPE    byte = 24 // Terminal Type (RFC 1091)
+	optNAWS     byte = 31 // Negotiate About Window Size (RFC 1073)
+	optLINEMODE byte = 34 // Linemode (RFC 1184) — we proactively reject
+	optCHARSET  byte = 42 // CHARSET (RFC 2066)
 )
 
 // Subnegotiation sub-commands.

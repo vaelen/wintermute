@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"strings"
 
 	"github.com/vaelen/wintermute/internal/auth"
 	wtelnet "github.com/vaelen/wintermute/internal/net/telnet"
@@ -99,9 +98,10 @@ func (s *Session) writef(format string, args ...any) error {
 	return s.writeString(fmt.Sprintf(format, args...))
 }
 
-// readLine reads one line of input (terminated by '\n'), strips CRLF,
-// decodes the wire bytes through the current Encoder, and removes any
-// ANSI CSI escape sequences. Returns io.EOF if the connection closes.
+// readLine reads one line of input, handling byte-at-a-time char-mode
+// input including in-line BS/DEL editing. Returns when CR, LF, or CRLF
+// arrives. The accumulated bytes are decoded through the current
+// Encoder and ANSI CSI sequences are stripped before returning.
 //
 // The CSI strip protects against terminal auto-responses — Device
 // Attributes, cursor position reports — that some terminals
@@ -111,20 +111,44 @@ func (s *Session) readLine() (string, error) {
 	if s.in == nil {
 		s.in = bufio.NewReader(s.reader())
 	}
-	line, err := s.in.ReadString('\n')
-	if err != nil && line == "" {
-		return "", err
-	}
-	line = strings.TrimRight(line, "\r\n")
-	decoded := line
-	if s.enc != nil {
-		out, decErr := s.enc.DecodeIn([]byte(line))
-		if decErr != nil {
-			return "", decErr
+	var line []byte
+	for {
+		b, err := s.in.ReadByte()
+		if err != nil {
+			if len(line) > 0 {
+				return s.finishLine(line), nil
+			}
+			return "", err
 		}
-		decoded = string(out)
+		switch b {
+		case '\n':
+			return s.finishLine(line), nil
+		case '\r':
+			if next, _ := s.in.Peek(1); len(next) > 0 && next[0] == '\n' {
+				_, _ = s.in.ReadByte()
+			}
+			return s.finishLine(line), nil
+		case 0x08, 0x7F: // backspace / delete
+			if len(line) > 0 {
+				line = line[:len(line)-1]
+			}
+		default:
+			if b < 0x20 {
+				continue // ignore other control chars in line input
+			}
+			line = append(line, b)
+		}
 	}
-	return term.StripCSI(decoded), err
+}
+
+func (s *Session) finishLine(line []byte) string {
+	decoded := string(line)
+	if s.enc != nil {
+		if out, err := s.enc.DecodeIn(line); err == nil {
+			decoded = string(out)
+		}
+	}
+	return term.StripCSI(decoded)
 }
 
 // readRawUntilNewline reads bytes from the session input until either
@@ -156,6 +180,12 @@ func (s *Session) readRawUntilNewline() ([]byte, error) {
 				_, _ = s.in.ReadByte()
 			}
 			return buf, nil
+		}
+		if b == 0x08 || b == 0x7F {
+			if len(buf) > 0 {
+				buf = buf[:len(buf)-1]
+			}
+			continue
 		}
 		buf = append(buf, b)
 		if len(buf) > 4096 {

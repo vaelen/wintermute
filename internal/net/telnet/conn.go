@@ -13,20 +13,29 @@ import (
 
 // Options controls the initial set of telnet options the server offers
 // on a freshly wrapped connection.
+//
+// The default combination (WILL ECHO + WILL SGA + DONT LINEMODE) is the
+// canonical "kludge character-mode" signal used by most MUD-style
+// servers: the client sends keystrokes byte-by-byte without local echo
+// and waits for the server to echo what it wants displayed.
 type Options struct {
-	OfferTTYPE   bool
-	OfferNAWS    bool
-	OfferCHARSET bool
-	OfferSGA     bool
+	OfferTTYPE    bool
+	OfferNAWS     bool
+	OfferCHARSET  bool
+	OfferSGA      bool
+	OfferEcho     bool // we'll do the echoing
+	OfferLINEMODE bool // proactively tell the client we don't want linemode
 }
 
 // DefaultOptions returns the set of options the engine offers by default.
 func DefaultOptions() Options {
 	return Options{
-		OfferTTYPE:   true,
-		OfferNAWS:    true,
-		OfferCHARSET: true,
-		OfferSGA:     true,
+		OfferTTYPE:    true,
+		OfferNAWS:     true,
+		OfferCHARSET:  true,
+		OfferSGA:      true,
+		OfferEcho:     true,
+		OfferLINEMODE: true,
 	}
 }
 
@@ -42,14 +51,20 @@ type State struct {
 // Conn wraps a net.Conn that speaks the telnet protocol. The Read /
 // Write methods present a clean byte stream to the engine; IAC sequences
 // are consumed and replied to internally.
+//
+// Conn handles server-side echo: when serverEcho is true (the default
+// after Wrap), every data byte received is echoed back to the client
+// with the usual cooked-mode translations (CR → CRLF, BS/DEL → "\b \b").
+// Callers suppress echo for password entry via SetEcho.
 type Conn struct {
 	raw net.Conn
 	br  *bufio.Reader
 
 	wmu sync.Mutex // serializes writes
 
-	smu   sync.Mutex
-	state State
+	smu        sync.Mutex
+	state      State
+	serverEcho bool
 
 	// Parser state. The parser is byte-at-a-time and lives on the Conn
 	// rather than as a local in Read so it survives across Read calls.
@@ -64,7 +79,7 @@ type Conn struct {
 // br must be the same buffered reader passed to Detect; otherwise the
 // bytes already buffered for option negotiation would be lost.
 func Wrap(raw net.Conn, br *bufio.Reader, opts Options) (*Conn, error) {
-	c := &Conn{raw: raw, br: br}
+	c := &Conn{raw: raw, br: br, serverEcho: opts.OfferEcho}
 	return c, c.sendInitialOffers(opts)
 }
 
@@ -75,18 +90,26 @@ func (c *Conn) State() State {
 	return c.state
 }
 
-// SetEcho controls server-side echo. When suppress is true we send
-// IAC WILL ECHO, which signals the client to stop echoing locally —
-// the typical password-entry posture. When false, IAC WONT ECHO is sent.
+// SetEcho controls whether the server echoes received data bytes back
+// to the client. When suppress is true the server stops echoing (use
+// during password entry); when false the server resumes echoing.
+//
+// The initial WILL ECHO negotiation sent at Wrap time tells the client
+// to stop echoing locally — this is persistent across SetEcho calls.
+// We just toggle our own behavior here without renegotiating, so the
+// client stays in "server-echo" mode for the life of the session.
 func (c *Conn) SetEcho(suppress bool) error {
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
-	if suppress {
-		_, err := c.raw.Write([]byte{cmdIAC, cmdWILL, optEcho})
-		return err
-	}
-	_, err := c.raw.Write([]byte{cmdIAC, cmdWONT, optEcho})
-	return err
+	c.smu.Lock()
+	c.serverEcho = !suppress
+	c.smu.Unlock()
+	return nil
+}
+
+// echoEnabled returns the current server-echo state.
+func (c *Conn) echoEnabled() bool {
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	return c.serverEcho
 }
 
 // Close closes the underlying connection.
@@ -222,6 +245,7 @@ func (c *Conn) feed(b byte, out []byte) (int, error) {
 			// calls feed with a non-empty slice, but guard anyway.
 			return 0, io.ErrShortBuffer
 		}
+		c.echoByte(b)
 		out[0] = b
 		return 1, nil
 
@@ -232,6 +256,7 @@ func (c *Conn) feed(b byte, out []byte) (int, error) {
 			if len(out) == 0 {
 				return 0, io.ErrShortBuffer
 			}
+			c.echoByte(cmdIAC)
 			out[0] = cmdIAC
 			return 1, nil
 		case cmdWILL:
@@ -311,8 +336,14 @@ func (c *Conn) feed(b byte, out []byte) (int, error) {
 
 func (c *Conn) sendInitialOffers(opts Options) error {
 	var buf []byte
+	if opts.OfferEcho {
+		buf = append(buf, cmdIAC, cmdWILL, optEcho)
+	}
 	if opts.OfferSGA {
 		buf = append(buf, cmdIAC, cmdWILL, optSGA)
+	}
+	if opts.OfferLINEMODE {
+		buf = append(buf, cmdIAC, cmdDONT, optLINEMODE)
 	}
 	if opts.OfferTTYPE {
 		buf = append(buf, cmdIAC, cmdDO, optTTYPE)
@@ -332,6 +363,35 @@ func (c *Conn) sendInitialOffers(opts Options) error {
 	return err
 }
 
+// echoByte writes the echo of one received data byte to the wire,
+// applying the usual cooked-mode translations. If serverEcho is off
+// (suppressed for password entry) no bytes are emitted.
+func (c *Conn) echoByte(b byte) {
+	if !c.echoEnabled() {
+		return
+	}
+	var toWrite []byte
+	switch b {
+	case '\r':
+		toWrite = []byte("\r\n")
+	case '\n':
+		// Most char-mode clients send only \r for Enter, but if a client
+		// sends \n we still echo a newline.
+		toWrite = []byte("\r\n")
+	case 0x08, 0x7F: // BS or DEL
+		toWrite = []byte("\b \b")
+	default:
+		if b < 0x20 {
+			// Other control characters don't get echoed.
+			return
+		}
+		toWrite = []byte{b}
+	}
+	c.wmu.Lock()
+	_, _ = c.raw.Write(toWrite)
+	c.wmu.Unlock()
+}
+
 func (c *Conn) handleWILL(opt byte) {
 	switch opt {
 	case optTTYPE:
@@ -341,6 +401,9 @@ func (c *Conn) handleWILL(opt byte) {
 		// Client offers; we accept silently (we already DO'd them).
 	case optCHARSET:
 		c.send(cmdIAC, cmdDO, optCHARSET)
+	case optLINEMODE:
+		// Reject explicitly: we want character-at-a-time mode.
+		c.send(cmdIAC, cmdDONT, opt)
 	default:
 		c.send(cmdIAC, cmdDONT, opt)
 	}
