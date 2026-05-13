@@ -63,6 +63,11 @@ func (s *Session) setEcho(suppress bool) error {
 	return s.tc.SetEcho(suppress)
 }
 
+// echoOn reports whether the server is currently echoing.
+func (s *Session) echoOn() bool {
+	return s.tc.EchoEnabled()
+}
+
 // writeRaw writes bytes directly to the connection without going through
 // the encoder. Used during pre-prompt phases when no encoder exists yet.
 func (s *Session) writeRaw(b []byte) error {

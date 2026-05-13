@@ -43,9 +43,10 @@ func (h *Handler) login(ctx context.Context, s *Session) error {
 		}
 
 		_ = s.writeString("Password: ")
+		prevEcho := s.echoOn()
 		_ = s.setEcho(true)
 		password, err := s.readLine()
-		_ = s.setEcho(false)
+		_ = s.setEcho(!prevEcho) // restore to whatever it was, don't force-on
 		if err != nil && password == "" {
 			return err
 		}
@@ -81,9 +82,10 @@ func (h *Handler) createAccount(ctx context.Context, s *Session) error {
 	username = strings.TrimSpace(username)
 
 	_ = s.writeString("Choose a password: ")
+	prevEcho := s.echoOn()
 	_ = s.setEcho(true)
 	password, err := s.readLine()
-	_ = s.setEcho(false)
+	_ = s.setEcho(!prevEcho)
 	if err != nil && password == "" {
 		return err
 	}

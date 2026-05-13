@@ -64,6 +64,7 @@ func (h *Handler) cmdHelp(s *Session) {
 		"  terminal height <n>",
 		"  terminal color on|off",
 		"  terminal lines vt100|native",
+		"  terminal echo on|off",
 		"  motd               — re-display the message of the day",
 		"  look               — placeholder (real rooms arrive in milestone 2)",
 		"  quit               — disconnect",
@@ -97,6 +98,8 @@ func (h *Handler) cmdTerminal(ctx context.Context, s *Session, args string) {
 		h.terminalSetColor(ctx, s, rest)
 	case "lines":
 		h.terminalSetLines(ctx, s, rest)
+	case "echo":
+		h.terminalSetEcho(s, rest)
 	default:
 		_ = s.writef("Unknown 'terminal' subcommand: %q. Try 'help'.\r\n", sub)
 	}
@@ -116,13 +119,18 @@ func (h *Handler) printTerminalStatus(s *Session) {
 	if c.Telnet {
 		telnetStr = "yes"
 	}
+	echoStr := "off"
+	if s.echoOn() {
+		echoStr = "on"
+	}
 	_ = s.writef("Terminal settings:\r\n"+
 		"  encoding : %s\r\n"+
 		"  size     : %d x %d\r\n"+
 		"  color    : %s\r\n"+
 		"  lines    : %s\r\n"+
+		"  echo     : %s\r\n"+
 		"  telnet   : %s\r\n",
-		c.Encoding, c.Width, c.Height, colorStr, linesStr, telnetStr)
+		c.Encoding, c.Width, c.Height, colorStr, linesStr, echoStr, telnetStr)
 }
 
 func (h *Handler) terminalSetEncoding(ctx context.Context, s *Session, arg string) {
@@ -171,6 +179,25 @@ func (h *Handler) terminalSetColor(ctx context.Context, s *Session, arg string) 
 		state = "on"
 	}
 	_ = s.writef("Color: %s.\r\n", state)
+}
+
+func (h *Handler) terminalSetEcho(s *Session, arg string) {
+	on, ok := parseOnOff(arg)
+	if !ok {
+		_ = s.writeString("Usage: terminal echo on|off\r\n")
+		return
+	}
+	// SetEcho takes a "suppress" bool: true means do NOT echo. The
+	// user-facing "on/off" inverts that.
+	if err := s.setEcho(!on); err != nil {
+		_ = s.writef("Failed to change echo state: %v\r\n", err)
+		return
+	}
+	state := "off"
+	if on {
+		state = "on"
+	}
+	_ = s.writef("Server echo: %s.\r\n", state)
 }
 
 func (h *Handler) terminalSetLines(ctx context.Context, s *Session, arg string) {

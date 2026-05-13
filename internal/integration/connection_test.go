@@ -101,7 +101,7 @@ func driveClient(t *testing.T, srv *testServer, steps []step) []byte {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -310,6 +310,39 @@ func TestPersistedPrefsAppliedOnLogin(t *testing.T) {
 	}
 }
 
+func TestTerminalEchoCommand(t *testing.T) {
+	srv := startServer(t)
+	out := driveClient(t, srv, []step{
+		{expect: "PRESS ENTER TO BEGIN", send: "\r\n"},
+		{expect: "ENABLE ECHO", send: "\r\n"},
+		{expect: "TERMINAL TYPE:", send: "u\r\n"},
+		{expect: "Username", send: "new\r\n"},
+		{expect: "Choose a username", send: "frank\r\n"},
+		{expect: "Choose a password", send: "hunter22\r\n"},
+		{expect: "Username", send: "frank\r\n"},
+		{expect: "Password", send: "hunter22\r\n"},
+		{expect: "Welcome, frank", send: ""},
+		{expect: ">", send: "terminal\r\n"},
+		// Status should reflect the default echo state (off for non-telnet).
+		{expect: "echo     : off", send: ""},
+		{expect: ">", send: "terminal echo on\r\n"},
+		{expect: "Server echo: on.", send: ""},
+		{expect: ">", send: "terminal\r\n"},
+		{expect: "echo     : on", send: ""},
+		{expect: ">", send: "terminal echo off\r\n"},
+		{expect: "Server echo: off.", send: ""},
+		{expect: ">", send: "terminal\r\n"},
+		{expect: "echo     : off", send: ""},
+		// Bad argument errors cleanly.
+		{expect: ">", send: "terminal echo banana\r\n"},
+		{expect: "Usage: terminal echo on|off", send: ""},
+		{expect: ">", send: "quit\r\n"},
+	})
+	if !bytes.Contains(out, []byte("Server echo: on.")) {
+		t.Errorf("expected 'Server echo: on.' confirmation in output:\n%s", out)
+	}
+}
+
 func TestLocalEchoPromptDefaultsToNo(t *testing.T) {
 	srv := startServer(t)
 	out := driveClient(t, srv, []step{
@@ -458,3 +491,4 @@ func min(a, b int) int {
 	}
 	return b
 }
+

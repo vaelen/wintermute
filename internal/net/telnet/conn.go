@@ -147,11 +147,11 @@ func (c *Conn) SetEcho(suppress bool) error {
 	return nil
 }
 
-// echoEnabled returns whether the server is currently echoing received
+// EchoEnabled reports whether the server is currently echoing received
 // data bytes back to the client. The flag defaults to off and auto-flips
 // on the first IAC from the remote (when OfferEcho is set); SetEcho can
 // flip it independently at any time.
-func (c *Conn) echoEnabled() bool {
+func (c *Conn) EchoEnabled() bool {
 	c.smu.Lock()
 	defer c.smu.Unlock()
 	return c.serverEcho
@@ -417,7 +417,7 @@ func (c *Conn) sendInitialOffers(opts Options) error {
 // applying the usual cooked-mode translations. If serverEcho is off
 // (suppressed for password entry) no bytes are emitted.
 func (c *Conn) echoByte(b byte) {
-	if !c.echoEnabled() {
+	if !c.EchoEnabled() {
 		return
 	}
 	var toWrite []byte
