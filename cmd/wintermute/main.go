@@ -64,6 +64,10 @@ func run(cfgPath string) error {
 	motd := defaultMOTD()
 	handler := session.DefaultHandler(authStore, logger, motd)
 
+	// wg tracks BOTH the accept-loop goroutines and every per-session
+	// goroutine. On shutdown we Wait on it before letting `defer db.Close()`
+	// run, so a session that's mid-write to the DB won't race with the
+	// writer goroutine shutting down ("send on closed channel" panic).
 	var wg sync.WaitGroup
 	if cfg.Server.TelnetPort > 0 {
 		ln, err := net.Listen("tcp", joinHostPort("0.0.0.0", cfg.Server.TelnetPort))
@@ -74,7 +78,7 @@ func run(cfgPath string) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			acceptLoop(ctx, ln, handler, logger)
+			acceptLoop(ctx, ln, handler, logger, &wg)
 		}()
 		go func() { <-ctx.Done(); _ = ln.Close() }()
 	}
@@ -88,7 +92,7 @@ func run(cfgPath string) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			acceptLoop(ctx, tlsLn, handler, logger)
+			acceptLoop(ctx, tlsLn, handler, logger, &wg)
 		}()
 		go func() { <-ctx.Done(); _ = tlsLn.Close() }()
 	}
@@ -96,6 +100,10 @@ func run(cfgPath string) error {
 	<-ctx.Done()
 	logger.Info("shutdown requested")
 	// Give in-flight sessions a moment to drain before closing the DB.
+	// Per-session goroutines close their underlying conn on ctx cancel
+	// (see acceptLoop), so blocked reads inside Handle return quickly
+	// and sessions exit promptly. The 2 s timeout is a backstop for any
+	// session that is genuinely stuck.
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	select {
@@ -157,7 +165,7 @@ func joinHostPort(host string, port int) string {
 	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
-func acceptLoop(ctx context.Context, ln net.Listener, h *session.Handler, logger *slog.Logger) {
+func acceptLoop(ctx context.Context, ln net.Listener, h *session.Handler, logger *slog.Logger, wg *sync.WaitGroup) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -173,12 +181,30 @@ func acceptLoop(ctx context.Context, ln net.Listener, h *session.Handler, logger
 			logger.Warn("accept failed", "err", err)
 			continue
 		}
+		wg.Add(1)
 		go func(c net.Conn) {
+			defer wg.Done()
 			defer func() {
 				if r := recover(); r != nil {
 					logger.Error("session panic", "err", r, "remote", c.RemoteAddr())
 				}
 			}()
+
+			// Watch for shutdown and close the underlying conn so any
+			// blocked read inside Handle returns promptly. handleDone
+			// signals normal completion so the watcher exits without
+			// closing the conn twice (Handle's own deferred Close has
+			// already run).
+			handleDone := make(chan struct{})
+			defer close(handleDone)
+			go func() {
+				select {
+				case <-ctx.Done():
+					_ = c.Close()
+				case <-handleDone:
+				}
+			}()
+
 			h.Handle(ctx, c)
 		}(conn)
 	}
