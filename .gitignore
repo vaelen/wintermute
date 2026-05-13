@@ -1,0 +1,47 @@
+# Build artifacts
+/wintermute
+/wintermute.exe
+/dist/
+/bin/
+
+# Go test / coverage / profile outputs
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+
+# Vendor directory (we don't vendor)
+/vendor/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local environment + secrets
+.env
+.env.*
+*.local.toml
+wintermute.local.toml
+
+# Runtime data — keep these *out* of the repo
+*.db
+*.db-wal
+*.db-shm
+/data/
+/var/
+/blob_store/
+
+# Logs
+*.log
+
+# Generated certs (dev only)
+/dev-cert.pem
+/dev-key.pem
+
+# AI coding assistants
+.claude/
