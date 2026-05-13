@@ -129,15 +129,29 @@ func TestFindDAResponseEnd(t *testing.T) {
 
 func TestRenderPromptDefaultMarker(t *testing.T) {
 	out := RenderPromptOnly(EncodingUTF8)
-	if !contains(out, "U - Unicode [modern, default]") {
-		t.Errorf("expected Unicode to be marked default; got: %s", out)
+	if !contains(out, "U - UNICODE [MODERN, DEFAULT]") {
+		t.Errorf("expected UNICODE to be marked default; got: %s", out)
 	}
 	out = RenderPromptOnly(EncodingPETSCII)
-	if !contains(out, "P - PETSCII [default]") {
+	if !contains(out, "P - PETSCII [DEFAULT]") {
 		t.Errorf("expected PETSCII to be marked default; got: %s", out)
 	}
-	if contains(out, "Unicode [modern, default]") {
-		t.Errorf("Unicode should not have default marker when PETSCII is default; got: %s", out)
+	if contains(out, "UNICODE [MODERN, DEFAULT]") {
+		t.Errorf("UNICODE should not have default marker when PETSCII is default; got: %s", out)
+	}
+}
+
+func TestRenderPromptIsUppercaseASCIIOnly(t *testing.T) {
+	// The prompt has to be safe for a PETSCII client in its default
+	// (uppercase / graphics) mode, where lowercase ASCII positions
+	// (0x61-0x7A) render as graphics rather than letters. Verify the
+	// prompt contains no lowercase letters.
+	out := RenderPrompt(EncodingUTF8)
+	for _, b := range []byte(out) {
+		if b >= 'a' && b <= 'z' {
+			t.Errorf("RenderPrompt contains lowercase byte 0x%02X in: %s", b, out)
+			return
+		}
 	}
 }
 

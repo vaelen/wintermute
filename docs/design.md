@@ -210,16 +210,20 @@ On every connection, before login:
    - width / height: NAWS if reported; else 80×24, except PETSCII/ASCII default to 40×24.
    - telnet: as detected in step 1.
    - if the connecting account has saved preferences from a prior session, prefer those over the auto-detected defaults.
-5. **Send Shift Out.** Emit PETSCII control code `0x0E` (Shift Out — "switch to mixed-case mode") immediately, before any rendered text. On PETSCII clients (C64 / VICE / similar) this switches them into mixed-case mode so subsequent ASCII letters render as readable text. On modern terminals `0x0E` is either ignored or interpreted as the (mostly moribund) NRCS shift, which in practice is a no-op. This single byte resolves the otherwise-unsolvable "the pre-selection prompt has to be readable on a default-mode C64" problem.
-6. **Confirmation prompt.** Send a mixed-case prompt asking the user to confirm or override:
+5. **Confirmation prompt.** Send an **all-uppercase** prompt asking the user to confirm or override:
 
    ```
-   Terminal Type: U - Unicode [modern, default], D - DOS [cp437],
-   M - Mac [classic], L - Latin-1, P - PETSCII, A - ASCII:
+   WELCOME TO WINTERMUTE.
+
+   TERMINAL TYPE: U - UNICODE [MODERN, DEFAULT], D - DOS [CP437],
+   M - MAC [CLASSIC], L - LATIN-1, P - PETSCII, A - ASCII:
    ```
 
-   The `[default]` marker attaches to whichever option was auto-detected (e.g. `P - PETSCII [default]` if the auto-detect chose PETSCII); pressing Enter accepts that choice. Mixed-case is intentional: after the Shift Out, PETSCII clients render uppercase ASCII positions as lowercase PETSCII letters and vice versa, so the prompt appears case-swapped but readable. All other encodings render mixed case normally.
-7. **Apply selection.** Force width to 40 columns for PETSCII and ASCII unless the user later overrides it. Rebuild the session's `Encoder` for the chosen encoding.
+   The `[DEFAULT]` marker attaches to whichever option was auto-detected (e.g. `P - PETSCII [DEFAULT]` if the auto-detect chose PETSCII); pressing Enter accepts that choice. The prompt uses only characters whose byte positions render correctly on a PETSCII client in its **default (uppercase / graphics) mode** — uppercase letters `A`–`Z`, digits, space, and the punctuation `: , - ( ) [ ]` — so no Shift Out is needed yet.
+6. **Apply selection.**
+   - Rebuild the session's `Encoder` for the chosen encoding.
+   - **If PETSCII was chosen**, emit PETSCII control code `0x0E` (Shift Out) so the C64 switches into mixed-case mode for all subsequent output. The engine emits Shift Out **every time the session transitions into PETSCII** — at the end of this prompt, after `terminal encoding petscii` post-login, or after a saved-prefs override loads PETSCII. Non-PETSCII encodings never see Shift Out from the engine.
+   - Force width to 40 columns for PETSCII and ASCII unless the user later overrides it.
 
 After login, the user can view or change any axis via a `terminal` command; preferences are persisted per-account and used as the auto-detect bias on next login.
 

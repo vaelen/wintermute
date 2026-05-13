@@ -87,19 +87,12 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 
 	defaults := term.AutoDetect(hints)
 
-	// --- Send Shift Out unconditionally -----------------------------------
-	// PETSCII clients enter mixed-case mode; modern terminals ignore the byte
-	// (or treat it as the moribund NRCS shift, which is a no-op in practice).
-	if err := s.writeRaw([]byte{term.PETSCIIShiftOut}); err != nil {
-		s.log.Debug("write shift out failed", "err", err)
-		return
-	}
-
 	// --- Confirmation prompt ----------------------------------------------
-	// Use a temporary encoder seeded with the auto-detected capabilities so
-	// the prompt itself is rendered correctly even before the user confirms.
-	tempEnc := term.Open(defaults)
-	s.enc = tempEnc
+	// The prompt encoder is always ASCII regardless of auto-detect, because
+	// the prompt is uppercase-ASCII-only by construction so that it renders
+	// natively on a PETSCII client in its default (uppercase / graphics)
+	// mode — no Shift Out is needed yet.
+	s.enc = term.Open(term.Capabilities{Encoding: term.EncodingASCII})
 
 	if err := s.writeString(term.RenderPrompt(defaults.Encoding)); err != nil {
 		s.log.Debug("write prompt failed", "err", err)
@@ -115,7 +108,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		}
 		enc, ok := term.ParsePromptResponse(line, defaults.Encoding)
 		if !ok {
-			if err := s.writeString("Please choose one of U, D, M, L, P, A (or press Enter for the default): "); err != nil {
+			if err := s.writeString("PLEASE CHOOSE ONE OF U, D, M, L, P, A (OR PRESS ENTER FOR THE DEFAULT): "); err != nil {
 				return
 			}
 			continue
@@ -129,6 +122,13 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	closing := s.enc.Reconfigure(chosen)
 	if len(closing) > 0 {
 		_, _ = s.writer().Write(closing)
+	}
+
+	// Transition into PETSCII: emit Shift Out so the C64 switches to
+	// mixed-case mode before any further text reaches it. Other encodings
+	// never see this byte from the engine.
+	if chosen.Encoding == term.EncodingPETSCII {
+		_, _ = s.writer().Write([]byte{term.PETSCIIShiftOut})
 	}
 
 	// Send a blank line to separate the prompt from the login UI.

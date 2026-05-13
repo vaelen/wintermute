@@ -17,29 +17,31 @@ type promptOption struct {
 }
 
 var promptOptions = []promptOption{
-	{'U', EncodingUTF8, "Unicode", "modern"},
-	{'D', EncodingCP437, "DOS", "cp437"},
-	{'M', EncodingMacRoman, "Mac", "classic"},
-	{'L', EncodingISO88591, "Latin-1", ""},
+	{'U', EncodingUTF8, "UNICODE", "MODERN"},
+	{'D', EncodingCP437, "DOS", "CP437"},
+	{'M', EncodingMacRoman, "MAC", "CLASSIC"},
+	{'L', EncodingISO88591, "LATIN-1", ""},
 	{'P', EncodingPETSCII, "PETSCII", ""},
 	{'A', EncodingASCII, "ASCII", ""},
 }
 
-// RenderPrompt returns the confirmation prompt string with the [default]
-// tag attached to the option whose Encoding matches defaultEnc. The bytes
-// it returns are pure 7-bit ASCII so they render acceptably across all
-// six encodings after the connect-time Shift Out has been sent.
+// RenderPrompt returns the confirmation prompt string with the [DEFAULT]
+// tag attached to the option whose Encoding matches defaultEnc.
 //
-// The first call to RenderPrompt also emits the welcome banner. Callers
-// that want the prompt without the banner can use RenderPromptOnly.
+// The prompt is intentionally all uppercase, using only characters whose
+// byte positions render the same in every supported encoding *and* on a
+// PETSCII client in its default (uppercase / graphics) mode. That is what
+// lets the prompt be readable to a fresh C64 connection without the
+// engine first emitting a Shift Out — Shift Out is only sent when the
+// session actually transitions into PETSCII.
 func RenderPrompt(defaultEnc Encoding) string {
-	return "Welcome to Wintermute.\r\n\r\n" + RenderPromptOnly(defaultEnc)
+	return "WELCOME TO WINTERMUTE.\r\n\r\n" + RenderPromptOnly(defaultEnc)
 }
 
 // RenderPromptOnly returns the prompt without the leading welcome banner.
 func RenderPromptOnly(defaultEnc Encoding) string {
 	var sb strings.Builder
-	sb.WriteString("Terminal Type: ")
+	sb.WriteString("TERMINAL TYPE: ")
 	for i, opt := range promptOptions {
 		if i > 0 {
 			sb.WriteString(", ")
@@ -51,7 +53,7 @@ func RenderPromptOnly(defaultEnc Encoding) string {
 			tags = append(tags, opt.Note)
 		}
 		if opt.Encoding == defaultEnc {
-			tags = append(tags, "default")
+			tags = append(tags, "DEFAULT")
 		}
 		if len(tags) > 0 {
 			sb.WriteString(" [")

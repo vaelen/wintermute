@@ -196,11 +196,17 @@ func parseOnOff(s string) (bool, bool) {
 
 // reconfigure switches the encoder to next and persists the change to
 // the account. Closing graphics-mode bytes from the old encoder are
-// emitted before the switch.
+// emitted before the switch; if the new encoding is PETSCII and the old
+// one wasn't, a Shift Out is emitted afterward so the C64 enters
+// mixed-case mode.
 func (h *Handler) reconfigure(ctx context.Context, s *Session, next term.Capabilities) {
+	prev := s.enc.Capabilities()
 	closing := s.enc.Reconfigure(next)
 	if len(closing) > 0 {
 		_, _ = s.writer().Write(closing)
+	}
+	if next.Encoding == term.EncodingPETSCII && prev.Encoding != term.EncodingPETSCII {
+		_, _ = s.writer().Write([]byte{term.PETSCIIShiftOut})
 	}
 	if err := h.savePrefs(ctx, s); err != nil {
 		s.log.Warn("save prefs failed", "err", err)

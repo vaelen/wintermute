@@ -160,4 +160,10 @@ func (h *Handler) applyAccountPrefsIfDiffer(s *Session) {
 	if len(closing) > 0 {
 		_, _ = s.writer().Write(closing)
 	}
+	// If the saved prefs flip the session into PETSCII and the pre-login
+	// choice wasn't PETSCII, the C64 still needs the Shift Out before
+	// mixed-case content arrives.
+	if next.Encoding == term.EncodingPETSCII && cur.Encoding != term.EncodingPETSCII {
+		_, _ = s.writer().Write([]byte{term.PETSCIIShiftOut})
+	}
 }

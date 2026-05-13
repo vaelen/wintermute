@@ -159,8 +159,8 @@ func TestRawTCPFullFlow(t *testing.T) {
 	srv := startServer(t)
 
 	out := driveClient(t, srv, []step{
-		// 1. Shift Out byte + prompt.
-		{expect: "Terminal Type:", send: ""},
+		// 1. Uppercase prompt arrives.
+		{expect: "TERMINAL TYPE:", send: ""},
 		// 2. Choose Unicode (auto-detect default for raw TCP without ANSI probe
 		//    is ASCII; we override to UTF-8 explicitly).
 		{expect: "", send: "u\r\n"},
@@ -193,19 +193,13 @@ func TestRawTCPFullFlow(t *testing.T) {
 		{expect: "Goodbye", send: ""},
 	})
 
-	// The server must send the Shift Out byte (0x0E) before the Welcome
-	// banner. The ANSI probe (ESC[c) may legitimately precede it on the
-	// non-telnet path.
-	shiftIdx := bytes.IndexByte(out, term.PETSCIIShiftOut)
-	welcomeIdx := bytes.Index(out, []byte("Welcome to Wintermute."))
-	if shiftIdx == -1 {
-		t.Errorf("Shift Out byte (0x0E) missing from output")
+	// The user never selected PETSCII, so the engine must not have emitted
+	// a Shift Out byte (0x0E) anywhere in the byte stream.
+	if bytes.IndexByte(out, term.PETSCIIShiftOut) != -1 {
+		t.Errorf("Shift Out (0x0E) should not appear when PETSCII is not chosen; output:\n% X", out)
 	}
-	if welcomeIdx == -1 {
-		t.Fatalf("welcome banner missing from output:\n%s", out)
-	}
-	if shiftIdx >= welcomeIdx {
-		t.Errorf("Shift Out at %d should precede welcome banner at %d", shiftIdx, welcomeIdx)
+	if !bytes.Contains(out, []byte("WELCOME TO WINTERMUTE.")) {
+		t.Errorf("uppercase welcome banner missing from output:\n%s", out)
 	}
 
 	// Verify the account was created and saved prefs reflect the latest
@@ -237,7 +231,7 @@ func TestRawTCPInvalidLogin(t *testing.T) {
 	}
 
 	out := driveClient(t, srv, []step{
-		{expect: "Terminal Type:", send: "u\r\n"},
+		{expect: "TERMINAL TYPE:", send: "u\r\n"},
 		{expect: "Username", send: "bob\r\n"},
 		{expect: "Password", send: "wrong\r\n"},
 		{expect: "Invalid username or password", send: ""},
@@ -271,7 +265,7 @@ func TestPersistedPrefsAppliedOnLogin(t *testing.T) {
 	// Connect as carol; pick UTF-8 at the prompt; expect saved prefs to be
 	// applied silently after login.
 	out := driveClient(t, srv, []step{
-		{expect: "Terminal Type:", send: "u\r\n"},
+		{expect: "TERMINAL TYPE:", send: "u\r\n"},
 		{expect: "Username", send: "carol\r\n"},
 		{expect: "Password", send: "passpasspass\r\n"},
 		{expect: "Welcome, carol", send: ""},
@@ -284,6 +278,66 @@ func TestPersistedPrefsAppliedOnLogin(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte("size     : 100 x 40")) {
 		t.Errorf("expected saved size 100x40 in output:\n%s", out)
+	}
+}
+
+func TestPETSCIISelectionEmitsShiftOut(t *testing.T) {
+	srv := startServer(t)
+
+	out := driveClient(t, srv, []step{
+		// Wait for the uppercase prompt, then select PETSCII.
+		{expect: "TERMINAL TYPE:", send: "p\r\n"},
+		// Once Shift Out (0x0E) appears, the step is satisfied. We do not
+		// drive the rest of the login flow because the post-Shift-Out output
+		// is PETSCII-encoded and would need to be decoded for matching.
+		{expect: "\x0e", send: ""},
+	})
+
+	// Shift Out must appear in the byte stream.
+	shiftIdx := bytes.IndexByte(out, 0x0E)
+	if shiftIdx == -1 {
+		t.Fatalf("Shift Out (0x0E) missing after PETSCII selection; output:\n% X", out)
+	}
+	// ...and must come after the prompt text (i.e. only after the user
+	// chose PETSCII; not at connect time).
+	promptIdx := bytes.Index(out, []byte("TERMINAL TYPE:"))
+	if promptIdx == -1 || shiftIdx <= promptIdx {
+		t.Errorf("Shift Out at %d should come after prompt at %d", shiftIdx, promptIdx)
+	}
+}
+
+func TestPETSCIIPersistedPrefsEmitShiftOut(t *testing.T) {
+	// User pre-saves PETSCII; logs in via UTF-8 prompt; the encoder is
+	// switched to PETSCII during login pref-apply, which must emit Shift Out.
+	srv := startServer(t)
+	ctx := context.Background()
+
+	acc, err := srv.authS.Create(ctx, "dave", "passpasspass", auth.AccessPlayer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := "petscii"
+	if err := srv.authS.SaveTerminalPrefs(ctx, acc.ID, auth.TerminalPrefs{Encoding: &enc}); err != nil {
+		t.Fatal(err)
+	}
+
+	out := driveClient(t, srv, []step{
+		{expect: "TERMINAL TYPE:", send: "u\r\n"},
+		{expect: "Username", send: "dave\r\n"},
+		{expect: "Password", send: "passpasspass\r\n"},
+		// After login, applyAccountPrefsIfDiffer switches us to PETSCII and
+		// must emit Shift Out before the welcome / MOTD render.
+		{expect: "\x0e", send: ""},
+	})
+	if bytes.IndexByte(out, 0x0E) == -1 {
+		t.Errorf("expected Shift Out after login pref-apply; output:\n% X", out)
+	}
+	// Shift Out must come after the password line (which sets the boundary
+	// between the pre-login and post-login phase).
+	shiftIdx := bytes.IndexByte(out, 0x0E)
+	pwIdx := bytes.Index(out, []byte("Password"))
+	if pwIdx == -1 || shiftIdx <= pwIdx {
+		t.Errorf("Shift Out at %d should follow password prompt at %d", shiftIdx, pwIdx)
 	}
 }
 
