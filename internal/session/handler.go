@@ -113,7 +113,7 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	// negotiation already established server-side echo.
 	if !hints.Telnet {
 		s.enc = term.Open(term.Capabilities{Encoding: term.EncodingASCII})
-		if err := s.writeString("LOCAL ECHO (Y/[N]): "); err != nil {
+		if err := s.writeString("ENABLE ECHO (Y/[N]): "); err != nil {
 			return
 		}
 		resp, err := s.readLine()

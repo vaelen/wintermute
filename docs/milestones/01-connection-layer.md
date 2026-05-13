@@ -137,7 +137,7 @@ TCP accept
         - hints.Telnet = tc.Negotiated()
         - hints.TermType / NAWS pulled from tc.State()
   └─> if hints.Telnet is FALSE:
-        - ask "LOCAL ECHO (Y/[N]): "
+        - ask "ENABLE ECHO (Y/[N]): "
         - Y → SetEcho(false) (server takes over echo)
         - N (or empty) → leave serverEcho off
   └─> compute auto-detect defaults from (telnet status + TTYPE + ANSI hint)
