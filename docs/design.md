@@ -129,22 +129,99 @@ If a softcode-flavored DSL is desired for nostalgia/UX reasons, it can be a thin
 
 ## Protocol stack
 
-### Telnet
+### Connection acceptance
 
-Custom IAC option-negotiation handler. Options to support:
+The engine accepts **both telnet and raw-TCP clients**. Telnet support is opt-in per-session: on a new connection, a brief detection window reads the first bytes. If they begin with IAC (`0xFF`), the session enters telnet mode and responds to option negotiation. Otherwise the session is treated as a raw byte stream — useful for hardware modems, telnet-incapable BBS clients, classic-computer dialers, and netcat-style debug sessions.
 
-- **CHARSET** — negotiate UTF-8 vs CP437 vs Latin-1, etc.
-- **NAWS** — window size for proper line wrapping.
-- **TTYPE** — terminal type, for ANSI/VT100 capability detection.
-- **GMCP / MSDP** — out-of-band structured data for modern MUD clients (Mudlet, MUSHclient).
+Telnet options supported when enabled:
+
+- **CHARSET** — recorded as a hint; the engine's own encoding handshake (see below) is authoritative.
+- **NAWS** — window size; updates the session's tracked screen size dynamically.
+- **TTYPE** — terminal type; used as a hint during capability auto-detect.
+- **ECHO / SGA** — used to suppress local echo for password entry.
+- **GMCP / MSDP** — out-of-band structured data for modern MUD clients (Mudlet, MUSHclient); accepted but unused until a later milestone.
 
 ### TLS
 
-`crypto/tls` from the stdlib. Listen on both a plaintext port and a TLS port. Cert provisioning via Let's Encrypt (`golang.org/x/crypto/acme/autocert`) for production deployments.
+`crypto/tls` from the stdlib. Listen on both a plaintext port and a TLS port. Cert provisioning via Let's Encrypt (`golang.org/x/crypto/acme/autocert`) for production deployments. TLS is orthogonal to telnet — a TLS session may or may not negotiate telnet, exactly as a plaintext session does.
 
-### Character sets
+### Terminal capabilities — independent axes
 
-`golang.org/x/text/encoding` handles conversion in and out of the wire encoding. Internal representation is always UTF-8 Go strings.
+Every session tracks the following capability axes independently. Real-world clients combine them in non-obvious ways (a netcat connection may have full UTF-8 + ANSI but no telnet; a C64 over a modern dialer may have telnet but PETSCII encoding; stock `telnet(1)` typically has telnet but no NAWS), so they are not collapsed into a single "client kind."
+
+| Axis | Values | Default / detection | Mutable post-login |
+|---|---|---|---|
+| **Telnet protocol** | on / off | IAC peek on connect | no (set at connect time) |
+| **Character encoding** | UTF-8 / CP437 / ISO-8859-1 / MacRoman / PETSCII / ASCII | auto-detect → user confirmation prompt | yes (`terminal` command) |
+| **Screen size** | width × height | NAWS (when telnet on) or encoding default (40 for PETSCII/ASCII, else 80) | yes (`terminal` command, plus live NAWS during a session) |
+| **Color** | on / off | on for every encoding except ASCII | yes (`terminal` command) |
+| **DEC line drawing** | on / off | on for ISO-8859-1 and MacRoman; off elsewhere | yes (`terminal` command), independent of encoding |
+
+The rest of the engine treats screen size as a real-world property (used for wrapping, listing, etc.); the other axes are purely I/O concerns.
+
+### Internal representation: UTF-8 + ANSI
+
+All in-engine strings, all stored content, and all output composed by the engine are **UTF-8 with ANSI escape codes** for color and cursor control. The internal vocabulary explicitly admits:
+
+- **Single-line box-drawing** (`─│┌┐└┘├┤┬┴┼` and the rest of U+2500–U+257F single-stroke set).
+- **Double-line box-drawing** (`═║╔╗╚╝╠╣╦╩╬`-style — the CP437-mirroring subset of U+2550–U+256C).
+- **Shade / block / semi-graphics** (`░▒▓█` and half-block / quadrant family, U+2580–U+259F — mirroring CP437 0xB0–0xDF).
+
+Engine code and Lua scripts compose UTF-8 strings that may include any of these. Per-encoding translation happens only at the I/O boundary in `internal/term`.
+
+#### Per-encoding output pipeline
+
+The encoder applies these transformations in order:
+
+1. **ANSI handling** — pass through, translate to encoding-native equivalents, or strip, depending on the encoding (see below).
+2. **DEC line-drawing substitution** (only if the session has DEC line drawing enabled): walk the buffer for runs of single-line box-drawing characters and emit them using the DEC Special Graphics set (`q` for `─`, `x` for `│`, `l k m j` for corners, `t u v w n` for tees/cross, etc.), bracketed by `ESC ( 0` (designate G0 → DEC Special Graphics) and `ESC ( B` (designate G0 → ASCII). **The encoder maintains line-drawing state across writes** and emits the switch sequences only at transitions — entering a run emits one `ESC ( 0`, leaving one emits one `ESC ( B` — so a horizontal rule of 60 line characters is bracketed by exactly one pair, not 60 pairs. (`ESC ( 0` / `ESC ( B` is used rather than SO/SI to avoid colliding with the connect-time PETSCII Shift Out.)
+3. **Double-line downgrade** — for any encoding other than UTF-8 and CP437, replace each double-line character with its single-line equivalent before the character-mapping step.
+4. **Character mapping** — encoding-specific (below).
+
+Two general rules apply at the mapping step:
+
+- **Drawing characters with no encoding equivalent emit a space**, not `?`. This includes single-line box (after the optional DEC step), double-line box (after downgrade), and shade / semi-graphics. Diagrams degrade as holes, not as visual noise.
+- **Non-drawing characters with no encoding equivalent emit `?`**, as a normal lossy-transcoding signal.
+
+Per-encoding specifics:
+
+- **UTF-8** — pass-through. ANSI preserved. Every drawing character is native. (DEC line drawing remains user-toggleable for completeness, but defaults off.)
+- **CP437** — `golang.org/x/text/encoding` transcode; ANSI preserved. CP437's native repertoire covers single-line, double-line, and shade/semi-graphics 1:1, so the mapping is direct.
+- **ISO-8859-1** — `golang.org/x/text/encoding` transcode; ANSI preserved; **DEC line drawing default on** (so box-drawing characters render as real lines via the VT100 graphics set rather than as `-`/`|`/`+`); shade and other semi-graphics → space.
+- **MacRoman** — same posture as ISO-8859-1: DEC line drawing default on; semi-graphics → space.
+- **PETSCII** — custom translation:
+  - Letters / digits / punctuation → PETSCII bytes (respecting the connect-time mixed-case mode).
+  - ANSI SGR colors → PETSCII color control bytes (`0x05`, `0x1C`, `0x1E`, `0x1F`, `0x81`–`0x9F`).
+  - Single-line box-drawing → native PETSCII line graphics (`0xC0`, `0xDD`, etc.).
+  - Shade / semi-graphics → native PETSCII semi-graphics where an equivalent exists; otherwise space.
+  - ANSI cursor motion → best-effort PETSCII cursor controls; anything ambiguous dropped.
+  - DEC line drawing is meaningless on PETSCII clients and is ignored even if toggled on.
+- **ASCII** — strict 7-bit. Strip all ANSI sequences. Box-drawing (single- or double-line, after downgrade) → `-` / `|` / `+`. Shade / semi-graphics → space. Anything else high-byte → `?`. DEC line drawing is ignored on ASCII (ASCII has no escape mechanism by definition).
+
+### Capability detection
+
+On every connection, before login:
+
+1. **Telnet peek.** Block up to 200 ms reading the initial bytes. If the first byte is `IAC (0xFF)`, mark telnet on and enter option negotiation (offer DO/WILL for TTYPE, NAWS, CHARSET, ECHO, SGA). Otherwise mark telnet off and return the buffered bytes to the session's input stream.
+2. **ANSI probe.** Send the Device Attributes query (`ESC [ c`) and wait up to 300 ms for a response of the form `ESC [ ? … c`. Match → ANSI-capable.
+3. **TTYPE hint.** If telnet TTYPE returned a recognizable value (`xterm`, `vt100`, `ansi`, `petscii`, `c64`, etc.), bias the auto-detect default.
+4. **Compute defaults**:
+   - encoding: TTYPE-derived if obvious; else UTF-8 if ANSI-capable; else ASCII.
+   - width / height: NAWS if reported; else 80×24, except PETSCII/ASCII default to 40×24.
+   - telnet: as detected in step 1.
+   - if the connecting account has saved preferences from a prior session, prefer those over the auto-detected defaults.
+5. **Send Shift Out.** Emit PETSCII control code `0x0E` (Shift Out — "switch to mixed-case mode") immediately, before any rendered text. On PETSCII clients (C64 / VICE / similar) this switches them into mixed-case mode so subsequent ASCII letters render as readable text. On modern terminals `0x0E` is either ignored or interpreted as the (mostly moribund) NRCS shift, which in practice is a no-op. This single byte resolves the otherwise-unsolvable "the pre-selection prompt has to be readable on a default-mode C64" problem.
+6. **Confirmation prompt.** Send a mixed-case prompt asking the user to confirm or override:
+
+   ```
+   Terminal Type: U - Unicode [modern, default], D - DOS [cp437],
+   M - Mac [classic], L - Latin-1, P - PETSCII, A - ASCII:
+   ```
+
+   The `[default]` marker attaches to whichever option was auto-detected (e.g. `P - PETSCII [default]` if the auto-detect chose PETSCII); pressing Enter accepts that choice. Mixed-case is intentional: after the Shift Out, PETSCII clients render uppercase ASCII positions as lowercase PETSCII letters and vice versa, so the prompt appears case-swapped but readable. All other encodings render mixed case normally.
+7. **Apply selection.** Force width to 40 columns for PETSCII and ASCII unless the user later overrides it. Rebuild the session's `Encoder` for the chosen encoding.
+
+After login, the user can view or change any axis via a `terminal` command; preferences are persisted per-account and used as the auto-detect bias on next login.
 
 ### File transfer
 
@@ -181,7 +258,7 @@ Kermit is **not** spun off — its spec is large and varied, and demand for a pu
 | Network | `net` (stdlib) + custom telnet IAC | No third-party dependency for the core protocol |
 | TLS | `crypto/tls` (stdlib) | Zero-effort, stdlib-stable |
 | Cert provisioning | `golang.org/x/crypto/acme/autocert` | Let's Encrypt out of the box |
-| Text encoding | `golang.org/x/text/encoding` | Comprehensive charset support |
+| Text encoding | `golang.org/x/text/encoding` (CP437 / Latin-1 / MacRoman) + custom `internal/term` (PETSCII, ASCII downgrade, box-drawing translation, ANSI parser) | Comprehensive charset support; PETSCII is not in `x/text` and has to be hand-written |
 | Storage | `modernc.org/sqlite` + `sqlite-vec` | Pure Go, no CGo, vector search included |
 | LLM (Ollama) | `github.com/ollama/ollama/api` | Official Go client |
 | LLM (Anthropic) | `github.com/anthropics/anthropic-sdk-go` | Official Go SDK |

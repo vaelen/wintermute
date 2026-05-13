@@ -85,8 +85,10 @@ wintermute/
 ├── internal/
 │   ├── auth/               # accounts, password hashing, login
 │   ├── net/
-│   │   ├── telnet/         # IAC negotiation, charset, NAWS, GMCP later
+│   │   ├── telnet/         # IAC negotiation, NAWS, GMCP later (opt-in per session)
 │   │   └── tls/            # TLS listener helpers (autocert glue)
+│   ├── term/               # capability detection + per-encoding I/O translation
+│   │                       # (UTF-8, CP437, Latin-1, MacRoman, PETSCII, ASCII)
 │   ├── world/              # rooms, exits, objects, world cache
 │   │   ├── api/            # the API surface exposed to Lua
 │   │   └── events/         # event bus (M7)
@@ -136,9 +138,9 @@ github.com/vaelen/go-zmodem
 | Language | Go 1.23+ |
 | Storage | SQLite via `modernc.org/sqlite` (pure-Go) |
 | Vector search | `sqlite-vec` extension |
-| Telnet | hand-rolled IAC parser on top of `net` |
+| Telnet | hand-rolled IAC parser on top of `net`; opt-in per session after IAC peek |
 | TLS | `crypto/tls`, `golang.org/x/crypto/acme/autocert` |
-| Charset | `golang.org/x/text/encoding` |
+| Encoding | `golang.org/x/text/encoding` for CP437/Latin-1/MacRoman; **custom `internal/term` package** for PETSCII, ASCII downgrade, ANSI sequence parsing, and box-drawing translation |
 | Scripting | `github.com/yuin/gopher-lua` |
 | LLM | `github.com/ollama/ollama/api` (initial only registered backend) |
 | Logging | `log/slog` |
@@ -152,7 +154,7 @@ github.com/vaelen/go-zmodem
 
 | #  | Milestone                          | Summary                                                                            | Depends on | Effort | Status |
 |----|------------------------------------|------------------------------------------------------------------------------------|------------|--------|--------|
-| 01 | Connection layer                   | Telnet + TLS, IAC negotiation, accounts, login                                     | —          | M      | not started |
+| 01 | Connection layer                   | Telnet (opt-in) + TLS + raw-TCP; capability detection across six encodings; accounts, login | —          | L      | not started |
 | 02 | World layer                        | Rooms, exits, objects, movement, basic commands                                    | 01         | M      | not started |
 | 03 | Reactive NPCs                      | Pluggable `LLM` interface, Ollama backend, addressed-only NPC responses            | 02         | M      | not started |
 | 04 | NPC memory                         | Short-term ring buffer, long-term summary+embedding via `sqlite-vec`               | 03         | M      | not started |
@@ -240,7 +242,7 @@ A milestone is done when:
 ## Cadence
 
 This is a side project, not a sprint. Expected pacing:
-- M1–M2: a weekend each.
+- M1: 2–3 weekends (the telnet/encoding capability layer is bigger than it looks). M2: a weekend.
 - M3–M4: 1–2 weeks each (LLM plumbing is fiddly).
 - M5: 2–3 weeks (Lua API surface is large).
 - M6: 1 week.
