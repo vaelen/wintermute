@@ -9,12 +9,23 @@ import (
 	"strings"
 
 	"github.com/vaelen/wintermute/internal/term"
+	"github.com/vaelen/wintermute/internal/world"
+	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
 )
 
-// commandLoop runs the placeholder post-login command loop. Recognized
-// commands are minimal in milestone 1: terminal, help, who (stub), look
-// (void), and quit. Anything else echoes the "void" placeholder.
+// commandLoop runs the post-login input loop. The line is first offered to
+// the world command handler (look/move/say/...); anything the world
+// doesn't recognize is dispatched here as a session-level command
+// (terminal, motd, help).
 func (h *Handler) commandLoop(ctx context.Context, s *Session) {
+	wh := h.attachToWorld(s)
+	if wh == nil {
+		return
+	}
+	defer h.detachFromWorld(s)
+
+	wh.ShowRoom()
+
 	for {
 		if err := s.writeString("> "); err != nil {
 			return
@@ -27,23 +38,78 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 		if line == "" {
 			continue
 		}
+
+		switch wh.Dispatch(line) {
+		case worldcmd.OutcomeQuit:
+			return
+		case worldcmd.OutcomeContinue:
+			continue
+		case worldcmd.OutcomeUnknown:
+			// fall through to session-level commands
+		}
+
 		cmd, rest := splitCmd(line)
 		switch strings.ToLower(cmd) {
-		case "quit", "logout", "disconnect":
-			_ = s.writeString("Goodbye.\r\n")
-			return
-		case "help", "?":
-			h.cmdHelp(s)
 		case "terminal":
 			h.cmdTerminal(ctx, s, rest)
 		case "motd":
 			h.cmdMOTD(s)
-		case "look":
-			_ = s.writeString("You are in the void. Rooms arrive in milestone 2.\r\n")
 		default:
-			_ = s.writef("Unknown command: %q (try 'help'). The world is empty until milestone 2.\r\n", cmd)
+			_ = s.writef("Unknown command: %q (try 'help').\r\n", cmd)
 		}
 	}
+}
+
+// attachToWorld builds a Presence for the session and registers it with
+// the world. Returns the world cmd Handler, or nil if attach failed (in
+// which case an error has already been written to the session).
+func (h *Handler) attachToWorld(s *Session) *worldcmd.Handler {
+	if h.World == nil || s.account == nil {
+		_ = s.writeString("The world is unavailable. Please try again later.\r\n")
+		return nil
+	}
+	playerID, err := h.World.PlayerByAccount(s.account.ID)
+	if err != nil {
+		// Lazy bootstrap: account exists but body doesn't (e.g. account
+		// predates this migration). Create one now.
+		playerID, err = h.World.CreatePlayer(context.Background(), s.account)
+		if err != nil {
+			s.log.Error("create player object", "err", err)
+			_ = s.writeString("The world refuses to acknowledge you. (Could not create your body.)\r\n")
+			return nil
+		}
+	}
+	s.playerID = playerID
+
+	pres := &world.Presence{
+		PlayerID: playerID,
+		Account:  s.account,
+		Write:    s.writeString,
+		Log:      s.log,
+	}
+	if _, err := h.World.Attach(pres); err != nil {
+		if err == world.ErrAlreadyAttached {
+			// A stale session is still attached. Force a detach and retry.
+			h.World.Detach(playerID)
+			if _, err = h.World.Attach(pres); err != nil {
+				s.log.Error("re-attach failed", "err", err)
+				_ = s.writeString("You are already logged in elsewhere.\r\n")
+				return nil
+			}
+		} else {
+			s.log.Error("world attach failed", "err", err)
+			_ = s.writeString("The world refuses to acknowledge you.\r\n")
+			return nil
+		}
+	}
+	return &worldcmd.Handler{World: h.World, Presence: pres}
+}
+
+func (h *Handler) detachFromWorld(s *Session) {
+	if h.World == nil || s.playerID == 0 {
+		return
+	}
+	h.World.Detach(s.playerID)
 }
 
 func splitCmd(line string) (cmd, rest string) {
@@ -52,25 +118,6 @@ func splitCmd(line string) (cmd, rest string) {
 		return line, ""
 	}
 	return line[:i], strings.TrimSpace(line[i+1:])
-}
-
-func (h *Handler) cmdHelp(s *Session) {
-	help := strings.Join([]string{
-		"Commands available in milestone 1:",
-		"  help               — show this list",
-		"  terminal           — show current terminal settings",
-		"  terminal encoding <utf8|cp437|iso88591|macroman|petscii|ascii>",
-		"  terminal width <n>",
-		"  terminal height <n>",
-		"  terminal color on|off",
-		"  terminal lines vt100|native",
-		"  terminal echo on|off",
-		"  motd               — re-display the message of the day",
-		"  look               — placeholder (real rooms arrive in milestone 2)",
-		"  quit               — disconnect",
-		"",
-	}, "\r\n")
-	_ = s.writeString(help)
 }
 
 func (h *Handler) cmdMOTD(s *Session) {

@@ -16,12 +16,14 @@ import (
 	"github.com/vaelen/wintermute/internal/auth"
 	wtelnet "github.com/vaelen/wintermute/internal/net/telnet"
 	"github.com/vaelen/wintermute/internal/term"
+	"github.com/vaelen/wintermute/internal/world"
 )
 
 // Handler holds the dependencies a connection handler needs. One Handler
 // is created at engine startup and reused for every accepted connection.
 type Handler struct {
 	Auth   *auth.Store
+	World  *world.World
 	Logger *slog.Logger
 	MOTD   string
 
@@ -31,9 +33,10 @@ type Handler struct {
 }
 
 // DefaultHandler returns a Handler with sensible defaults wired in.
-func DefaultHandler(a *auth.Store, log *slog.Logger, motd string) *Handler {
+func DefaultHandler(a *auth.Store, w *world.World, log *slog.Logger, motd string) *Handler {
 	return &Handler{
 		Auth:                     a,
+		World:                    w,
 		Logger:                   log,
 		MOTD:                     motd,
 		TelnetDetectTimeout:      200 * time.Millisecond,
@@ -52,7 +55,7 @@ func DefaultHandler(a *auth.Store, log *slog.Logger, motd string) *Handler {
 // response: tc.Negotiated() reports whether any IAC came back.
 func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	s := newSession(conn, h.Auth, h.Logger)
+	s := newSession(conn, h.Auth, h.World, h.Logger)
 	defer s.finalize()
 
 	br := bufio.NewReader(conn)
