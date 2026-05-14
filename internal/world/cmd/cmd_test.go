@@ -111,14 +111,14 @@ func TestCanonicalDirection(t *testing.T) {
 
 func TestDispatchUnknownReturnsUnknown(t *testing.T) {
 	h, _ := newHandler(t, "alice")
-	if got := h.Dispatch("frobnicate"); got != OutcomeUnknown {
+	if got := h.Dispatch(context.Background(),"frobnicate"); got != OutcomeUnknown {
 		t.Errorf("Dispatch(frobnicate) = %v, want OutcomeUnknown", got)
 	}
 }
 
 func TestDispatchQuit(t *testing.T) {
 	h, rw := newHandler(t, "alice")
-	if got := h.Dispatch("quit"); got != OutcomeQuit {
+	if got := h.Dispatch(context.Background(),"quit"); got != OutcomeQuit {
 		t.Errorf("Dispatch(quit) = %v, want OutcomeQuit", got)
 	}
 	if !strings.Contains(rw.Drain(), "Goodbye") {
@@ -128,7 +128,7 @@ func TestDispatchQuit(t *testing.T) {
 
 func TestDispatchLookShowsRoom(t *testing.T) {
 	h, rw := newHandler(t, "alice")
-	if got := h.Dispatch("look"); got != OutcomeContinue {
+	if got := h.Dispatch(context.Background(),"look"); got != OutcomeContinue {
 		t.Errorf("Dispatch(look) = %v, want OutcomeContinue", got)
 	}
 	out := rw.Drain()
@@ -139,12 +139,12 @@ func TestDispatchLookShowsRoom(t *testing.T) {
 
 func TestDispatchMoveAndNoExit(t *testing.T) {
 	h, rw := newHandler(t, "alice")
-	h.Dispatch("e")
+	h.Dispatch(context.Background(),"e")
 	out := rw.Drain()
 	if !strings.Contains(out, "Corridor") {
 		t.Errorf("after move east, expected corridor in output:\n%s", out)
 	}
-	h.Dispatch("s") // no south exit from corridor
+	h.Dispatch(context.Background(),"s") // no south exit from corridor
 	if !strings.Contains(rw.Drain(), "can't go that way") {
 		t.Errorf("expected 'can't go that way' for bad direction")
 	}
@@ -152,7 +152,7 @@ func TestDispatchMoveAndNoExit(t *testing.T) {
 
 func TestDispatchSayShowsSelfEcho(t *testing.T) {
 	h, rw := newHandler(t, "alice")
-	h.Dispatch("say hello")
+	h.Dispatch(context.Background(),"say hello")
 	out := rw.Drain()
 	if !strings.Contains(out, `You say, "hello"`) {
 		t.Errorf("expected self echo; got:\n%s", out)
@@ -161,7 +161,7 @@ func TestDispatchSayShowsSelfEcho(t *testing.T) {
 
 func TestDispatchSayApostropheAlias(t *testing.T) {
 	h, rw := newHandler(t, "alice")
-	h.Dispatch("'hello")
+	h.Dispatch(context.Background(),"'hello")
 	if !strings.Contains(rw.Drain(), `You say, "hello"`) {
 		t.Errorf("apostrophe alias for say did not produce self echo")
 	}
@@ -169,7 +169,7 @@ func TestDispatchSayApostropheAlias(t *testing.T) {
 
 func TestDispatchEmoteColonAlias(t *testing.T) {
 	h, rw := newHandler(t, "alice")
-	h.Dispatch(":waves")
+	h.Dispatch(context.Background(),":waves")
 	out := rw.Drain()
 	if !strings.Contains(out, "alice waves") {
 		t.Errorf("colon alias for emote did not produce expected line:\n%s", out)
@@ -178,17 +178,17 @@ func TestDispatchEmoteColonAlias(t *testing.T) {
 
 func TestDispatchTakeDropInventory(t *testing.T) {
 	h, rw := newHandler(t, "alice")
-	h.Dispatch("get keycard")
+	h.Dispatch(context.Background(),"get keycard")
 	out := rw.Drain()
 	if !strings.Contains(out, "pick up keycard") {
 		t.Errorf("take did not confirm:\n%s", out)
 	}
-	h.Dispatch("inventory")
+	h.Dispatch(context.Background(),"inventory")
 	out = rw.Drain()
 	if !strings.Contains(out, "keycard") {
 		t.Errorf("inventory missing keycard:\n%s", out)
 	}
-	h.Dispatch("drop keycard")
+	h.Dispatch(context.Background(),"drop keycard")
 	out = rw.Drain()
 	if !strings.Contains(out, "drop keycard") {
 		t.Errorf("drop did not confirm:\n%s", out)
@@ -197,7 +197,7 @@ func TestDispatchTakeDropInventory(t *testing.T) {
 
 func TestDispatchHelpListsCommands(t *testing.T) {
 	h, rw := newHandler(t, "alice")
-	h.Dispatch("help")
+	h.Dispatch(context.Background(),"help")
 	out := rw.Drain()
 	for _, want := range []string{"look", "say", "inventory", "quit"} {
 		if !strings.Contains(out, want) {
@@ -208,7 +208,7 @@ func TestDispatchHelpListsCommands(t *testing.T) {
 
 func TestDispatchWhoFiltersSelf(t *testing.T) {
 	h, rw := newHandler(t, "alice")
-	h.Dispatch("who")
+	h.Dispatch(context.Background(),"who")
 	out := rw.Drain()
 	if !strings.Contains(out, "No one") {
 		t.Errorf("expected 'No one' since only self is online; got:\n%s", out)
@@ -217,7 +217,7 @@ func TestDispatchWhoFiltersSelf(t *testing.T) {
 
 func TestDispatchEmptyContinues(t *testing.T) {
 	h, _ := newHandler(t, "alice")
-	if got := h.Dispatch(""); got != OutcomeContinue {
+	if got := h.Dispatch(context.Background(),""); got != OutcomeContinue {
 		t.Errorf("Dispatch('') = %v, want OutcomeContinue", got)
 	}
 }

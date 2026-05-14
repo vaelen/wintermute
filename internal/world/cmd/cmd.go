@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"strings"
 
@@ -19,7 +20,9 @@ type Handler struct {
 }
 
 // Outcome reports a special command result that the session loop must act
-// on. Quit ends the session; ShowMOTD asks the session to print its MOTD.
+// on. Quit ends the session normally; OutcomeUnknown means the dispatcher
+// didn't recognize the command; OutcomeDetached means the world has
+// unregistered this presence and the session must exit.
 type Outcome int
 
 // Outcome values.
@@ -27,6 +30,7 @@ const (
 	OutcomeContinue Outcome = iota
 	OutcomeQuit
 	OutcomeUnknown
+	OutcomeDetached
 )
 
 // Dispatch parses a single input line and runs the corresponding command.
@@ -37,96 +41,119 @@ const (
 // Errors from the world layer are translated into user-facing messages by
 // this function; only programmer errors (failed Write to the session)
 // bubble up.
-func (h *Handler) Dispatch(line string) Outcome {
+func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
+	if h.Presence.IsDetached() {
+		return OutcomeDetached
+	}
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return OutcomeContinue
 	}
 
 	cmd, rest := splitCmd(line)
+	var outcome Outcome
 	switch strings.ToLower(cmd) {
 	case "quit", "logout", "disconnect":
 		_ = h.Presence.Write("Goodbye.\r\n")
 		return OutcomeQuit
 
 	case "look", "l":
-		h.cmdLook(rest)
+		outcome = h.cmdLook(rest)
 	case "n", "north", "s", "south", "e", "east", "w", "west",
 		"u", "up", "d", "down", "in", "out":
-		h.cmdMove(canonicalDirection(cmd))
+		outcome = h.cmdMove(ctx, canonicalDirection(cmd))
 	case "go":
 		dir := strings.ToLower(strings.TrimSpace(rest))
 		if dir == "" {
 			_ = h.Presence.Write("Go where?\r\n")
+			outcome = OutcomeContinue
 			break
 		}
-		h.cmdMove(canonicalDirection(dir))
+		outcome = h.cmdMove(ctx, canonicalDirection(dir))
 	case "say", "'":
-		h.cmdSay(rest)
+		outcome = h.cmdSay(rest)
 	case "emote", ":":
-		h.cmdEmote(rest)
+		outcome = h.cmdEmote(rest)
 	case "who":
 		h.cmdWho()
+		outcome = OutcomeContinue
 	case "inventory", "i", "inv":
 		h.cmdInventory()
+		outcome = OutcomeContinue
 	case "get", "take":
-		h.cmdTake(rest)
+		outcome = h.cmdTake(ctx, rest)
 	case "drop":
-		h.cmdDrop(rest)
+		outcome = h.cmdDrop(ctx, rest)
 	case "help", "?":
 		h.cmdHelp()
+		outcome = OutcomeContinue
 	default:
 		return OutcomeUnknown
+	}
+	if outcome == OutcomeDetached {
+		return OutcomeDetached
+	}
+	if h.Presence.IsDetached() {
+		return OutcomeDetached
 	}
 	return OutcomeContinue
 }
 
-func (h *Handler) cmdLook(target string) {
+func (h *Handler) cmdLook(target string) Outcome {
 	if target == "" {
 		h.showRoom()
-		return
+		return OutcomeContinue
 	}
 	obj, err := h.World.FindVisible(h.Presence.PlayerID, target)
 	if err != nil {
 		_ = h.Presence.Write("You see nothing like that here.\r\n")
-		return
+		return OutcomeContinue
 	}
 	_ = h.Presence.Write(render.ObjectLong(obj))
+	return OutcomeContinue
 }
 
-func (h *Handler) cmdMove(dir string) {
+func (h *Handler) cmdMove(ctx context.Context, dir string) Outcome {
 	if dir == "" {
 		_ = h.Presence.Write("Go where?\r\n")
-		return
+		return OutcomeContinue
 	}
-	if _, err := h.World.Move(h.Presence, dir); err != nil {
-		switch {
-		case errors.Is(err, world.ErrNoExit):
-			_ = h.Presence.Write("You can't go that way.\r\n")
-		default:
-			_ = h.Presence.Write("You can't go that way.\r\n")
+	if _, err := h.World.Move(ctx, h.Presence, dir); err != nil {
+		if errors.Is(err, world.ErrStalePresence) {
+			return OutcomeDetached
 		}
-		return
+		_ = h.Presence.Write("You can't go that way.\r\n")
+		return OutcomeContinue
 	}
 	h.showRoom()
+	return OutcomeContinue
 }
 
-func (h *Handler) cmdSay(rest string) {
+func (h *Handler) cmdSay(rest string) Outcome {
 	if strings.TrimSpace(rest) == "" {
 		_ = h.Presence.Write("Say what?\r\n")
-		return
+		return OutcomeContinue
 	}
 	if err := h.World.Say(h.Presence, rest); err != nil {
+		if errors.Is(err, world.ErrStalePresence) {
+			return OutcomeDetached
+		}
 		_ = h.Presence.Write("You try to speak, but the world is silent.\r\n")
 	}
+	return OutcomeContinue
 }
 
-func (h *Handler) cmdEmote(rest string) {
+func (h *Handler) cmdEmote(rest string) Outcome {
 	if strings.TrimSpace(rest) == "" {
 		_ = h.Presence.Write("Emote what?\r\n")
-		return
+		return OutcomeContinue
 	}
-	_ = h.World.Emote(h.Presence, rest)
+	if err := h.World.Emote(h.Presence, rest); err != nil {
+		if errors.Is(err, world.ErrStalePresence) {
+			return OutcomeDetached
+		}
+	}
+	return OutcomeContinue
 }
 
 func (h *Handler) cmdWho() {
@@ -150,14 +177,16 @@ func (h *Handler) cmdInventory() {
 	_ = h.Presence.Write(render.Inventory(items))
 }
 
-func (h *Handler) cmdTake(target string) {
+func (h *Handler) cmdTake(ctx context.Context, target string) Outcome {
 	if strings.TrimSpace(target) == "" {
 		_ = h.Presence.Write("Take what?\r\n")
-		return
+		return OutcomeContinue
 	}
-	obj, err := h.World.Take(h.Presence, target)
+	obj, err := h.World.Take(ctx, h.Presence, target)
 	if err != nil {
 		switch {
+		case errors.Is(err, world.ErrStalePresence):
+			return OutcomeDetached
 		case errors.Is(err, world.ErrAmbiguousTarget):
 			_ = h.Presence.Write("Which one?\r\n")
 		case errors.Is(err, world.ErrNotTakeable):
@@ -165,27 +194,31 @@ func (h *Handler) cmdTake(target string) {
 		default:
 			_ = h.Presence.Write("You don't see that here.\r\n")
 		}
-		return
+		return OutcomeContinue
 	}
 	_ = h.Presence.Write("You pick up " + obj.Name + ".\r\n")
+	return OutcomeContinue
 }
 
-func (h *Handler) cmdDrop(target string) {
+func (h *Handler) cmdDrop(ctx context.Context, target string) Outcome {
 	if strings.TrimSpace(target) == "" {
 		_ = h.Presence.Write("Drop what?\r\n")
-		return
+		return OutcomeContinue
 	}
-	obj, err := h.World.Drop(h.Presence, target)
+	obj, err := h.World.Drop(ctx, h.Presence, target)
 	if err != nil {
 		switch {
+		case errors.Is(err, world.ErrStalePresence):
+			return OutcomeDetached
 		case errors.Is(err, world.ErrAmbiguousTarget):
 			_ = h.Presence.Write("Which one?\r\n")
 		default:
 			_ = h.Presence.Write("You aren't carrying that.\r\n")
 		}
-		return
+		return OutcomeContinue
 	}
 	_ = h.Presence.Write("You drop " + obj.Name + ".\r\n")
+	return OutcomeContinue
 }
 
 func (h *Handler) cmdHelp() {
