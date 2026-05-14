@@ -269,6 +269,61 @@ func TestHandleSayNotAddressedWhenAnotherPlayerPresent(t *testing.T) {
 	bob.assertSilent(t, 1*time.Millisecond) // Drain again; shouldn't have changed.
 }
 
+// TestHandleSayNotAddressedWhenUnregisteredNPCPresent guards against rule (b)
+// firing spuriously when a kind='npc' object exists in the room without an
+// npc_config row. The unregistered NPC is invisible to the registry but still
+// occupies the room, so the speaker is not "alone with" the bartender.
+func TestHandleSayNotAddressedWhenUnregisteredNPCPresent(t *testing.T) {
+	e := newFakeBackendEnv(t)
+	// Insert a second NPC into the lobby without a matching npc_config row.
+	lobby, err := e.world.LobbyID()
+	if err != nil {
+		t.Fatalf("LobbyID: %v", err)
+	}
+	mustWrite(t, e.db,
+		`INSERT INTO objects(slug, name, short_desc, long_desc, kind) VALUES
+		 ('npc/ghost', 'a flickering ghost', 'a flickering ghost', '', 'npc')`)
+	mustWrite(t, e.db,
+		`INSERT INTO object_locations(object_id, room_id, holder_id)
+		 SELECT id, ?, NULL FROM objects WHERE slug='npc/ghost'`, lobby)
+	// Reload the world so the new NPC shows up in NPCsInRoom.
+	w2, err := world.Load(context.Background(), e.db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("world.Load: %v", err)
+	}
+	r2, err := Load(context.Background(), e.db, w2, fakeDefaults(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("npc.Load: %v", err)
+	}
+
+	rp := &recordingPresence{}
+	acc, err := e.auth.Create(context.Background(), "alice", "hunter22", auth.AccessPlayer)
+	if err != nil {
+		t.Fatalf("auth.Create: %v", err)
+	}
+	pid, err := w2.CreatePlayer(context.Background(), acc)
+	if err != nil {
+		t.Fatalf("CreatePlayer: %v", err)
+	}
+	rp.Presence = &world.Presence{
+		PlayerID: pid,
+		Account:  acc,
+		Write: func(s string) error {
+			rp.mu.Lock()
+			rp.buf = append(rp.buf, s)
+			rp.mu.Unlock()
+			return nil
+		},
+	}
+	if _, err := w2.Attach(rp.Presence); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	rp.drain()
+
+	r2.HandleSay(lobby, rp.PlayerID, "alice", "hi")
+	rp.assertSilent(t, 200*time.Millisecond)
+}
+
 // erroringLLM returns a Chat error every time. Used to cover the LLM-error
 // path of HandleSay.
 type erroringLLM struct{}

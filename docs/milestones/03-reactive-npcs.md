@@ -145,15 +145,18 @@ type NPC struct {
     mu         sync.Mutex         // serializes Chat calls
 }
 
-func Load(ctx, db, world) (*Registry, error)
+func Load(serverCtx, db, world, defaults, logger) (*Registry, error)
 func (r *Registry) Get(id world.ObjectID) *NPC
-func (r *Registry) HandleSay(ctx, room, speaker, text string)  // entry point from world
+func (r *Registry) HandleSay(roomID, speakerID, speakerName, text)  // entry point from world
+func (r *Registry) Reload(ctx) error
+func (r *Registry) Wait()                                            // drains dispatch goroutines on shutdown
 ```
 
 ### Wiring `say` to NPCs
 
-- The M2 `World.Say` is augmented: after broadcasting, it consults the NPC registry for NPCs in the room. For each NPC matching the addressing rules, it dispatches an LLM call in a goroutine (rate-limited by the NPC's mutex). The result is broadcast back to the room as `<npc> says, "<text>"`.
-- The dispatch goroutine respects the session's context for cancellation — but does *not* block the speaker's session. The speaker sees their own message echoed; the NPC's reply arrives asynchronously.
+- The M2 `World.Say` is augmented: after broadcasting, it invokes a registered `SayObserver`. The npc registry attaches itself as that observer; for each NPC matching the addressing rules, it dispatches an LLM call in a goroutine (serialized by the per-NPC mutex). The result is broadcast back to the room as `<npc> says, "<text>"`.
+- The observer is invoked synchronously after the broadcast flush so the dispatch goroutines it spawns are registered with the registry's `WaitGroup` before `Say` returns — otherwise shutdown could race with the bookkeeping. The observer itself is cheap (it just iterates NPCs and spawns goroutines); the LLM call happens on the spawned goroutine.
+- `HandleSay` deliberately takes no `ctx`: dispatch derives its own timeout context from a server-lifetime root passed in at `Load`. A speaker disconnecting mid-call does not cancel the NPC's reply for everyone else in the room. The speaker sees their own message echoed; the NPC's reply arrives asynchronously.
 
 ### Addressing rules
 

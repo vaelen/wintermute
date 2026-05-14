@@ -299,8 +299,12 @@ func (w *World) Say(p *Presence, text string) error {
 	observer := w.sayObserver
 	w.mu.RUnlock()
 	flush(pending)
+	// Observer is invoked synchronously so any goroutines it registers
+	// (e.g. NPC dispatch goroutines) are accounted for in their owner's
+	// WaitGroup before Say returns. Observers MUST be cheap — see
+	// SayObserver's doc comment.
 	if observer != nil {
-		go observer(roomID, speakerID, name, text)
+		observer(roomID, speakerID, name, text)
 	}
 	return nil
 }

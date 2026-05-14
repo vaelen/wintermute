@@ -206,8 +206,14 @@ func (r *Registry) HandleSay(roomID world.RoomID, speakerID world.ObjectID, spea
 	if len(npcs) == 0 {
 		return
 	}
+	// Count entities via the unfiltered world view: an NPC present in the
+	// room without an npc_config row still occupies the room as far as
+	// "sole non-speaker entity" is concerned. Using the registry-filtered
+	// list here would let rule (b) fire spuriously when an unregistered
+	// NPC shares the room.
 	players := r.world.PlayersInRoom(roomID)
-	otherEntities := otherEntityCount(speakerID, players, npcs)
+	allNPCs := r.world.NPCsInRoom(roomID)
+	otherEntities := otherEntityCount(speakerID, players, len(allNPCs))
 
 	for _, n := range npcs {
 		if !addressed(n, text, otherEntities) {
@@ -231,9 +237,9 @@ func (r *Registry) Wait() {
 
 func (r *Registry) dispatch(n *NPC, speakerName, text string) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 
 	if n.llm == nil {
+		n.mu.Unlock()
 		// Load already logged a WARN when Open failed; re-logging per
 		// say event would just be noise.
 		r.logger.Debug("npc: no llm configured, ignoring say",
@@ -255,6 +261,7 @@ func (r *Registry) dispatch(n *NPC, speakerName, text string) {
 
 	resp, err := n.llm.Chat(ctx, msgs, nil, llm.ChatOpts{Model: n.Model})
 	if err != nil {
+		n.mu.Unlock()
 		r.logger.Warn("npc: llm chat failed",
 			"npc", n.Name, "backend", n.Backend, "err", err)
 		return
@@ -265,6 +272,7 @@ func (r *Registry) dispatch(n *NPC, speakerName, text string) {
 	// the NPC; broadcasting nothing keeps the room quiet rather than
 	// emitting a phantom "the bartender says: " line.
 	if reply == "" {
+		n.mu.Unlock()
 		return
 	}
 
@@ -275,6 +283,11 @@ func (r *Registry) dispatch(n *NPC, speakerName, text string) {
 	if max := historyWindow * 2; len(n.history) > max {
 		n.history = append([]llm.Message{}, n.history[len(n.history)-max:]...)
 	}
+	// Release n.mu before NPCSay: the broadcast flushes TCP writes to
+	// every presence in the room, and a slow client must not stall the
+	// next dispatch for this NPC. The mutex's only job is to serialize
+	// Chat calls and protect history; both are done at this point.
+	n.mu.Unlock()
 
 	if err := r.world.NPCSay(n.ObjectID, reply); err != nil {
 		r.logger.Warn("npc: broadcast failed",
@@ -292,7 +305,9 @@ func addressed(n *NPC, text string, otherEntities int) bool {
 // otherEntityCount counts all non-speaker entities in the room — players
 // (attached or asleep) plus NPCs. Rule (b) of the addressing rules fires
 // only when this count is exactly 1, so the speaker is alone with one NPC.
-func otherEntityCount(speakerID world.ObjectID, players []world.PresentPlayer, npcs []*NPC) int {
+// npcCount must be the unfiltered world count of NPCs in the room, not the
+// registry-filtered list.
+func otherEntityCount(speakerID world.ObjectID, players []world.PresentPlayer, npcCount int) int {
 	count := 0
 	for _, p := range players {
 		if p.ObjectID == speakerID {
@@ -300,7 +315,7 @@ func otherEntityCount(speakerID world.ObjectID, players []world.PresentPlayer, n
 		}
 		count++
 	}
-	count += len(npcs)
+	count += npcCount
 	return count
 }
 
