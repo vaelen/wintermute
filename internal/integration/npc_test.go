@@ -195,9 +195,11 @@ func TestBartenderIgnoresUnaddressedSay(t *testing.T) {
 	alice.send("say hello, bob\r\n")
 	alice.expect(`You say, "hello, bob"`, 5*time.Second)
 
-	// Give the registry a generous window to (NOT) dispatch.
+	// Give the registry a generous window to (NOT) dispatch. Both clients
+	// drain for the same budget so a spurious broadcast can't slip onto bob's
+	// connection after alice's drain has already closed.
 	alice.drainFor(700 * time.Millisecond)
-	bob.drainFor(50 * time.Millisecond)
+	bob.drainFor(700 * time.Millisecond)
 
 	if strings.Contains(alice.string(), `the bartender says,`) {
 		t.Errorf("bartender should not have replied to an unaddressed say with another player in the room; alice saw:\n%s", alice.string())
