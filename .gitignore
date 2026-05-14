@@ -47,3 +47,6 @@ wintermute.toml
 
 # AI coding assistants
 .claude/
+
+# Git worktrees
+/.worktrees/
