@@ -12,10 +12,11 @@ Admins can write and store Lua scripts that create rooms, spawn NPCs, register N
 ## Scope
 
 - `internal/script/lua` package wrapping `gopher-lua`. VM pool (warm VMs to amortize startup; pool size configurable, default 4).
-- Admin world API surface exposed to Lua: rooms (CRUD), exits, objects, NPCs (create, configure, set persona), MOTD, system broadcast, kick/disconnect, account access-level change.
+- Admin world API surface exposed to Lua: rooms (CRUD), exits, objects, doors, NPCs (create, configure, set persona), MOTD, system broadcast, kick/disconnect, account access-level change.
+- Doors as first-class objects: the bare `exits` table from M2 is promoted to a `kind='door'` flavor of `objects` with per-door direction, destination, and configurable leave/arrive message templates (e.g. a "ladder" door rendering `"X climbs up the ladder."` instead of the default `"X leaves up."`). Doors are created and edited with the same tooling as other objects. Lockability, examinability, and door-scoped scripts are stubbed out in the schema and API but not exercised until later milestones.
 - Tool registry: admin scripts call `tool.register(name, fn)` to register a Lua function. NPC config references tools by name. M5 ships the registry + a manual-invocation command; autonomous tool calls land in M7.
 - Persistent script storage: `scripts` table. In-world editor command `@edit <script>` (line-based; modeled on `ed`/`MUSH @decompile`).
-- Admin command surface: `@create-room`, `@dig` (create room + exit pair), `@create-npc`, `@persona`, `@script`, `@edit`, `@run`, `@tools`, `@invoke`, `@reload-scripts`, `@boot` (force disconnect a session).
+- Admin command surface: `@create-room`, `@dig` (create room + door pair), `@create-door`, `@door-msg` (set a door's leave/arrive templates), `@create-npc`, `@persona`, `@script`, `@edit`, `@run`, `@tools`, `@invoke`, `@reload-scripts`, `@boot` (force disconnect a session).
 - ACL plumbing groundwork: `permissions` is a column on `rooms`/`objects` capturing the owner-set permission bitmask. The full ACL table for delegated permissions lands in M8 (player tier).
 
 ## Out of scope
@@ -67,6 +68,19 @@ wintermute.object.move(obj, room)              -- to a room
 wintermute.object.move(obj, holder_obj)        -- into another object's inventory
 wintermute.object.delete(obj)
 
+-- Doors (a kind='door' object that lives in a room and links it to another)
+local ladder = wintermute.door.create({
+    slug        = "lobby-ladder-up",
+    name        = "a rusted ladder",
+    from        = lobby_room,
+    direction   = "up",
+    to          = roof_room,
+    leave_msg   = "{actor} climbs up the ladder.",   -- broadcast in `from`
+    arrive_msg  = "{actor} climbs up from below.",   -- broadcast in `to`
+})
+wintermute.door.set_messages(ladder, { leave_msg = "...", arrive_msg = "..." })
+wintermute.door.delete(ladder)
+
 -- NPCs (extends objects)
 local npc = wintermute.npc.create({slug="bartender", name="the bartender", room=room,
                                    persona="...", backend="ollama",
@@ -98,6 +112,21 @@ local list = wintermute.tool.list()
 ```
 
 All API functions raise Lua errors on failure with a stable message format `"wintermute: <code>: <details>"`.
+
+### Doors as first-class objects
+
+In M2, an exit is a bare `(from_room, direction, to_room)` row in the `exits` table. M5 promotes exits to objects of `kind='door'`:
+
+- The `objects.kind` CHECK constraint gains `'door'`.
+- A new `doors` extension table holds the door-specific fields, joined 1:1 to `objects.id`: source room, direction, destination room, leave/arrive message templates, and reserved nullable columns for the as-yet-unbuilt features — `lock_state`, `key_object_id`, `script_slug`.
+- The legacy `exits` table is migrated into `doors`: each existing row produces one door with default message templates (`"{actor} leaves {direction}."` / `"{actor} arrives."`, matching M2's current strings). The `exits` table is then dropped.
+- `world.Move` resolves a direction by looking up the door object instead of the exit row, then uses the door's templates for the broadcasts. If a door has no override, the defaults are substituted in.
+
+Templates support a minimal placeholder set: `{actor}` (player or NPC display name) and `{direction}` (the door's `direction` field, useful for the generic leave message). The substitution happens in `internal/world/render`, alongside the other broadcast formatting.
+
+Doors are created and managed through `wintermute.door.*` in Lua (see above) and via the new `@create-door` and `@door-msg` admin commands. They show up in the room's object listing only if explicitly described — the default render treats them as exits (listed under "Obvious exits:" the same way today's exit slugs are), to avoid duplicating every door in both the exits line and the objects line.
+
+The data model has room for future affordances (lockability, `@examine`-able descriptions, door-scoped Lua scripts) without further schema changes; only the surface API grows in later milestones.
 
 ### Persistent scripts
 
@@ -182,24 +211,89 @@ ALTER TABLE objects ADD COLUMN permissions INTEGER NOT NULL DEFAULT 0;
 
 Bit layout TBD; reserve enough bits for read/write/script/delegate. Document in `world/api`.
 
+`internal/store/migrations/0009_doors.sql`:
+
+```sql
+-- Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
+-- SPDX-License-Identifier: MIT
+
+-- Doors are objects of kind='door' with a 1:1 extension row carrying
+-- direction, destination, message templates, and stubs for later features.
+
+-- SQLite can't easily ALTER a CHECK constraint, so we rewrite objects.
+-- The migration runs inside a transaction; foreign keys are deferred.
+CREATE TABLE objects_new (
+    id           INTEGER PRIMARY KEY,
+    slug         TEXT NOT NULL UNIQUE,
+    name         TEXT NOT NULL,
+    short_desc   TEXT NOT NULL DEFAULT '',
+    long_desc    TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL CHECK (kind IN ('item','player','npc','door')),
+    owner_id     INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+    account_id   INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
+    permissions  INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO objects_new SELECT * FROM objects;
+DROP TABLE objects;
+ALTER TABLE objects_new RENAME TO objects;
+CREATE INDEX idx_objects_account ON objects(account_id);
+
+CREATE TABLE doors (
+    object_id     INTEGER PRIMARY KEY REFERENCES objects(id) ON DELETE CASCADE,
+    from_room     INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    direction     TEXT    NOT NULL,
+    to_room       INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    leave_msg     TEXT    NOT NULL DEFAULT '{actor} leaves {direction}.',
+    arrive_msg    TEXT    NOT NULL DEFAULT '{actor} arrives.',
+    -- Stubs for later milestones; nullable, ignored by M5 logic.
+    lock_state    TEXT,
+    key_object_id INTEGER REFERENCES objects(id) ON DELETE SET NULL,
+    script_slug   TEXT    REFERENCES scripts(slug) ON DELETE SET NULL,
+    UNIQUE(from_room, direction)
+);
+CREATE INDEX idx_doors_from ON doors(from_room);
+CREATE INDEX idx_doors_to   ON doors(to_room);
+
+-- Migrate existing exits into doors. Each exit becomes a door object
+-- whose slug is derived from the rooms and direction.
+INSERT INTO objects (slug, name, kind, owner_id, permissions)
+    SELECT 'door-' || from_room || '-' || direction || '-' || to_room,
+           direction, 'door', NULL, 0
+      FROM exits;
+
+INSERT INTO doors (object_id, from_room, direction, to_room)
+    SELECT o.id, e.from_room, e.direction, e.to_room
+      FROM exits e
+      JOIN objects o
+        ON o.slug = 'door-' || e.from_room || '-' || e.direction || '-' || e.to_room;
+
+DROP TABLE exits;
+```
+
+The migration also accounts for the M2 → M5 ordering: a fresh DB built up through M5 ends with `doors` and no `exits` table. The M2 seed fixture continues to insert into `exits`; the seed runs *before* migration 0009, so the rows are still picked up by the migration and converted. M5's Lua `init.*` scripts can target `doors` directly via `wintermute.door.create`.
+
 ## Implementation tasks
 
-1. Add migrations `0007_scripts.sql` and `0008_permissions.sql`.
+1. Add migrations `0007_scripts.sql`, `0008_permissions.sql`, and `0009_doors.sql`.
 2. Implement `internal/world/api` — pure Go layer over `internal/world` and `internal/npc`. Stable error codes. No Lua imports.
-3. Implement `internal/script/lua` with the VM pool.
-4. Bind the world API into the Lua state as `wintermute.*`. Each binding is a small `func(L *lua.LState) int` adapter.
-5. Implement the tool registry types and the binding for `wintermute.tool.register/unregister/list`.
-6. Implement the `@`-commands in the M2 command parser, restricted by access level.
-7. Implement `@edit` line editor as a session sub-mode (replace the normal line handler while editing; restore on `q`).
-8. On startup, after world load, run all `init.*` scripts in slug order.
-9. Add structured slog fields for script execution: `script`, `tool`, duration, error.
-10. Unit tests:
+3. Promote exits to doors in `internal/world`: add a `Door` type carrying direction, source/destination rooms, and message templates; load `doors` into the world cache at startup; replace `Room.Exits map[string]RoomID` with a direction → door-id lookup. Update `Move` to resolve the door, run template substitution (`{actor}`, `{direction}`) via `internal/world/render`, and broadcast the resulting strings.
+4. Implement `internal/script/lua` with the VM pool.
+5. Bind the world API into the Lua state as `wintermute.*`, including `wintermute.door.create/set_messages/delete`. Each binding is a small `func(L *lua.LState) int` adapter.
+6. Implement the tool registry types and the binding for `wintermute.tool.register/unregister/list`.
+7. Implement the `@`-commands in the M2 command parser, restricted by access level. Include `@create-door <slug> <dir> <to-room>` and `@door-msg <slug> leave|arrive "<template>"`. `@dig` is rewritten to create a door pair (one in each direction) rather than two exit rows.
+8. Implement `@edit` line editor as a session sub-mode (replace the normal line handler while editing; restore on `q`).
+9. On startup, after world load, run all `init.*` scripts in slug order.
+10. Add structured slog fields for script execution: `script`, `tool`, duration, error.
+11. Unit tests:
     - World API surface (create/move/delete a room from Go directly).
     - Lua binding round-trips (create a room from Lua, fetch from Go, verify).
     - Tool registration with schema validation.
-11. Integration test: log in as admin, create a room via `@create-room`, `@dig` north to it, walk there, see it.
-12. Integration test: write a script via `@edit` that creates an NPC; `@run` it; the NPC appears and responds in the next M3-style conversation.
-13. Manual exercise: replace one room from the M2 seed fixture with a script equivalent; verify boot still works (parallel paths).
+    - Door template substitution: `{actor}` and `{direction}` resolve correctly; missing placeholders are left as literal text; default templates match the M2 strings.
+    - Migration `0009_doors.sql` against a database populated by the M2 seed: every former `exits` row appears as a `doors` row with default templates and the `exits` table is gone.
+12. Integration test: log in as admin, create a room via `@create-room`, `@dig` north to it, walk there, see it.
+13. Integration test: create a custom-template door (ladder) via `@create-door` + `@door-msg`, walk through it, verify both rooms see the configured messages instead of the defaults.
+14. Integration test: write a script via `@edit` that creates an NPC; `@run` it; the NPC appears and responds in the next M3-style conversation.
+15. Manual exercise: replace one room from the M2 seed fixture with a script equivalent; verify boot still works (parallel paths).
 
 ## Testing
 
@@ -211,11 +305,13 @@ Bit layout TBD; reserve enough bits for read/write/script/delegate. Document in 
 
 1. An admin can `@create-room`, `@dig`, `@create-npc`, and `@persona` purely from inside the game.
 2. The created NPC behaves like the M3 bartender — including using the M4 memory plumbing.
-3. Scripts persist across restart. `init.*` scripts run automatically at boot.
-4. `@tools` lists at least one tool registered by a startup script. `@invoke <tool> '{"...":"..."}'` runs it and prints its return.
-5. A non-admin attempting an `@`-command sees a clear refusal and the action is not performed.
-6. The VM pool reuses VMs (verified via a debug stat exposed on an admin command).
-7. All new files carry the MIT header.
+3. After migrating an existing M2 database through 0009, every former exit is reachable as a door and walking through it produces the same default broadcast strings as before. The `exits` table no longer exists.
+4. An admin can create a door whose `leave_msg` is `"{actor} climbs up the ladder."`; a player walking that direction triggers exactly that broadcast in the source room (with the player's name substituted), and the matching `arrive_msg` in the destination room.
+5. Scripts persist across restart. `init.*` scripts run automatically at boot.
+6. `@tools` lists at least one tool registered by a startup script. `@invoke <tool> '{"...":"..."}'` runs it and prints its return.
+7. A non-admin attempting an `@`-command sees a clear refusal and the action is not performed.
+8. The VM pool reuses VMs (verified via a debug stat exposed on an admin command).
+9. All new files carry the MIT header.
 
 ## Risks & open questions
 
