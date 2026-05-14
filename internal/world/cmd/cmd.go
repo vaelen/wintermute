@@ -1,0 +1,322 @@
+// Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
+// SPDX-License-Identifier: MIT
+
+package cmd
+
+import (
+	"context"
+	"errors"
+	"strings"
+
+	"github.com/vaelen/wintermute/internal/world"
+	"github.com/vaelen/wintermute/internal/world/render"
+)
+
+// Handler binds a Presence to a World. Each session creates one Handler
+// after login and routes every input line through Dispatch.
+type Handler struct {
+	World    *world.World
+	Presence *world.Presence
+}
+
+// Outcome reports a special command result that the session loop must act
+// on. Quit ends the session normally; OutcomeUnknown means the dispatcher
+// didn't recognize the command; OutcomeDetached means the world has
+// unregistered this presence and the session must exit.
+type Outcome int
+
+// Outcome values.
+const (
+	OutcomeContinue Outcome = iota
+	OutcomeQuit
+	OutcomeUnknown
+	OutcomeDetached
+)
+
+// Dispatch parses a single input line and runs the corresponding command.
+// It returns OutcomeUnknown when the command name is not recognized — the
+// caller decides whether to print an error or fall through to a different
+// command set (e.g. the milestone-1 `terminal` command).
+//
+// Errors from the world layer are translated into user-facing messages by
+// this function; only programmer errors (failed Write to the session)
+// bubble up.
+func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
+	if h.Presence.IsDetached() {
+		return OutcomeDetached
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return OutcomeContinue
+	}
+
+	cmd, rest := splitCmd(line)
+	var outcome Outcome
+	switch strings.ToLower(cmd) {
+	case "quit", "logout", "disconnect":
+		_ = h.Presence.Write("Goodbye.\r\n")
+		return OutcomeQuit
+
+	case "look", "l":
+		outcome = h.cmdLook(rest)
+	case "n", "north", "s", "south", "e", "east", "w", "west",
+		"u", "up", "d", "down", "in", "out":
+		outcome = h.cmdMove(ctx, canonicalDirection(cmd))
+	case "go":
+		dir := strings.ToLower(strings.TrimSpace(rest))
+		if dir == "" {
+			_ = h.Presence.Write("Go where?\r\n")
+			outcome = OutcomeContinue
+			break
+		}
+		outcome = h.cmdMove(ctx, canonicalDirection(dir))
+	case "say", "'":
+		outcome = h.cmdSay(rest)
+	case "emote", ":":
+		outcome = h.cmdEmote(rest)
+	case "who":
+		h.cmdWho()
+		outcome = OutcomeContinue
+	case "inventory", "i", "inv":
+		h.cmdInventory()
+		outcome = OutcomeContinue
+	case "get", "take":
+		outcome = h.cmdTake(ctx, rest)
+	case "drop":
+		outcome = h.cmdDrop(ctx, rest)
+	case "help", "?":
+		h.cmdHelp()
+		outcome = OutcomeContinue
+	default:
+		return OutcomeUnknown
+	}
+	if outcome == OutcomeDetached {
+		return OutcomeDetached
+	}
+	if h.Presence.IsDetached() {
+		return OutcomeDetached
+	}
+	return OutcomeContinue
+}
+
+func (h *Handler) cmdLook(target string) Outcome {
+	if target == "" {
+		h.showRoom()
+		return OutcomeContinue
+	}
+	obj, err := h.World.FindVisible(h.Presence.PlayerID, target)
+	if err != nil {
+		_ = h.Presence.Write("You see nothing like that here.\r\n")
+		return OutcomeContinue
+	}
+	_ = h.Presence.Write(render.ObjectLong(obj))
+	return OutcomeContinue
+}
+
+func (h *Handler) cmdMove(ctx context.Context, dir string) Outcome {
+	if dir == "" {
+		_ = h.Presence.Write("Go where?\r\n")
+		return OutcomeContinue
+	}
+	if _, err := h.World.Move(ctx, h.Presence, dir); err != nil {
+		if errors.Is(err, world.ErrStalePresence) {
+			return OutcomeDetached
+		}
+		_ = h.Presence.Write("You can't go that way.\r\n")
+		return OutcomeContinue
+	}
+	h.showRoom()
+	return OutcomeContinue
+}
+
+func (h *Handler) cmdSay(rest string) Outcome {
+	if strings.TrimSpace(rest) == "" {
+		_ = h.Presence.Write("Say what?\r\n")
+		return OutcomeContinue
+	}
+	if err := h.World.Say(h.Presence, rest); err != nil {
+		if errors.Is(err, world.ErrStalePresence) {
+			return OutcomeDetached
+		}
+		_ = h.Presence.Write("You try to speak, but the world is silent.\r\n")
+	}
+	return OutcomeContinue
+}
+
+func (h *Handler) cmdEmote(rest string) Outcome {
+	if strings.TrimSpace(rest) == "" {
+		_ = h.Presence.Write("Emote what?\r\n")
+		return OutcomeContinue
+	}
+	if err := h.World.Emote(h.Presence, rest); err != nil {
+		if errors.Is(err, world.ErrStalePresence) {
+			return OutcomeDetached
+		}
+	}
+	return OutcomeContinue
+}
+
+func (h *Handler) cmdWho() {
+	names := h.World.WhoOnline()
+	// Filter out self for a friendlier reading.
+	self := h.selfName()
+	if self != "" {
+		filtered := names[:0]
+		for _, n := range names {
+			if n != self {
+				filtered = append(filtered, n)
+			}
+		}
+		names = filtered
+	}
+	_ = h.Presence.Write(render.Who(names))
+}
+
+func (h *Handler) cmdInventory() {
+	items := h.World.Inventory(h.Presence.PlayerID)
+	_ = h.Presence.Write(render.Inventory(items))
+}
+
+func (h *Handler) cmdTake(ctx context.Context, target string) Outcome {
+	if strings.TrimSpace(target) == "" {
+		_ = h.Presence.Write("Take what?\r\n")
+		return OutcomeContinue
+	}
+	obj, err := h.World.Take(ctx, h.Presence, target)
+	if err != nil {
+		switch {
+		case errors.Is(err, world.ErrStalePresence):
+			return OutcomeDetached
+		case errors.Is(err, world.ErrAmbiguousTarget):
+			_ = h.Presence.Write("Which one?\r\n")
+		case errors.Is(err, world.ErrNotTakeable):
+			_ = h.Presence.Write("You can't take that.\r\n")
+		default:
+			_ = h.Presence.Write("You don't see that here.\r\n")
+		}
+		return OutcomeContinue
+	}
+	_ = h.Presence.Write("You pick up " + obj.Name + ".\r\n")
+	return OutcomeContinue
+}
+
+func (h *Handler) cmdDrop(ctx context.Context, target string) Outcome {
+	if strings.TrimSpace(target) == "" {
+		_ = h.Presence.Write("Drop what?\r\n")
+		return OutcomeContinue
+	}
+	obj, err := h.World.Drop(ctx, h.Presence, target)
+	if err != nil {
+		switch {
+		case errors.Is(err, world.ErrStalePresence):
+			return OutcomeDetached
+		case errors.Is(err, world.ErrAmbiguousTarget):
+			_ = h.Presence.Write("Which one?\r\n")
+		default:
+			_ = h.Presence.Write("You aren't carrying that.\r\n")
+		}
+		return OutcomeContinue
+	}
+	_ = h.Presence.Write("You drop " + obj.Name + ".\r\n")
+	return OutcomeContinue
+}
+
+func (h *Handler) cmdHelp() {
+	_ = h.Presence.Write(strings.Join([]string{
+		"Commands available:",
+		"",
+		"Movement and looking:",
+		"  look [object]      — describe the room or an object (alias: l)",
+		"  n s e w u d in out — move in that direction (also: north, ..., 'go <dir>')",
+		"",
+		"Communication:",
+		"  say <text>         — speak to your room (alias: '<text>)",
+		"  emote <text>       — describe what you're doing (alias: :<text>)",
+		"",
+		"Objects:",
+		"  get <item>         — pick something up (alias: take)",
+		"  drop <item>        — drop something you're carrying",
+		"  inventory          — list what you're carrying (aliases: i, inv)",
+		"",
+		"Other:",
+		"  who                — list other awake players",
+		"  motd               — re-display the message of the day",
+		"  terminal           — show or change terminal settings",
+		"    terminal encoding <utf8|cp437|iso88591|macroman|petscii|ascii>",
+		"    terminal width <n> | height <n>",
+		"    terminal color on|off | lines vt100|native | echo on|off",
+		"  quit               — disconnect (aliases: logout, disconnect)",
+		"",
+	}, "\r\n"))
+}
+
+// showRoom renders the player's current room. Called after `look` with no
+// arg, after `move`, and on initial login.
+func (h *Handler) showRoom() {
+	loc, err := h.World.LocationOf(h.Presence.PlayerID)
+	if err != nil {
+		_ = h.Presence.Write("You float in an undefined void.\r\n")
+		return
+	}
+	room, err := h.World.Room(loc.RoomID)
+	if err != nil {
+		_ = h.Presence.Write("You float in an undefined void.\r\n")
+		return
+	}
+	view := render.RoomView{
+		Room:    room,
+		Self:    h.Presence.PlayerID,
+		Players: h.World.PlayersInRoom(loc.RoomID),
+		Items:   h.World.ItemsInRoom(loc.RoomID),
+	}
+	_ = h.Presence.Write(render.Room(view))
+}
+
+// ShowRoom is the exported form of showRoom for use by the session layer
+// just after attach.
+func (h *Handler) ShowRoom() { h.showRoom() }
+
+func (h *Handler) selfName() string {
+	obj, err := h.World.Object(h.Presence.PlayerID)
+	if err != nil {
+		return ""
+	}
+	return obj.Name
+}
+
+func splitCmd(line string) (cmd, rest string) {
+	// Single-character prefix shortcuts: ' for say, : for emote.
+	if len(line) > 0 && (line[0] == '\'' || line[0] == ':') {
+		return string(line[0]), strings.TrimSpace(line[1:])
+	}
+	i := strings.IndexAny(line, " \t")
+	if i < 0 {
+		return line, ""
+	}
+	return line[:i], strings.TrimSpace(line[i+1:])
+}
+
+// canonicalDirection collapses long-form direction words ("north", "up")
+// to the single-letter codes stored in the exits table.
+func canonicalDirection(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "n", "north":
+		return "n"
+	case "s", "south":
+		return "s"
+	case "e", "east":
+		return "e"
+	case "w", "west":
+		return "w"
+	case "u", "up":
+		return "u"
+	case "d", "down":
+		return "d"
+	case "in":
+		return "in"
+	case "out":
+		return "out"
+	default:
+		return strings.ToLower(strings.TrimSpace(s))
+	}
+}

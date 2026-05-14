@@ -20,6 +20,7 @@ import (
 	"github.com/vaelen/wintermute/internal/session"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/term"
+	"github.com/vaelen/wintermute/internal/world"
 )
 
 // testServer is a self-contained Wintermute instance bound to an ephemeral
@@ -29,6 +30,7 @@ type testServer struct {
 	addr     string
 	close    func()
 	authS    *auth.Store
+	worldW   *world.World
 }
 
 func startServer(t *testing.T) *testServer {
@@ -44,7 +46,18 @@ func startServer(t *testing.T) *testServer {
 	}
 	a := auth.NewStore(db)
 
-	handler := session.DefaultHandler(a, logger, "MOTD\r\n")
+	w, err := world.Load(ctx, db, logger)
+	if err != nil {
+		_ = db.Close()
+		cancel()
+		t.Fatalf("world.Load: %v", err)
+	}
+	a.SetAfterCreate(func(ctx context.Context, acc *auth.Account) error {
+		_, err := w.CreatePlayer(ctx, acc)
+		return err
+	})
+
+	handler := session.DefaultHandler(a, w, logger, "MOTD\r\n")
 	// Speed up the tests by collapsing the detection windows.
 	handler.TelnetDetectTimeout = 50 * time.Millisecond
 	handler.NegotiationSettleTimeout = 50 * time.Millisecond
@@ -65,14 +78,20 @@ func startServer(t *testing.T) *testServer {
 			if err != nil {
 				return
 			}
-			go handler.Handle(ctx, conn)
+			wg.Add(1)
+			go func(c net.Conn) {
+				defer wg.Done()
+				go func() { <-ctx.Done(); _ = c.Close() }()
+				handler.Handle(ctx, c)
+			}(conn)
 		}
 	}()
 
 	srv := &testServer{
-		t:    t,
-		addr: ln.Addr().String(),
-		authS: a,
+		t:      t,
+		addr:   ln.Addr().String(),
+		authS:  a,
+		worldW: w,
 	}
 	srv.close = func() {
 		_ = ln.Close()

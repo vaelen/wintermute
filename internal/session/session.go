@@ -10,10 +10,12 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 
 	"github.com/vaelen/wintermute/internal/auth"
 	wtelnet "github.com/vaelen/wintermute/internal/net/telnet"
 	"github.com/vaelen/wintermute/internal/term"
+	"github.com/vaelen/wintermute/internal/world"
 )
 
 // Session represents one connected user across the engine. It owns the
@@ -33,17 +35,29 @@ type Session struct {
 	account *auth.Account
 	log     *slog.Logger
 	auth    *auth.Store
+	world   *world.World
+
+	// writeMu serializes writes to the connection. The world layer may
+	// invoke our writeString callback from a goroutine that is not the
+	// session goroutine (e.g. when another player broadcasts into the
+	// room), so the encoder state must not be touched without the lock.
+	writeMu sync.Mutex
+
+	// playerID is the world object id of this session's player body, set
+	// after Attach completes.
+	playerID world.ObjectID
 }
 
 // newSession constructs a Session given an already-accepted connection
 // and the shared dependencies. The handler is expected to attach s.tc
 // before any I/O happens.
-func newSession(conn net.Conn, a *auth.Store, log *slog.Logger) *Session {
+func newSession(conn net.Conn, a *auth.Store, w *world.World, log *slog.Logger) *Session {
 	return &Session{
-		id:   conn.RemoteAddr().String(),
-		conn: conn,
-		log:  log.With("session", conn.RemoteAddr().String()),
-		auth: a,
+		id:    conn.RemoteAddr().String(),
+		conn:  conn,
+		log:   log.With("session", conn.RemoteAddr().String()),
+		auth:  a,
+		world: w,
 	}
 }
 
@@ -77,7 +91,12 @@ func (s *Session) writeRaw(b []byte) error {
 
 // writeString encodes s through the current Encoder and writes the result.
 // Requires that prepareInput has been called and the Encoder is set.
+//
+// Safe to call from multiple goroutines; calls are serialized by writeMu
+// so the encoder's internal state and the connection write are atomic.
 func (s *Session) writeString(text string) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if s.enc == nil {
 		return errors.New("session: encoder not initialized")
 	}
@@ -87,6 +106,24 @@ func (s *Session) writeString(text string) error {
 	}
 	_, err = s.writer().Write(out)
 	return err
+}
+
+// reconfigureEncoder switches the encoder to next while holding writeMu,
+// so the encoder mutation and any closing/Shift-Out byte writes can't
+// interleave with a concurrent broadcast going through writeString.
+// Returns the previous capabilities so the caller can decide what to log.
+func (s *Session) reconfigureEncoder(next term.Capabilities) term.Capabilities {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	prev := s.enc.Capabilities()
+	closing := s.enc.Reconfigure(next)
+	if len(closing) > 0 {
+		_, _ = s.writer().Write(closing)
+	}
+	if next.Encoding == term.EncodingPETSCII && prev.Encoding != term.EncodingPETSCII {
+		_, _ = s.writer().Write([]byte{term.PETSCIIShiftOut})
+	}
+	return prev
 }
 
 // writef is a Printf-style helper around writeString.

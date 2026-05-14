@@ -79,12 +79,24 @@ const (
 
 // Store is the auth-layer view of the accounts table.
 type Store struct {
-	db *store.DB
+	db          *store.DB
+	afterCreate func(ctx context.Context, acc *Account) error
 }
 
 // NewStore returns a Store backed by the given database handle.
 func NewStore(db *store.DB) *Store {
 	return &Store{db: db}
+}
+
+// SetAfterCreate registers a callback invoked after a successful Create.
+// It runs outside the account-creation transaction. If it returns an
+// error, Create surfaces that error to the caller; the account itself is
+// already committed.
+//
+// The intended use is to give other layers (e.g. the world layer's player
+// body insertion) a place to hook in without auth needing to import them.
+func (s *Store) SetAfterCreate(fn func(ctx context.Context, acc *Account) error) {
+	s.afterCreate = fn
 }
 
 // Count returns the number of accounts currently in the database. Used by
@@ -130,7 +142,16 @@ func (s *Store) Create(ctx context.Context, username, password string, level Acc
 	if err != nil {
 		return nil, err
 	}
-	return s.GetByID(ctx, id)
+	acc, err := s.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if s.afterCreate != nil {
+		if err := s.afterCreate(ctx, acc); err != nil {
+			return nil, fmt.Errorf("auth: after-create hook: %w", err)
+		}
+	}
+	return acc, nil
 }
 
 // Login verifies the password and returns the account on success.

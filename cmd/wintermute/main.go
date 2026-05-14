@@ -24,6 +24,7 @@ import (
 	wnettls "github.com/vaelen/wintermute/internal/net/tls"
 	"github.com/vaelen/wintermute/internal/session"
 	"github.com/vaelen/wintermute/internal/store"
+	"github.com/vaelen/wintermute/internal/world"
 )
 
 func main() {
@@ -61,8 +62,19 @@ func run(cfgPath string) error {
 
 	authStore := auth.NewStore(db)
 
+	w, err := world.Load(ctx, db, logger)
+	if err != nil {
+		return fmt.Errorf("load world: %w", err)
+	}
+
+	// When a new account is created, spawn its body in the world.
+	authStore.SetAfterCreate(func(ctx context.Context, acc *auth.Account) error {
+		_, err := w.CreatePlayer(ctx, acc)
+		return err
+	})
+
 	motd := defaultMOTD()
-	handler := session.DefaultHandler(authStore, logger, motd)
+	handler := session.DefaultHandler(authStore, w, logger, motd)
 
 	// wg tracks BOTH the accept-loop goroutines and every per-session
 	// goroutine. On shutdown we Wait on it before letting `defer db.Close()`
@@ -215,7 +227,6 @@ func defaultMOTD() string {
 		"┌───────────────────────────────────────────────┐\r\n" +
 		"│           ▓▒░ WINTERMUTE  v0.0 ░▒▓            │\r\n" +
 		"│                                               │\r\n" +
-		"│  Milestone 1: connection layer only.          │\r\n" +
-		"│  The world arrives in milestone 2.            │\r\n" +
+		"│  Type 'help' for a list of commands.          │\r\n" +
 		"└───────────────────────────────────────────────┘\r\n"
 }
