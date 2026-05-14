@@ -10,7 +10,7 @@ import (
 	"github.com/vaelen/wintermute/internal/world"
 )
 
-func TestRoomViewIncludesNameDescExitsPlayersItems(t *testing.T) {
+func TestRoomViewIncludesNameDescExitsPlayersNPCsItems(t *testing.T) {
 	view := RoomView{
 		Room: world.Room{
 			Name:        "The Lobby",
@@ -26,6 +26,9 @@ func TestRoomViewIncludesNameDescExitsPlayersItems(t *testing.T) {
 			{ObjectID: 101, Name: "alice", Awake: true},
 			{ObjectID: 102, Name: "bob", Awake: false},
 		},
+		NPCs: []world.Object{
+			{Name: "the bartender", Kind: world.KindNPC},
+		},
 		Items: []world.Object{
 			{Name: "keycard", Kind: world.KindItem},
 		},
@@ -35,7 +38,7 @@ func TestRoomViewIncludesNameDescExitsPlayersItems(t *testing.T) {
 		"The Lobby",
 		"Cyan glow.",
 		"Exits: n, e",
-		"Also here: alice, bob (asleep)",
+		"Also here: alice, bob (asleep), the bartender",
 		"You see: keycard",
 	} {
 		if !strings.Contains(out, want) {
@@ -44,6 +47,20 @@ func TestRoomViewIncludesNameDescExitsPlayersItems(t *testing.T) {
 	}
 	if strings.Contains(out, "self") {
 		t.Errorf("Room output should not list the viewer themselves:\n%s", out)
+	}
+}
+
+func TestRoomViewListsNPCsEvenWithoutPlayers(t *testing.T) {
+	view := RoomView{
+		Room: world.Room{Name: "Empty Bar"},
+		Self: 100,
+		NPCs: []world.Object{
+			{Name: "the bartender", Kind: world.KindNPC},
+		},
+	}
+	out := Room(view)
+	if !strings.Contains(out, "Also here: the bartender") {
+		t.Errorf("expected NPC-only Also here line; got:\n%s", out)
 	}
 }
 

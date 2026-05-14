@@ -306,6 +306,7 @@ func (h *Handler) showRoom() {
 		Room:    room,
 		Self:    h.Presence.PlayerID,
 		Players: h.World.PlayersInRoom(loc.RoomID),
+		NPCs:    h.World.NPCsInRoom(loc.RoomID),
 		Items:   h.World.ItemsInRoom(loc.RoomID),
 	}
 	_ = h.Presence.Write(render.Room(view))

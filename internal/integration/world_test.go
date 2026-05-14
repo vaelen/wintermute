@@ -162,6 +162,7 @@ func TestNewAccountSpawnsInLobbyAndCanLook(t *testing.T) {
 	c.send("look\r\n")
 	c.expect("The Lobby", 5*time.Second)
 	c.expect("Exits:", 5*time.Second)
+	c.expect("Also here: the bartender", 5*time.Second)
 	c.send("quit\r\n")
 	c.expect("Goodbye", 5*time.Second)
 }
