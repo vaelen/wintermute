@@ -269,6 +269,25 @@ func TestHandleSayNotAddressedWhenAnotherPlayerPresent(t *testing.T) {
 	bob.assertSilent(t, 1*time.Millisecond) // Drain again; shouldn't have changed.
 }
 
+// TestHandleSayAddressedWhenOnlyOtherPlayerIsAsleep covers the case where a
+// disconnected player's body still occupies the room. Sleeping bodies cannot
+// participate in conversation, so they must NOT count for rule (b) — the
+// speaker is "alone with the bartender" as far as addressing is concerned.
+func TestHandleSayAddressedWhenOnlyOtherPlayerIsAsleep(t *testing.T) {
+	e := newFakeBackendEnv(t)
+	alice := e.attachPlayer(t, "alice")
+	bob := e.attachPlayer(t, "bob")
+	alice.drain()
+	bob.drain()
+
+	// Bob's connection drops; his body remains in the lobby (asleep).
+	e.world.Detach(bob.PlayerID, world.DisconnectDropped)
+	alice.drain() // discard the "bob fell asleep." broadcast
+
+	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi")
+	alice.waitFor(t, bartenderResponse, 2*time.Second)
+}
+
 // TestHandleSayNotAddressedWhenUnregisteredNPCPresent guards against rule (b)
 // firing spuriously when a kind='npc' object exists in the room without an
 // npc_config row. The unregistered NPC is invisible to the registry but still

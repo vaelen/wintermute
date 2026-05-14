@@ -29,12 +29,13 @@ const (
 	retrievalThreshold = 0.7
 )
 
-// dispatchTimeout bounds a single LLM Chat round-trip kicked off by a `say`
-// event so a hung backend can't pin a goroutine forever. The dispatch
-// context is derived from the registry's server-lifetime root context, not
-// from any per-session context, so a speaker disconnecting mid-call does
-// not cancel the in-flight reply.
-const dispatchTimeout = 30 * time.Second
+// dispatchTimeout bounds a single say→reply round-trip — embed for memory
+// retrieval, plus the Chat itself. The dispatch context is derived from
+// the registry's server-lifetime root context, not from any per-session
+// context, so a speaker disconnecting mid-call does not cancel the in-
+// flight reply. Sized generously enough to absorb a cold model load on
+// the embed side followed by a cold model load on the chat side.
+const dispatchTimeout = 120 * time.Second
 
 // Registry holds every NPC in the world keyed by id. The world layer (or
 // the session command loop) calls HandleSay after every `say`; the registry
@@ -476,15 +477,21 @@ func addressed(n *NPC, text string, otherEntities int) bool {
 	return otherEntities == 1
 }
 
-// otherEntityCount counts all non-speaker entities in the room — players
-// (attached or asleep) plus NPCs. Rule (b) of the addressing rules fires
-// only when this count is exactly 1, so the speaker is alone with one NPC.
-// npcCount must be the unfiltered world count of NPCs in the room, not the
-// registry-filtered list.
+// otherEntityCount counts all non-speaker conversational entities in the
+// room — *awake* players plus NPCs. Rule (b) of the addressing rules
+// fires only when this count is exactly 1, so the speaker is alone with
+// one NPC. Sleeping bodies cannot participate in conversation and are
+// deliberately excluded; otherwise a disconnected player leaving their
+// body in the room would silently block every nearby NPC from replying
+// to unaddressed `say`. npcCount must be the unfiltered world count of
+// NPCs in the room, not the registry-filtered list.
 func otherEntityCount(speakerID world.ObjectID, players []world.PresentPlayer, npcCount int) int {
 	count := 0
 	for _, p := range players {
 		if p.ObjectID == speakerID {
+			continue
+		}
+		if !p.Awake {
 			continue
 		}
 		count++
