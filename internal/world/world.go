@@ -25,6 +25,11 @@ var (
 	ErrAmbiguousTarget  = errors.New("world: ambiguous target")
 	ErrAlreadyAttached  = errors.New("world: presence already attached")
 	ErrPresenceNotFound = errors.New("world: presence not attached")
+	// ErrStalePresence is returned by mutations whose caller's Presence
+	// has been unregistered (typically because a newer login force-
+	// detached it). The session layer treats this as "you have been
+	// disconnected" and exits its command loop.
+	ErrStalePresence = errors.New("world: presence has been detached")
 )
 
 // World is the in-memory authoritative view of rooms, objects, and where

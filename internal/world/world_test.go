@@ -134,7 +134,7 @@ func TestMoveAndPersistence(t *testing.T) {
 		t.Fatalf("Attach: %v", err)
 	}
 	// Move east into the corridor.
-	to, err := w.Move(rp.Presence, "e")
+	to, err := w.Move(context.Background(), rp.Presence, "e")
 	if err != nil {
 		t.Fatalf("Move east: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestMoveAndPersistence(t *testing.T) {
 	}
 
 	// Invalid direction.
-	if _, err := w.Move(rp.Presence, "x"); !errors.Is(err, ErrNoExit) {
+	if _, err := w.Move(context.Background(), rp.Presence, "x"); !errors.Is(err, ErrNoExit) {
 		t.Errorf("Move x = %v, want ErrNoExit", err)
 	}
 }
@@ -179,10 +179,10 @@ func TestRestartReloadsLocations(t *testing.T) {
 	if _, err := w1.Attach(rp.Presence); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
-	if _, err := w1.Move(rp.Presence, "e"); err != nil {
+	if _, err := w1.Move(context.Background(), rp.Presence, "e"); err != nil {
 		t.Fatalf("Move: %v", err)
 	}
-	if _, err := w1.Move(rp.Presence, "e"); err != nil {
+	if _, err := w1.Move(context.Background(), rp.Presence, "e"); err != nil {
 		t.Fatalf("Move: %v", err)
 	}
 	wantRoom, _ := w1.RoomBySlug("server-room")
@@ -215,7 +215,7 @@ func TestTakeAndDrop(t *testing.T) {
 	}
 
 	// Pick up the keycard from the lobby.
-	obj, err := w.Take(rp.Presence, "keycard")
+	obj, err := w.Take(context.Background(), rp.Presence, "keycard")
 	if err != nil {
 		t.Fatalf("Take: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestTakeAndDrop(t *testing.T) {
 	}
 
 	// Drop it back.
-	if _, err := w.Drop(rp.Presence, "keycard"); err != nil {
+	if _, err := w.Drop(context.Background(), rp.Presence, "keycard"); err != nil {
 		t.Fatalf("Drop: %v", err)
 	}
 	if got := w.Inventory(rp.Presence.PlayerID); len(got) != 0 {
@@ -260,7 +260,7 @@ func TestTakePresentNothingThere(t *testing.T) {
 	if _, err := w.Attach(rp.Presence); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
-	if _, err := w.Take(rp.Presence, "nonexistent"); !errors.Is(err, ErrNotPresent) {
+	if _, err := w.Take(context.Background(), rp.Presence, "nonexistent"); !errors.Is(err, ErrNotPresent) {
 		t.Errorf("Take nonexistent = %v, want ErrNotPresent", err)
 	}
 }
@@ -303,7 +303,7 @@ func TestSayDoesNotReachOtherRoom(t *testing.T) {
 	if _, err := w.Attach(bob.Presence); err != nil {
 		t.Fatalf("Attach bob: %v", err)
 	}
-	if _, err := w.Move(bob.Presence, "e"); err != nil {
+	if _, err := w.Move(context.Background(), bob.Presence, "e"); err != nil {
 		t.Fatalf("Move bob east: %v", err)
 	}
 	alice.Drain()
@@ -356,6 +356,71 @@ func TestAttachTwiceReturnsError(t *testing.T) {
 	}
 }
 
+func TestDetachedPresenceIsRejected(t *testing.T) {
+	// After Detach (e.g. force-replace by a newer login), the old
+	// Presence must be rejected by every mutation with ErrStalePresence,
+	// and IsDetached must report true so the session loop can exit.
+	w, a, _ := newTestWorld(t)
+	alice := newRecordingPresence(w, t, a, "alice")
+	if _, err := w.Attach(alice.Presence); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	w.Detach(alice.PlayerID)
+	if !alice.Presence.IsDetached() {
+		t.Errorf("expected Presence.IsDetached after Detach")
+	}
+	if _, err := w.Move(context.Background(), alice.Presence, "e"); !errors.Is(err, ErrStalePresence) {
+		t.Errorf("Move on detached = %v, want ErrStalePresence", err)
+	}
+	if err := w.Say(alice.Presence, "hi"); !errors.Is(err, ErrStalePresence) {
+		t.Errorf("Say on detached = %v, want ErrStalePresence", err)
+	}
+	if err := w.Emote(alice.Presence, "waves"); !errors.Is(err, ErrStalePresence) {
+		t.Errorf("Emote on detached = %v, want ErrStalePresence", err)
+	}
+	if _, err := w.Take(context.Background(), alice.Presence, "keycard"); !errors.Is(err, ErrStalePresence) {
+		t.Errorf("Take on detached = %v, want ErrStalePresence", err)
+	}
+	if _, err := w.Drop(context.Background(), alice.Presence, "keycard"); !errors.Is(err, ErrStalePresence) {
+		t.Errorf("Drop on detached = %v, want ErrStalePresence", err)
+	}
+}
+
+func TestForceDetachReplacesAttachment(t *testing.T) {
+	// Simulate a reconnect: a second Presence with the same PlayerID
+	// detaches the first, then attaches. The old Presence is stale; the
+	// new one is fully functional.
+	w, a, _ := newTestWorld(t)
+	first := newRecordingPresence(w, t, a, "alice")
+	if _, err := w.Attach(first.Presence); err != nil {
+		t.Fatalf("Attach first: %v", err)
+	}
+	// Build a second presence with the same PlayerID (as the session
+	// layer's reconnect path would).
+	rw := &sync.Mutex{}
+	var buf []string
+	second := &Presence{
+		PlayerID: first.PlayerID,
+		Account:  first.Account,
+		Write: func(s string) error {
+			rw.Lock()
+			defer rw.Unlock()
+			buf = append(buf, s)
+			return nil
+		},
+	}
+	w.Detach(first.PlayerID)
+	if _, err := w.Attach(second); err != nil {
+		t.Fatalf("Attach second: %v", err)
+	}
+	if _, err := w.Move(context.Background(), second, "e"); err != nil {
+		t.Errorf("Move on replaced presence: %v", err)
+	}
+	if _, err := w.Move(context.Background(), first.Presence, "e"); !errors.Is(err, ErrStalePresence) {
+		t.Errorf("Move on old presence = %v, want ErrStalePresence", err)
+	}
+}
+
 func TestFindInRoomAmbiguous(t *testing.T) {
 	w, a, _ := newTestWorld(t)
 	rp := newRecordingPresence(w, t, a, "alice")
@@ -373,7 +438,7 @@ func TestFindInRoomAmbiguous(t *testing.T) {
 	w.mu.Unlock()
 
 	// Substring/exact-slug "keycard" still matches the original by slug.
-	if _, err := w.Take(rp.Presence, "keycard"); err != nil {
+	if _, err := w.Take(context.Background(), rp.Presence, "keycard"); err != nil {
 		t.Errorf("expected exact-slug 'keycard' to disambiguate; got %v", err)
 	}
 }

@@ -5,6 +5,7 @@ package world
 
 import (
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/vaelen/wintermute/internal/auth"
 )
@@ -70,4 +71,16 @@ type Presence struct {
 	Account  *auth.Account
 	Write    func(string) error
 	Log      *slog.Logger
+
+	// detached is set when the world unregisters this presence (clean
+	// logout or force-detach to make room for a new login). Mutations
+	// refuse to operate on a detached presence; the session command loop
+	// checks IsDetached after every command and exits when it flips.
+	detached atomic.Bool
+}
+
+// IsDetached reports whether the world has unregistered this presence.
+// Safe to call from any goroutine.
+func (p *Presence) IsDetached() bool {
+	return p.detached.Load()
 }

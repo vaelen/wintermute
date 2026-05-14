@@ -7,10 +7,32 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/vaelen/wintermute/internal/auth"
 )
+
+// pendingWrite captures a (callback, message) pair to be flushed *after*
+// the world lock is released. Keeping TCP I/O outside the critical section
+// is what prevents one slow client from freezing the entire server: a
+// blocked Write delays only the goroutine flushing it, not the world.
+type pendingWrite struct {
+	write func(string) error
+	msg   string
+	log   *slog.Logger
+}
+
+// flush invokes each pendingWrite. Errors are logged through the
+// presence's own logger (if any) and otherwise dropped — a failed
+// broadcast to one slow/dead listener must not affect any other.
+func flush(pending []pendingWrite) {
+	for _, p := range pending {
+		if err := p.write(p.msg); err != nil && p.log != nil {
+			p.log.Debug("broadcast write failed", "err", err)
+		}
+	}
+}
 
 // CreatePlayer creates the in-world body for an account and places it in
 // the lobby. The created object's slug is "player/<username>". Returns the
@@ -112,31 +134,41 @@ func (w *World) Attach(p *Presence) (RoomID, error) {
 		return 0, fmt.Errorf("world: invalid presence")
 	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if _, exists := w.presencesByID[p.PlayerID]; exists {
+		w.mu.Unlock()
 		return 0, ErrAlreadyAttached
 	}
 	loc, ok := w.locations[p.PlayerID]
 	if !ok || loc.RoomID == 0 {
+		w.mu.Unlock()
 		return 0, ErrPresenceNotFound
 	}
 	w.attachAt(p, loc.RoomID)
-	w.broadcastLocked(loc.RoomID, p.PlayerID, fmt.Sprintf("%s wakes up.\r\n", playerDisplayName(w.objects[p.PlayerID])))
+	pending := w.collectBroadcastLocked(loc.RoomID, p.PlayerID,
+		fmt.Sprintf("%s wakes up.\r\n", playerDisplayName(w.objects[p.PlayerID])))
+	w.mu.Unlock()
+	flush(pending)
 	return loc.RoomID, nil
 }
 
 // Detach removes a session from the world. The player's body remains in
-// place; other players in the room see them fall asleep.
+// place; other players in the room see them fall asleep. The detached
+// presence is marked stale so any in-flight commands from its session
+// will be rejected by the world (see ErrStalePresence).
 func (w *World) Detach(playerID ObjectID) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	p, ok := w.presencesByID[playerID]
 	if !ok {
+		w.mu.Unlock()
 		return
 	}
 	loc := w.locations[playerID]
 	w.detachAt(p, loc.RoomID)
-	w.broadcastLocked(loc.RoomID, playerID, fmt.Sprintf("%s falls asleep.\r\n", playerDisplayName(w.objects[playerID])))
+	p.detached.Store(true)
+	pending := w.collectBroadcastLocked(loc.RoomID, playerID,
+		fmt.Sprintf("%s falls asleep.\r\n", playerDisplayName(w.objects[playerID])))
+	w.mu.Unlock()
+	flush(pending)
 }
 
 func (w *World) attachAt(p *Presence, room RoomID) {
@@ -160,41 +192,64 @@ func (w *World) detachAt(p *Presence, room RoomID) {
 	delete(w.presencesByID, p.PlayerID)
 }
 
+// validatePresenceLocked rejects calls from a presence that is no longer
+// the world's authoritative one for its player — either because it has
+// been detached or because a newer login has replaced it. Caller must
+// hold w.mu (read or write lock).
+func (w *World) validatePresenceLocked(p *Presence) error {
+	if p == nil || p.PlayerID == 0 {
+		return ErrPresenceNotFound
+	}
+	if p.detached.Load() {
+		return ErrStalePresence
+	}
+	if got, ok := w.presencesByID[p.PlayerID]; !ok || got != p {
+		return ErrStalePresence
+	}
+	return nil
+}
+
 // Move moves the attached player in the given direction. Returns the new
 // room id on success.
-func (w *World) Move(p *Presence, dir string) (RoomID, error) {
+func (w *World) Move(ctx context.Context, p *Presence, dir string) (RoomID, error) {
 	dir = strings.ToLower(strings.TrimSpace(dir))
 	w.mu.Lock()
-	defer w.mu.Unlock()
+	if err := w.validatePresenceLocked(p); err != nil {
+		w.mu.Unlock()
+		return 0, err
+	}
 
 	from, ok := w.locations[p.PlayerID]
 	if !ok || from.RoomID == 0 {
+		w.mu.Unlock()
 		return 0, ErrPresenceNotFound
 	}
 	fromRoom := w.rooms[from.RoomID]
 	if fromRoom == nil {
+		w.mu.Unlock()
 		return 0, ErrUnknownRoom
 	}
 	toID, ok := fromRoom.Exits[dir]
 	if !ok {
+		w.mu.Unlock()
 		return 0, ErrNoExit
 	}
-	toRoom := w.rooms[toID]
-	if toRoom == nil {
+	if w.rooms[toID] == nil {
+		w.mu.Unlock()
 		return 0, ErrUnknownRoom
 	}
 
-	if err := w.db.Write(context.Background(), func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(context.Background(),
+	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
 			`UPDATE object_locations SET room_id = ?, holder_id = NULL WHERE object_id = ?`,
 			toID, p.PlayerID,
 		)
 		return err
 	}); err != nil {
+		w.mu.Unlock()
 		return 0, fmt.Errorf("world: persist move: %w", err)
 	}
 
-	// Cache mutation.
 	w.unindexFromRoom(p.PlayerID, from.RoomID)
 	w.indexInRoom(p.PlayerID, toID)
 	w.locations[p.PlayerID] = Location{ObjectID: p.PlayerID, RoomID: toID}
@@ -204,8 +259,13 @@ func (w *World) Move(p *Presence, dir string) (RoomID, error) {
 	}
 
 	name := playerDisplayName(w.objects[p.PlayerID])
-	w.broadcastLocked(from.RoomID, p.PlayerID, fmt.Sprintf("%s leaves %s.\r\n", name, directionPhrase(dir)))
-	w.broadcastLocked(toID, p.PlayerID, fmt.Sprintf("%s arrives.\r\n", name))
+	leaving := w.collectBroadcastLocked(from.RoomID, p.PlayerID,
+		fmt.Sprintf("%s leaves %s.\r\n", name, directionPhrase(dir)))
+	arriving := w.collectBroadcastLocked(toID, p.PlayerID,
+		fmt.Sprintf("%s arrives.\r\n", name))
+	w.mu.Unlock()
+	flush(leaving)
+	flush(arriving)
 	return toID, nil
 }
 
@@ -217,18 +277,24 @@ func (w *World) Say(p *Presence, text string) error {
 		return nil
 	}
 	w.mu.RLock()
+	if err := w.validatePresenceLocked(p); err != nil {
+		w.mu.RUnlock()
+		return err
+	}
 	loc, ok := w.locations[p.PlayerID]
 	if !ok {
 		w.mu.RUnlock()
 		return ErrPresenceNotFound
 	}
 	name := playerDisplayName(w.objects[p.PlayerID])
+	selfMsg := fmt.Sprintf("You say, \"%s\"\r\n", text)
+	roomMsg := fmt.Sprintf("%s says, \"%s\"\r\n", name, text)
+	pending := w.collectBroadcastLocked(loc.RoomID, p.PlayerID, roomMsg)
+	// Add the speaker's self-echo to the pending list so all writes
+	// happen *after* the lock is released.
+	pending = append(pending, pendingWrite{write: p.Write, msg: selfMsg, log: p.Log})
 	w.mu.RUnlock()
-
-	_ = p.Write(fmt.Sprintf("You say, \"%s\"\r\n", text))
-	w.mu.RLock()
-	w.broadcastLocked(loc.RoomID, p.PlayerID, fmt.Sprintf("%s says, \"%s\"\r\n", name, text))
-	w.mu.RUnlock()
+	flush(pending)
 	return nil
 }
 
@@ -240,48 +306,56 @@ func (w *World) Emote(p *Presence, text string) error {
 		return nil
 	}
 	w.mu.RLock()
+	if err := w.validatePresenceLocked(p); err != nil {
+		w.mu.RUnlock()
+		return err
+	}
 	loc, ok := w.locations[p.PlayerID]
 	if !ok {
 		w.mu.RUnlock()
 		return ErrPresenceNotFound
 	}
 	name := playerDisplayName(w.objects[p.PlayerID])
-	w.mu.RUnlock()
-
 	line := fmt.Sprintf("%s %s\r\n", name, text)
-	_ = p.Write(line)
-	w.mu.RLock()
-	w.broadcastLocked(loc.RoomID, p.PlayerID, line)
+	pending := w.collectBroadcastLocked(loc.RoomID, p.PlayerID, line)
+	pending = append(pending, pendingWrite{write: p.Write, msg: line, log: p.Log})
 	w.mu.RUnlock()
+	flush(pending)
 	return nil
 }
 
 // Take moves an item from the player's current room into the player's
 // inventory.
-func (w *World) Take(p *Presence, target string) (Object, error) {
+func (w *World) Take(ctx context.Context, p *Presence, target string) (Object, error) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
+	if err := w.validatePresenceLocked(p); err != nil {
+		w.mu.Unlock()
+		return Object{}, err
+	}
 	loc, ok := w.locations[p.PlayerID]
 	if !ok {
+		w.mu.Unlock()
 		return Object{}, ErrPresenceNotFound
 	}
 	objID, err := w.findInRoom(loc.RoomID, target)
 	if err != nil {
+		w.mu.Unlock()
 		return Object{}, err
 	}
 	obj := w.objects[objID]
 	if obj.Kind != KindItem {
+		w.mu.Unlock()
 		return Object{}, ErrNotTakeable
 	}
 
-	if err := w.db.Write(context.Background(), func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(context.Background(),
+	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
 			`UPDATE object_locations SET room_id = NULL, holder_id = ? WHERE object_id = ?`,
 			p.PlayerID, objID,
 		)
 		return err
 	}); err != nil {
+		w.mu.Unlock()
 		return Object{}, fmt.Errorf("world: persist take: %w", err)
 	}
 
@@ -290,33 +364,42 @@ func (w *World) Take(p *Presence, target string) (Object, error) {
 	w.locations[objID] = Location{ObjectID: objID, HolderID: p.PlayerID}
 
 	name := playerDisplayName(w.objects[p.PlayerID])
-	w.broadcastLocked(loc.RoomID, p.PlayerID, fmt.Sprintf("%s picks up %s.\r\n", name, obj.Name))
-	return *obj, nil
+	pending := w.collectBroadcastLocked(loc.RoomID, p.PlayerID,
+		fmt.Sprintf("%s picks up %s.\r\n", name, obj.Name))
+	taken := *obj
+	w.mu.Unlock()
+	flush(pending)
+	return taken, nil
 }
 
 // Drop moves an item from the player's inventory into the player's current
 // room.
-func (w *World) Drop(p *Presence, target string) (Object, error) {
+func (w *World) Drop(ctx context.Context, p *Presence, target string) (Object, error) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
+	if err := w.validatePresenceLocked(p); err != nil {
+		w.mu.Unlock()
+		return Object{}, err
+	}
 	loc, ok := w.locations[p.PlayerID]
 	if !ok {
+		w.mu.Unlock()
 		return Object{}, ErrPresenceNotFound
 	}
 	objID, err := w.findHeldBy(p.PlayerID, target)
 	if err != nil {
+		w.mu.Unlock()
 		return Object{}, err
 	}
 	obj := w.objects[objID]
 
-	if err := w.db.Write(context.Background(), func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(context.Background(),
+	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
 			`UPDATE object_locations SET room_id = ?, holder_id = NULL WHERE object_id = ?`,
 			loc.RoomID, objID,
 		)
 		return err
 	}); err != nil {
+		w.mu.Unlock()
 		return Object{}, fmt.Errorf("world: persist drop: %w", err)
 	}
 
@@ -325,23 +408,31 @@ func (w *World) Drop(p *Presence, target string) (Object, error) {
 	w.locations[objID] = Location{ObjectID: objID, RoomID: loc.RoomID}
 
 	name := playerDisplayName(w.objects[p.PlayerID])
-	w.broadcastLocked(loc.RoomID, p.PlayerID, fmt.Sprintf("%s drops %s.\r\n", name, obj.Name))
-	return *obj, nil
+	pending := w.collectBroadcastLocked(loc.RoomID, p.PlayerID,
+		fmt.Sprintf("%s drops %s.\r\n", name, obj.Name))
+	dropped := *obj
+	w.mu.Unlock()
+	flush(pending)
+	return dropped, nil
 }
 
-// broadcastLocked sends msg to every attached presence in room except
-// `except`. Caller must hold at least an RLock; presence Write callbacks
-// must not call back into the world (they only push bytes to a session).
-func (w *World) broadcastLocked(room RoomID, except ObjectID, msg string) {
+// collectBroadcastLocked snapshots the per-presence Write callbacks that
+// should receive msg in room (excluding `except`). Caller must hold w.mu
+// (read or write); the returned slice is safe to invoke after the lock
+// has been released.
+func (w *World) collectBroadcastLocked(room RoomID, except ObjectID, msg string) []pendingWrite {
 	set := w.presences[room]
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]pendingWrite, 0, len(set))
 	for id, pr := range set {
 		if id == except {
 			continue
 		}
-		if err := pr.Write(msg); err != nil && pr.Log != nil {
-			pr.Log.Debug("broadcast write failed", "err", err)
-		}
+		out = append(out, pendingWrite{write: pr.Write, msg: msg, log: pr.Log})
 	}
+	return out
 }
 
 // findInRoom locates a single object in room whose slug or name matches
