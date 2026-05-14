@@ -50,6 +50,24 @@ func (w *World) ItemsInRoom(room RoomID) []Object {
 	return out
 }
 
+// NPCsInRoom returns the NPCs currently located in room, sorted by name.
+// Players and items are excluded.
+func (w *World) NPCsInRoom(room RoomID) []Object {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	set := w.objectAt[room]
+	var out []Object
+	for id := range set {
+		o := w.objects[id]
+		if o == nil || o.Kind != KindNPC {
+			continue
+		}
+		out = append(out, *o)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // Inventory returns the items held by the given player, sorted by name.
 func (w *World) Inventory(playerID ObjectID) []Object {
 	w.mu.RLock()

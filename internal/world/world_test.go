@@ -443,5 +443,96 @@ func TestFindInRoomAmbiguous(t *testing.T) {
 	}
 }
 
-func join(parts []string) string     { return strings.Join(parts, "") }
-func contains(s, sub string) bool    { return strings.Contains(s, sub) }
+// addTestNPC inserts a fresh NPC object into room directly into the world's
+// in-memory maps. Lets the world tests cover NPC-aware methods without
+// depending on the npc package or hand-writing seed migrations.
+func addTestNPC(t *testing.T, w *World, room RoomID, slug, name string) ObjectID {
+	t.Helper()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	id := ObjectID(0)
+	for i := ObjectID(10000); ; i++ {
+		if _, exists := w.objects[i]; !exists {
+			id = i
+			break
+		}
+	}
+	w.objects[id] = &Object{ID: id, Slug: slug, Name: name, Kind: KindNPC}
+	w.objBy[slug] = id
+	w.locations[id] = Location{ObjectID: id, RoomID: room}
+	w.indexInRoom(id, room)
+	return id
+}
+
+func TestNPCsInRoom(t *testing.T) {
+	w, a, _ := newTestWorld(t)
+	rp := newRecordingPresence(w, t, a, "alice")
+	if _, err := w.Attach(rp.Presence); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	corridor, err := w.RoomBySlug("corridor")
+	if err != nil {
+		t.Fatalf("RoomBySlug corridor: %v", err)
+	}
+	if _, err := w.Move(context.Background(), rp.Presence, "e"); err != nil {
+		t.Fatalf("Move east: %v", err)
+	}
+	npcID := addTestNPC(t, w, corridor.ID, "npc/test-mechanic", "the mechanic")
+
+	npcs := w.NPCsInRoom(corridor.ID)
+	if len(npcs) != 1 {
+		t.Fatalf("NPCsInRoom = %d entries, want 1: %+v", len(npcs), npcs)
+	}
+	if npcs[0].ID != npcID || npcs[0].Name != "the mechanic" {
+		t.Errorf("NPCsInRoom returned %+v, want id=%d name=the mechanic", npcs[0], npcID)
+	}
+	for _, n := range npcs {
+		if n.Kind != KindNPC {
+			t.Errorf("NPCsInRoom returned non-NPC: %+v", n)
+		}
+	}
+}
+
+func TestNPCSayBroadcastsToRoom(t *testing.T) {
+	w, a, _ := newTestWorld(t)
+	alice := newRecordingPresence(w, t, a, "alice")
+	bob := newRecordingPresence(w, t, a, "bob")
+	if _, err := w.Attach(alice.Presence); err != nil {
+		t.Fatalf("Attach alice: %v", err)
+	}
+	if _, err := w.Attach(bob.Presence); err != nil {
+		t.Fatalf("Attach bob: %v", err)
+	}
+	lobby, _ := w.LobbyID()
+	// The seed migrations already place "the bartender" in the lobby.
+	npcs := w.NPCsInRoom(lobby)
+	if len(npcs) == 0 {
+		t.Fatalf("expected the seed bartender NPC in the lobby")
+	}
+	bartender := npcs[0]
+
+	alice.Drain()
+	bob.Drain()
+
+	if err := w.NPCSay(bartender.ID, "what'll it be"); err != nil {
+		t.Fatalf("NPCSay: %v", err)
+	}
+
+	want := `the bartender says, "what'll it be"`
+	if !contains(join(alice.Drain()), want) {
+		t.Errorf("alice did not receive NPC line containing %q", want)
+	}
+	if !contains(join(bob.Drain()), want) {
+		t.Errorf("bob did not receive NPC line containing %q", want)
+	}
+}
+
+func TestNPCSayUnknownObject(t *testing.T) {
+	w, _, _ := newTestWorld(t)
+	if err := w.NPCSay(ObjectID(424242), "anyone there"); !errors.Is(err, ErrUnknownObject) {
+		t.Errorf("NPCSay unknown id = %v, want ErrUnknownObject", err)
+	}
+}
+
+func join(parts []string) string  { return strings.Join(parts, "") }
+func contains(s, sub string) bool { return strings.Contains(s, sub) }

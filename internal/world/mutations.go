@@ -298,6 +298,33 @@ func (w *World) Say(p *Presence, text string) error {
 	return nil
 }
 
+// NPCSay broadcasts a line as the NPC to everyone in the NPC's room. Unlike
+// Say, the NPC has no session so there is no self-echo. Returns
+// ErrUnknownObject if the id is unknown and ErrPresenceNotFound if the NPC
+// has no room location.
+func (w *World) NPCSay(npcID ObjectID, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	w.mu.RLock()
+	o, ok := w.objects[npcID]
+	if !ok {
+		w.mu.RUnlock()
+		return ErrUnknownObject
+	}
+	loc, ok := w.locations[npcID]
+	if !ok || loc.RoomID == 0 {
+		w.mu.RUnlock()
+		return ErrPresenceNotFound
+	}
+	line := fmt.Sprintf("%s says, \"%s\"\r\n", o.Name, text)
+	pending := w.collectBroadcastLocked(loc.RoomID, 0, line)
+	w.mu.RUnlock()
+	flush(pending)
+	return nil
+}
+
 // Emote broadcasts an emote line to everyone in the room (including the
 // emoting player).
 func (w *World) Emote(p *Presence, text string) error {
