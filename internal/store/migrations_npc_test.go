@@ -41,7 +41,8 @@ func TestBartenderSeed(t *testing.T) {
 	if err := d.Read().QueryRow(
 		`SELECT o.slug, o.kind, c.backend, c.max_context
 		   FROM npc_config c
-		   JOIN objects o ON o.id = c.object_id`,
+		   JOIN objects o ON o.id = c.object_id
+		  WHERE o.slug = 'npc/bartender'`,
 	).Scan(&slug, &kind, &backend, &maxContext); err != nil {
 		t.Fatalf("query bartender: %v", err)
 	}
