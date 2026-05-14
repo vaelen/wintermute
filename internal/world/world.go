@@ -32,6 +32,15 @@ var (
 	ErrStalePresence = errors.New("world: presence has been detached")
 )
 
+// SayObserver receives a notification AFTER World.Say has finished
+// broadcasting. roomID is the speaker's room; speakerID is the player
+// who spoke; speakerName is their display name; text is the raw text.
+// World invokes the observer in a fresh goroutine so the speaker's
+// session is never blocked. Implementations MUST NOT call back into
+// world mutation methods that would deadlock (in particular, do not
+// take w.mu in the observer thread).
+type SayObserver func(roomID RoomID, speakerID ObjectID, speakerName, text string)
+
 // World is the in-memory authoritative view of rooms, objects, and where
 // every object currently is. All mutations go through the store.DB writer
 // goroutine; the in-memory cache is updated optimistically and rolled back
@@ -54,6 +63,17 @@ type World struct {
 	presences map[RoomID]map[ObjectID]*Presence
 	// presencesByID maps an object id to its Presence, when attached.
 	presencesByID map[ObjectID]*Presence
+	// sayObserver is notified asynchronously after every Say broadcast.
+	// Guarded by w.mu (write under Lock, read under RLock).
+	sayObserver SayObserver
+}
+
+// SetSayObserver registers an observer to be notified after each Say
+// completes. Pass nil to clear. The previous observer is discarded.
+func (w *World) SetSayObserver(fn SayObserver) {
+	w.mu.Lock()
+	w.sayObserver = fn
+	w.mu.Unlock()
 }
 
 // Load constructs a World by reading the entire world state from db. The

@@ -8,15 +8,26 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/world"
 	"github.com/vaelen/wintermute/internal/world/render"
 )
+
+// NPCReloader is the minimal interface the cmd package needs from the
+// NPC registry. Keeping it as an interface avoids importing the npc
+// package (and the LLM/sqlite chain) into the world cmd package.
+type NPCReloader interface {
+	Reload(ctx context.Context) error
+}
 
 // Handler binds a Presence to a World. Each session creates one Handler
 // after login and routes every input line through Dispatch.
 type Handler struct {
 	World    *world.World
 	Presence *world.Presence
+	// NPC is the npc registry, used by admin commands. May be nil
+	// (e.g. in tests where NPC reactivity isn't exercised).
+	NPC NPCReloader
 }
 
 // Outcome reports a special command result that the session loop must act
@@ -87,7 +98,16 @@ func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
 	case "help", "?":
 		h.cmdHelp()
 		outcome = OutcomeContinue
+	case "@npcreload":
+		outcome = h.cmdNPCReload(ctx)
 	default:
+		return OutcomeUnknown
+	}
+	// Admin-only commands return OutcomeUnknown when the caller lacks
+	// access; surface that to the session loop so it falls through to
+	// the unknown-command path and the command stays invisible to
+	// non-admins.
+	if outcome == OutcomeUnknown {
 		return OutcomeUnknown
 	}
 	if outcome == OutcomeDetached {
@@ -218,6 +238,25 @@ func (h *Handler) cmdDrop(ctx context.Context, target string) Outcome {
 		return OutcomeContinue
 	}
 	_ = h.Presence.Write("You drop " + obj.Name + ".\r\n")
+	return OutcomeContinue
+}
+
+// cmdNPCReload re-reads npc_config from the database. Admin-only; hidden
+// from non-admins by returning OutcomeUnknown so they see the same
+// "Unknown command" reply as for any other unrecognised input.
+func (h *Handler) cmdNPCReload(ctx context.Context) Outcome {
+	if h.NPC == nil {
+		return OutcomeUnknown
+	}
+	if h.Presence == nil || h.Presence.Account == nil ||
+		h.Presence.Account.AccessLevel != auth.AccessAdmin {
+		return OutcomeUnknown
+	}
+	if err := h.NPC.Reload(ctx); err != nil {
+		_ = h.Presence.Write("NPC reload failed: " + err.Error() + "\r\n")
+		return OutcomeContinue
+	}
+	_ = h.Presence.Write("NPC registry reloaded.\r\n")
 	return OutcomeContinue
 }
 

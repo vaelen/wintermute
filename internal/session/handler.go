@@ -17,6 +17,7 @@ import (
 	wtelnet "github.com/vaelen/wintermute/internal/net/telnet"
 	"github.com/vaelen/wintermute/internal/term"
 	"github.com/vaelen/wintermute/internal/world"
+	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
 )
 
 // Handler holds the dependencies a connection handler needs. One Handler
@@ -24,6 +25,7 @@ import (
 type Handler struct {
 	Auth   *auth.Store
 	World  *world.World
+	NPC    worldcmd.NPCReloader
 	Logger *slog.Logger
 	MOTD   string
 
@@ -33,10 +35,11 @@ type Handler struct {
 }
 
 // DefaultHandler returns a Handler with sensible defaults wired in.
-func DefaultHandler(a *auth.Store, w *world.World, log *slog.Logger, motd string) *Handler {
+func DefaultHandler(a *auth.Store, w *world.World, npcReg worldcmd.NPCReloader, log *slog.Logger, motd string) *Handler {
 	return &Handler{
 		Auth:                     a,
 		World:                    w,
+		NPC:                      npcReg,
 		Logger:                   log,
 		MOTD:                     motd,
 		TelnetDetectTimeout:      200 * time.Millisecond,

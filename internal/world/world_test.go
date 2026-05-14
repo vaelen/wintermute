@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/store"
@@ -531,6 +532,68 @@ func TestNPCSayUnknownObject(t *testing.T) {
 	w, _, _ := newTestWorld(t)
 	if err := w.NPCSay(ObjectID(424242), "anyone there"); !errors.Is(err, ErrUnknownObject) {
 		t.Errorf("NPCSay unknown id = %v, want ErrUnknownObject", err)
+	}
+}
+
+func TestSayObserverInvokedAfterBroadcast(t *testing.T) {
+	w, a, _ := newTestWorld(t)
+	alice := newRecordingPresence(w, t, a, "alice")
+	bob := newRecordingPresence(w, t, a, "bob")
+	if _, err := w.Attach(alice.Presence); err != nil {
+		t.Fatalf("Attach alice: %v", err)
+	}
+	if _, err := w.Attach(bob.Presence); err != nil {
+		t.Fatalf("Attach bob: %v", err)
+	}
+	alice.Drain()
+	bob.Drain()
+
+	type call struct {
+		roomID      RoomID
+		speakerID   ObjectID
+		speakerName string
+		text        string
+	}
+	ch := make(chan call, 1)
+	w.SetSayObserver(func(roomID RoomID, speakerID ObjectID, speakerName, text string) {
+		ch <- call{roomID, speakerID, speakerName, text}
+	})
+
+	if err := w.Say(alice.Presence, "hello"); err != nil {
+		t.Fatalf("Say: %v", err)
+	}
+
+	lobby, _ := w.LobbyID()
+	select {
+	case got := <-ch:
+		if got.roomID != lobby {
+			t.Errorf("observer roomID = %d, want %d", got.roomID, lobby)
+		}
+		if got.speakerID != alice.PlayerID {
+			t.Errorf("observer speakerID = %d, want %d", got.speakerID, alice.PlayerID)
+		}
+		if got.speakerName != "alice" {
+			t.Errorf("observer speakerName = %q, want %q", got.speakerName, "alice")
+		}
+		if got.text != "hello" {
+			t.Errorf("observer text = %q, want %q", got.text, "hello")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("observer not invoked within 1s")
+	}
+
+	// Clearing the observer makes subsequent Says silent (no panic, nothing
+	// in the channel).
+	w.SetSayObserver(nil)
+	alice.Drain()
+	bob.Drain()
+	if err := w.Say(alice.Presence, "again"); err != nil {
+		t.Fatalf("Say (post-clear): %v", err)
+	}
+	select {
+	case got := <-ch:
+		t.Errorf("observer fired after clear: %+v", got)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 

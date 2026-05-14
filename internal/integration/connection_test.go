@@ -57,7 +57,7 @@ func startServer(t *testing.T) *testServer {
 		return err
 	})
 
-	handler := session.DefaultHandler(a, w, logger, "MOTD\r\n")
+	handler := session.DefaultHandler(a, w, nil, logger, "MOTD\r\n")
 	// Speed up the tests by collapsing the detection windows.
 	handler.TelnetDetectTimeout = 50 * time.Millisecond
 	handler.NegotiationSettleTimeout = 50 * time.Millisecond

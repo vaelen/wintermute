@@ -293,8 +293,14 @@ func (w *World) Say(p *Presence, text string) error {
 	// Add the speaker's self-echo to the pending list so all writes
 	// happen *after* the lock is released.
 	pending = append(pending, pendingWrite{write: p.Write, msg: selfMsg, log: p.Log})
+	roomID := loc.RoomID
+	speakerID := p.PlayerID
+	observer := w.sayObserver
 	w.mu.RUnlock()
 	flush(pending)
+	if observer != nil {
+		go observer(roomID, speakerID, name, text)
+	}
 	return nil
 }
 
