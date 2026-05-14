@@ -15,16 +15,27 @@ import (
 
 	"github.com/vaelen/wintermute/internal/config"
 	"github.com/vaelen/wintermute/internal/llm"
+	"github.com/vaelen/wintermute/internal/npc/memory"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
 )
 
-// dispatchTimeout bounds a single LLM Chat round-trip kicked off by a `say`
-// event so a hung backend can't pin a goroutine forever. The dispatch
-// context is derived from the registry's server-lifetime root context, not
-// from any per-session context, so a speaker disconnecting mid-call does
-// not cancel the in-flight reply.
-const dispatchTimeout = 30 * time.Second
+const (
+	// retrievalK is the number of long-term memories fetched per turn.
+	retrievalK = 5
+	// retrievalThreshold is the minimum cosine similarity for inclusion.
+	// Tuned against nomic-embed-text-class vectors; conservative enough
+	// to keep unrelated topics from leaking into the system message.
+	retrievalThreshold = 0.7
+)
+
+// dispatchTimeout bounds a single say→reply round-trip — embed for memory
+// retrieval, plus the Chat itself. The dispatch context is derived from
+// the registry's server-lifetime root context, not from any per-session
+// context, so a speaker disconnecting mid-call does not cancel the in-
+// flight reply. Sized generously enough to absorb a cold model load on
+// the embed side followed by a cold model load on the chat side.
+const dispatchTimeout = 120 * time.Second
 
 // Registry holds every NPC in the world keyed by id. The world layer (or
 // the session command loop) calls HandleSay after every `say`; the registry
@@ -46,7 +57,15 @@ type Registry struct {
 	mu   sync.RWMutex
 	byID map[world.ObjectID]*NPC
 
-	dispatchWG sync.WaitGroup
+	inFlightWG sync.WaitGroup
+
+	// store is the shared long-term memory backend. Each NPC's State
+	// references this same store; per-NPC scoping happens via NPCID
+	// in queries.
+	store memory.Store
+	// memCancel cancels the per-NPC Worker goroutines started in
+	// rebuild. Reset on every rebuild.
+	memCancel context.CancelFunc
 }
 
 // Load builds a Registry by reading every npc_config row, opening the
@@ -70,10 +89,17 @@ func Load(serverCtx context.Context, db *store.DB, w *world.World, defaults conf
 		logger:   logger,
 		defaults: defaults,
 		rootCtx:  serverCtx,
+		store:    memory.NewSQLStore(db),
 	}
 	if err := r.rebuild(serverCtx); err != nil {
 		return nil, err
 	}
+	// Wire structured presence observers so the memory layer can detect
+	// conversation-end without parsing room broadcast strings. The
+	// callbacks are intentionally cheap (just dispatch to per-NPC State
+	// methods, which queue work for the worker goroutine and return).
+	w.SetDetachObserver(r.onPlayerDetach)
+	w.SetMoveObserver(r.onPlayerMove)
 	return r, nil
 }
 
@@ -157,6 +183,60 @@ func (r *Registry) rebuild(ctx context.Context) error {
 		return fmt.Errorf("npc: iterate npc_config: %w", err)
 	}
 
+	// Tear down any previously-running workers and replace them. Done
+	// here (between scan and commit) so a partial failure above leaves
+	// the old workers alive.
+	//
+	// Order matters: drain each old State first (which drains its
+	// short-term buffer through the worker and waits for the worker to
+	// exit), then cancel the old worker context as a safety net.
+	// Reversing the order would race a still-armed idle timer or
+	// observer goroutine into a dead channel, silently dropping work.
+	r.mu.RLock()
+	oldNPCs := make([]*NPC, 0, len(r.byID))
+	for _, n := range r.byID {
+		oldNPCs = append(oldNPCs, n)
+	}
+	r.mu.RUnlock()
+	for _, n := range oldNPCs {
+		if n.Memory == nil {
+			continue
+		}
+		if err := n.Memory.Stop(ctx); err != nil {
+			r.logger.Warn("npc: rebuild: stop previous memory state",
+				"npc", n.Name, "err", err)
+		}
+	}
+	if r.memCancel != nil {
+		r.memCancel()
+	}
+	memCtx, memCancel := context.WithCancel(r.rootCtx)
+	r.memCancel = memCancel
+
+	summarizerModel := optString(r.defaults.Opts, "summarizer_model")
+	for _, n := range byID {
+		if n.llm == nil {
+			continue
+		}
+		// Per-NPC overrides could be added later as new npc_config
+		// columns; for now every NPC uses the default summariser model.
+		w := memory.NewWorker(memory.WorkerConfig{
+			NPCID:           n.ObjectID,
+			LLM:             n.llm,
+			Store:           r.store,
+			SummarizerModel: summarizerModel,
+			Logger:          r.logger,
+		})
+		go w.Run(memCtx)
+		n.Memory = memory.NewState(memory.StateConfig{
+			NPCID:  n.ObjectID,
+			LLM:    n.llm,
+			Store:  r.store,
+			Worker: w,
+			Logger: r.logger,
+		})
+	}
+
 	r.mu.Lock()
 	r.byID = byID
 	r.mu.Unlock()
@@ -219,10 +299,10 @@ func (r *Registry) HandleSay(roomID world.RoomID, speakerID world.ObjectID, spea
 		if !addressed(n, text, otherEntities) {
 			continue
 		}
-		r.dispatchWG.Add(1)
+		r.inFlightWG.Add(1)
 		go func(n *NPC) {
-			defer r.dispatchWG.Done()
-			r.dispatch(n, speakerName, text)
+			defer r.inFlightWG.Done()
+			r.dispatch(n, speakerID, speakerName, text)
 		}(n)
 	}
 }
@@ -232,14 +312,65 @@ func (r *Registry) HandleSay(roomID world.RoomID, speakerID world.ObjectID, spea
 // resources at shutdown; otherwise an in-flight Chat that subsequently
 // touches the world or DB could race with teardown.
 func (r *Registry) Wait() {
-	r.dispatchWG.Wait()
+	r.inFlightWG.Wait()
 }
 
-func (r *Registry) dispatch(n *NPC, speakerName, text string) {
-	n.mu.Lock()
+// Shutdown is the full teardown path: it waits for in-flight dispatch
+// and observer goroutines (bounded by ctx), then drains every per-NPC
+// short-term buffer through the summarisation workers (also bounded by
+// ctx). Returns ctx.Err() if the deadline expires before the work
+// completes; callers (main.go) treat that as a best-effort hint and
+// proceed with db.Close anyway. The whole point of the ctx parameter
+// is that a hung LLM backend cannot pin shutdown beyond it.
+func (r *Registry) Shutdown(ctx context.Context) error {
+	// Step 1: bounded wait for in-flight dispatch + observer
+	// goroutines. If ctx expires first, log and stop — the goroutines
+	// will eventually exit via their own internal timeouts
+	// (dispatchTimeout, observerSubmitTimeout) and the worker-context
+	// cancel below.
+	waitDone := make(chan struct{})
+	go func() { r.inFlightWG.Wait(); close(waitDone) }()
+	select {
+	case <-waitDone:
+	case <-ctx.Done():
+		r.logger.Warn("npc: shutdown: in-flight wait timed out, proceeding",
+			"err", ctx.Err())
+		if r.memCancel != nil {
+			r.memCancel()
+		}
+		return ctx.Err()
+	}
 
+	// Step 2: drain each NPC's memory state. Each Stop call is itself
+	// bounded by ctx, so this loop cannot exceed the remaining budget.
+	r.mu.RLock()
+	npcs := make([]*NPC, 0, len(r.byID))
+	for _, n := range r.byID {
+		npcs = append(npcs, n)
+	}
+	r.mu.RUnlock()
+
+	var firstErr error
+	for _, n := range npcs {
+		if n.Memory == nil {
+			continue
+		}
+		if err := n.Memory.Stop(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	// Cancel the worker context as a final safety net: by now every
+	// per-NPC State.Stop has already asked its worker to drain and
+	// exit, but a hung Embed call inside Run could still be holding on
+	// to a goroutine. Cancelling the context unblocks the LLM call.
+	if r.memCancel != nil {
+		r.memCancel()
+	}
+	return firstErr
+}
+
+func (r *Registry) dispatch(n *NPC, speakerID world.ObjectID, speakerName, text string) {
 	if n.llm == nil {
-		n.mu.Unlock()
 		// Load already logged a WARN when Open failed; re-logging per
 		// say event would just be noise.
 		r.logger.Debug("npc: no llm configured, ignoring say",
@@ -250,12 +381,43 @@ func (r *Registry) dispatch(n *NPC, speakerName, text string) {
 	ctx, cancel := context.WithTimeout(r.rootCtx, dispatchTimeout)
 	defer cancel()
 
+	// Step 1: append the player's turn to the short-term buffer BEFORE
+	// retrieval, so the embed query reflects "what was just said".
+	if n.Memory != nil {
+		n.Memory.Append(speakerID, memory.Turn{
+			Speaker: speakerName,
+			Text:    text,
+			At:      time.Now(),
+		})
+	}
+
+	// Step 2: pull relevant long-term memories. Failures here are non-
+	// fatal: log and continue with no memory context.
+	var retrieved []memory.Memory
+	if n.Memory != nil {
+		mems, err := n.Memory.Retrieve(ctx, speakerID, retrievalK, retrievalThreshold)
+		if err != nil {
+			r.logger.Warn("npc: memory retrieval failed",
+				"npc", n.Name, "err", err)
+		} else {
+			retrieved = mems
+		}
+	}
+
+	n.mu.Lock()
 	userMsg := llm.Message{
 		Role:    llm.RoleUser,
 		Content: fmt.Sprintf("%s says: %s", speakerName, text),
 	}
-	msgs := make([]llm.Message, 0, len(n.history)+2)
+	// System: persona, then optional memory block, then history, then user.
+	msgs := make([]llm.Message, 0, len(n.history)+3)
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: n.Persona})
+	if len(retrieved) > 0 {
+		msgs = append(msgs, llm.Message{
+			Role:    llm.RoleSystem,
+			Content: renderMemoryContext(retrieved),
+		})
+	}
 	msgs = append(msgs, n.history...)
 	msgs = append(msgs, userMsg)
 
@@ -293,6 +455,82 @@ func (r *Registry) dispatch(n *NPC, speakerName, text string) {
 		r.logger.Warn("npc: broadcast failed",
 			"npc", n.Name, "err", err)
 	}
+
+	// Step 4: record the NPC's response in short-term, and bump salience
+	// on every memory we actually used. Both are best-effort: a failure
+	// here should not affect future conversations beyond logging.
+	if n.Memory != nil {
+		n.Memory.Append(speakerID, memory.Turn{
+			Speaker: "<npc>",
+			Text:    reply,
+			At:      time.Now(),
+		})
+		if len(retrieved) > 0 {
+			n.Memory.BumpSalience(ctx, retrieved)
+		}
+	}
+}
+
+// observerSubmitTimeout bounds how long an observer-spawned drain is
+// willing to wait if the worker queue is saturated. Generous because a
+// stalled queue here means the engine is already in trouble; we'd
+// rather log a drop than wedge the goroutine forever.
+const observerSubmitTimeout = 30 * time.Second
+
+// onPlayerDetach ends the conversation for every NPC currently in the
+// player's room. Called by the world layer after a Detach broadcast.
+// The world-layer contract requires observers to be cheap and to
+// off-load any blocking work to a goroutine — drain submission can
+// block when the worker queue is full, so we always launch one. The
+// goroutine is tracked via inFlightWG so Shutdown waits for it before
+// closing the DB.
+func (r *Registry) onPlayerDetach(playerID world.ObjectID, roomID world.RoomID, _ world.DisconnectReason) {
+	r.inFlightWG.Add(1)
+	go func() {
+		defer r.inFlightWG.Done()
+		ctx, cancel := context.WithTimeout(r.rootCtx, observerSubmitTimeout)
+		defer cancel()
+		for _, n := range r.NPCsInRoom(roomID) {
+			if n.Memory == nil {
+				continue
+			}
+			n.Memory.EndConversation(ctx, playerID)
+		}
+	}()
+}
+
+// onPlayerMove ends the conversation for every NPC the player left
+// behind in the source room. The destination room's NPCs (if any) do
+// not start a new conversation here — they wait for the player to
+// actually address them via Say. Same async/tracked pattern as
+// onPlayerDetach.
+func (r *Registry) onPlayerMove(playerID world.ObjectID, from world.RoomID, _ world.RoomID, _ string) {
+	r.inFlightWG.Add(1)
+	go func() {
+		defer r.inFlightWG.Done()
+		ctx, cancel := context.WithTimeout(r.rootCtx, observerSubmitTimeout)
+		defer cancel()
+		for _, n := range r.NPCsInRoom(from) {
+			if n.Memory == nil {
+				continue
+			}
+			n.Memory.EndConversation(ctx, playerID)
+		}
+	}()
+}
+
+// renderMemoryContext formats retrieved memories as a system message that
+// gets spliced between persona and history. Format kept simple and
+// consistent so the LLM can scan it predictably.
+func renderMemoryContext(mems []memory.Memory) string {
+	var b strings.Builder
+	b.WriteString("Relevant memories from past conversations:\n")
+	for _, m := range mems {
+		b.WriteString("- ")
+		b.WriteString(m.Summary)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func addressed(n *NPC, text string, otherEntities int) bool {
@@ -302,15 +540,21 @@ func addressed(n *NPC, text string, otherEntities int) bool {
 	return otherEntities == 1
 }
 
-// otherEntityCount counts all non-speaker entities in the room — players
-// (attached or asleep) plus NPCs. Rule (b) of the addressing rules fires
-// only when this count is exactly 1, so the speaker is alone with one NPC.
-// npcCount must be the unfiltered world count of NPCs in the room, not the
-// registry-filtered list.
+// otherEntityCount counts all non-speaker conversational entities in the
+// room — *awake* players plus NPCs. Rule (b) of the addressing rules
+// fires only when this count is exactly 1, so the speaker is alone with
+// one NPC. Sleeping bodies cannot participate in conversation and are
+// deliberately excluded; otherwise a disconnected player leaving their
+// body in the room would silently block every nearby NPC from replying
+// to unaddressed `say`. npcCount must be the unfiltered world count of
+// NPCs in the room, not the registry-filtered list.
 func otherEntityCount(speakerID world.ObjectID, players []world.PresentPlayer, npcCount int) int {
 	count := 0
 	for _, p := range players {
 		if p.ObjectID == speakerID {
+			continue
+		}
+		if !p.Awake {
 			continue
 		}
 		count++
@@ -403,5 +647,17 @@ func cloneMap(m map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// optString reads a string value from a backend opts map. Missing keys
+// and non-string values return "" rather than an error, because every
+// caller's fallback is "use the backend's default".
+func optString(m map[string]any, key string) string {
+	v, ok := m[key]
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
 }
 

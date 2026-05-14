@@ -135,18 +135,32 @@ func run(cfgPath string) error {
 		logger.Warn("forced shutdown after 2s")
 	}
 
-	// Drain NPC dispatch goroutines before `defer db.Close()` runs.
-	// Each dispatch holds a per-NPC mutex across an LLM Chat call and
-	// then calls into the world (and, in future milestones, the DB).
-	// Letting db.Close() race with an in-flight dispatch would leak
-	// goroutines and risks "send on closed channel" once NPCSay starts
-	// writing. Bound the wait so a hung backend can't pin shutdown.
+	// Drain NPC dispatch goroutines AND memory state before
+	// `defer db.Close()` runs. A dispatch holds a per-NPC mutex across
+	// an LLM Chat call and then calls into the world and the DB;
+	// memory state holds buffered transcripts that still need to be
+	// summarised and persisted. Letting db.Close() race with either
+	// would leak goroutines and risk "send on closed channel" / SQLite
+	// errors. Bound the wait so a hung backend can't pin shutdown.
+	//
+	// The inner Shutdown ctx is strictly tighter than the outer wait so
+	// Shutdown is guaranteed to return first. The outer wait is the
+	// belt-and-suspenders for the case where Shutdown itself wedges
+	// (it shouldn't — it's context-aware end-to-end — but db.Close()
+	// is destructive, so we never want to race it).
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancelShutdown()
 	npcDone := make(chan struct{})
-	go func() { npcReg.Wait(); close(npcDone) }()
+	go func() {
+		if err := npcReg.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("npc shutdown returned error", "err", err)
+		}
+		close(npcDone)
+	}()
 	select {
 	case <-npcDone:
-	case <-time.After(3 * time.Second):
-		logger.Warn("npc dispatch goroutines did not drain within 3s")
+	case <-time.After(5 * time.Second):
+		logger.Warn("npc dispatch / memory did not drain within 5s")
 	}
 	return nil
 }

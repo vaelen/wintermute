@@ -64,6 +64,21 @@ func (e *AmbiguousMatchError) Is(target error) bool {
 // w.mu in the observer).
 type SayObserver func(roomID RoomID, speakerID ObjectID, speakerName, text string)
 
+// MoveObserver receives a notification AFTER World.Move has finished
+// broadcasting the leave/arrive messages. The same synchronous-and-cheap
+// constraints as SayObserver apply: spawn a goroutine for any blocking
+// work, never call back into mutation methods that would deadlock.
+//
+// from is the room the player just left; to is the room they arrived in;
+// direction is the exit slug used ("n","s",...).
+type MoveObserver func(playerID ObjectID, from, to RoomID, direction string)
+
+// DetachObserver receives a notification AFTER World.Detach has finished
+// broadcasting the room departure message. roomID is the room the player
+// was in at the moment of detach. The same synchronous-and-cheap
+// constraints as SayObserver apply.
+type DetachObserver func(playerID ObjectID, roomID RoomID, reason DisconnectReason)
+
 // World is the in-memory authoritative view of rooms, objects, and where
 // every object currently is. All mutations go through the store.DB writer
 // goroutine; the in-memory cache is updated optimistically and rolled back
@@ -88,7 +103,9 @@ type World struct {
 	presencesByID map[ObjectID]*Presence
 	// sayObserver is notified asynchronously after every Say broadcast.
 	// Guarded by w.mu (write under Lock, read under RLock).
-	sayObserver SayObserver
+	sayObserver    SayObserver
+	moveObserver   MoveObserver
+	detachObserver DetachObserver
 }
 
 // SetSayObserver registers an observer to be notified after each Say
@@ -96,6 +113,22 @@ type World struct {
 func (w *World) SetSayObserver(fn SayObserver) {
 	w.mu.Lock()
 	w.sayObserver = fn
+	w.mu.Unlock()
+}
+
+// SetMoveObserver registers an observer to be notified after each Move
+// broadcast completes. Pass nil to clear.
+func (w *World) SetMoveObserver(fn MoveObserver) {
+	w.mu.Lock()
+	w.moveObserver = fn
+	w.mu.Unlock()
+}
+
+// SetDetachObserver registers an observer to be notified after each
+// Detach broadcast completes. Pass nil to clear.
+func (w *World) SetDetachObserver(fn DetachObserver) {
+	w.mu.Lock()
+	w.detachObserver = fn
 	w.mu.Unlock()
 }
 

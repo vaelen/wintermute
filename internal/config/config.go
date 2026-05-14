@@ -91,10 +91,11 @@ func Default() *Config {
 			Default: LLMBackend{
 				Backend: "ollama",
 				Opts: map[string]any{
-					"url":             "http://localhost:11434",
-					"model":           "llama3.2:3b",
-					"gate_model":      "llama3.2:1b",
-					"embedding_model": "nomic-embed-text",
+					"url":              "http://localhost:11434",
+					"model":            "llama3.2:3b",
+					"gate_model":       "llama3.2:1b",
+					"summarizer_model": "llama3.2:1b",
+					"embedding_model":  "nomic-embed-text",
 				},
 			},
 		},

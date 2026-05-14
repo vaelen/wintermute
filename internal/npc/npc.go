@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/vaelen/wintermute/internal/llm"
+	"github.com/vaelen/wintermute/internal/npc/memory"
 	"github.com/vaelen/wintermute/internal/world"
 )
 
@@ -27,6 +28,10 @@ type NPC struct {
 	Model       string
 	GateModel   string
 	MaxContext  int
+
+	// Memory is the per-NPC short-term + long-term + worker bundle.
+	// Wired up by Registry.Load; non-nil when llm is non-nil.
+	Memory *memory.State
 
 	llm     llm.LLM
 	mu      sync.Mutex
