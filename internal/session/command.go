@@ -18,7 +18,7 @@ import (
 // doesn't recognize is dispatched here as a session-level command
 // (terminal, motd, help).
 func (h *Handler) commandLoop(ctx context.Context, s *Session) {
-	wh := h.attachToWorld(s)
+	wh := h.attachToWorld(ctx, s)
 	if wh == nil {
 		return
 	}
@@ -39,8 +39,13 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 			continue
 		}
 
-		switch wh.Dispatch(line) {
+		switch wh.Dispatch(ctx, line) {
 		case worldcmd.OutcomeQuit:
+			return
+		case worldcmd.OutcomeDetached:
+			// The world has unregistered our presence — typically because
+			// a newer login force-detached this session. Exit silently;
+			// the prompt would just be confusing at this point.
 			return
 		case worldcmd.OutcomeContinue:
 			continue
@@ -63,7 +68,12 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 // attachToWorld builds a Presence for the session and registers it with
 // the world. Returns the world cmd Handler, or nil if attach failed (in
 // which case an error has already been written to the session).
-func (h *Handler) attachToWorld(s *Session) *worldcmd.Handler {
+//
+// If an older session is still attached for this account, it is force-
+// detached first. The world marks the old Presence stale, so any in-
+// flight commands from that old session will be rejected (ErrStalePresence)
+// and its command loop will exit on the next iteration.
+func (h *Handler) attachToWorld(ctx context.Context, s *Session) *worldcmd.Handler {
 	if h.World == nil || s.account == nil {
 		_ = s.writeString("The world is unavailable. Please try again later.\r\n")
 		return nil
@@ -72,7 +82,7 @@ func (h *Handler) attachToWorld(s *Session) *worldcmd.Handler {
 	if err != nil {
 		// Lazy bootstrap: account exists but body doesn't (e.g. account
 		// predates this migration). Create one now.
-		playerID, err = h.World.CreatePlayer(context.Background(), s.account)
+		playerID, err = h.World.CreatePlayer(ctx, s.account)
 		if err != nil {
 			s.log.Error("create player object", "err", err)
 			_ = s.writeString("The world refuses to acknowledge you. (Could not create your body.)\r\n")
@@ -89,7 +99,6 @@ func (h *Handler) attachToWorld(s *Session) *worldcmd.Handler {
 	}
 	if _, err := h.World.Attach(pres); err != nil {
 		if err == world.ErrAlreadyAttached {
-			// A stale session is still attached. Force a detach and retry.
 			h.World.Detach(playerID)
 			if _, err = h.World.Attach(pres); err != nil {
 				s.log.Error("re-attach failed", "err", err)
@@ -280,19 +289,11 @@ func parseOnOff(s string) (bool, bool) {
 }
 
 // reconfigure switches the encoder to next and persists the change to
-// the account. Closing graphics-mode bytes from the old encoder are
-// emitted before the switch; if the new encoding is PETSCII and the old
-// one wasn't, a Shift Out is emitted afterward so the C64 enters
-// mixed-case mode.
+// the account. Encoder mutation and the closing/Shift-Out byte writes
+// are serialized with any concurrent broadcasts via the session's write
+// mutex (see Session.reconfigureEncoder).
 func (h *Handler) reconfigure(ctx context.Context, s *Session, next term.Capabilities) {
-	prev := s.enc.Capabilities()
-	closing := s.enc.Reconfigure(next)
-	if len(closing) > 0 {
-		_, _ = s.writer().Write(closing)
-	}
-	if next.Encoding == term.EncodingPETSCII && prev.Encoding != term.EncodingPETSCII {
-		_, _ = s.writer().Write([]byte{term.PETSCIIShiftOut})
-	}
+	s.reconfigureEncoder(next)
 	if err := h.savePrefs(ctx, s); err != nil {
 		s.log.Warn("save prefs failed", "err", err)
 	}

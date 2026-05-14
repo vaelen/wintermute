@@ -108,6 +108,24 @@ func (s *Session) writeString(text string) error {
 	return err
 }
 
+// reconfigureEncoder switches the encoder to next while holding writeMu,
+// so the encoder mutation and any closing/Shift-Out byte writes can't
+// interleave with a concurrent broadcast going through writeString.
+// Returns the previous capabilities so the caller can decide what to log.
+func (s *Session) reconfigureEncoder(next term.Capabilities) term.Capabilities {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	prev := s.enc.Capabilities()
+	closing := s.enc.Reconfigure(next)
+	if len(closing) > 0 {
+		_, _ = s.writer().Write(closing)
+	}
+	if next.Encoding == term.EncodingPETSCII && prev.Encoding != term.EncodingPETSCII {
+		_, _ = s.writer().Write([]byte{term.PETSCIIShiftOut})
+	}
+	return prev
+}
+
 // writef is a Printf-style helper around writeString.
 func (s *Session) writef(format string, args ...any) error {
 	return s.writeString(fmt.Sprintf(format, args...))
