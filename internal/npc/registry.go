@@ -45,6 +45,8 @@ type Registry struct {
 
 	mu   sync.RWMutex
 	byID map[world.ObjectID]*NPC
+
+	dispatchWG sync.WaitGroup
 }
 
 // Load builds a Registry by reading every npc_config row, opening the
@@ -211,8 +213,20 @@ func (r *Registry) HandleSay(roomID world.RoomID, speakerID world.ObjectID, spea
 		if !addressed(n, text, otherEntities) {
 			continue
 		}
-		go r.dispatch(n, speakerName, text)
+		r.dispatchWG.Add(1)
+		go func(n *NPC) {
+			defer r.dispatchWG.Done()
+			r.dispatch(n, speakerName, text)
+		}(n)
 	}
+}
+
+// Wait blocks until every in-flight dispatch goroutine has finished.
+// Callers MUST call this before closing the underlying DB or LLM
+// resources at shutdown; otherwise an in-flight Chat that subsequently
+// touches the world or DB could race with teardown.
+func (r *Registry) Wait() {
+	r.dispatchWG.Wait()
 }
 
 func (r *Registry) dispatch(n *NPC, speakerName, text string) {

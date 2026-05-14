@@ -381,6 +381,85 @@ func TestNameMatchingDoesNotFireOnStopword(t *testing.T) {
 	}
 }
 
+// blockingLLM blocks Chat until the release channel is closed, then
+// returns a fixed response. Used to assert Registry.Wait() actually
+// blocks while a dispatch is in flight.
+type blockingLLM struct {
+	release  chan struct{}
+	started  chan struct{}
+	response string
+}
+
+func newBlockingLLM(response string) *blockingLLM {
+	return &blockingLLM{
+		release:  make(chan struct{}),
+		started:  make(chan struct{}, 1),
+		response: response,
+	}
+}
+
+func (b *blockingLLM) Chat(ctx context.Context, _ []llm.Message, _ []llm.ToolDef, _ llm.ChatOpts) (llm.Response, error) {
+	select {
+	case b.started <- struct{}{}:
+	default:
+	}
+	select {
+	case <-b.release:
+		return llm.Response{Content: b.response}, nil
+	case <-ctx.Done():
+		return llm.Response{}, ctx.Err()
+	}
+}
+
+func (b *blockingLLM) Embed(context.Context, string) ([]float32, error) {
+	return nil, errors.New("embed not implemented")
+}
+
+func TestRegistryWaitBlocksUntilDispatchCompletes(t *testing.T) {
+	e := newFakeBackendEnv(t)
+	id := e.bartenderID(t)
+	n := e.reg.Get(id)
+	if n == nil {
+		t.Fatalf("Get(%d) = nil", id)
+	}
+
+	blocker := newBlockingLLM("the bartender stirs.")
+	n.mu.Lock()
+	n.llm = blocker
+	n.mu.Unlock()
+
+	alice := e.attachPlayer(t, "alice")
+	alice.drain()
+	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
+
+	// Confirm the dispatch goroutine actually entered Chat.
+	select {
+	case <-blocker.started:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("dispatch goroutine never reached Chat")
+	}
+
+	// Wait() must NOT return while Chat is blocked.
+	waitDone := make(chan struct{})
+	go func() {
+		e.reg.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+		t.Fatalf("Registry.Wait() returned while a dispatch was in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Release the LLM; Wait() must return promptly.
+	close(blocker.release)
+	select {
+	case <-waitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Registry.Wait() did not return after Chat completed")
+	}
+}
+
 func TestHandleSayWholeWordViaLiveDispatch(t *testing.T) {
 	e := newFakeBackendEnv(t)
 	alice := e.attachPlayer(t, "alice")
