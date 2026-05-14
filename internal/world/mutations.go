@@ -152,11 +152,34 @@ func (w *World) Attach(p *Presence) (RoomID, error) {
 	return loc.RoomID, nil
 }
 
+// DisconnectReason annotates a Detach so the room broadcast can reflect
+// whether the player chose to leave or their link dropped. NPC memory
+// uses the resulting messages (and the structured DetachObserver hook,
+// see SetDetachObserver) to detect conversation-end.
+type DisconnectReason int
+
+const (
+	// DisconnectDropped is the right reason for a closed socket, a TLS
+	// error, or a server-initiated force-detach where the player did not
+	// choose to leave. The room sees "X fell asleep.".
+	DisconnectDropped DisconnectReason = iota
+
+	// DisconnectQuit is the right reason for an explicit `quit` command.
+	// The room sees "X goes to sleep.".
+	DisconnectQuit
+)
+
 // Detach removes a session from the world. The player's body remains in
-// place; other players in the room see them fall asleep. The detached
-// presence is marked stale so any in-flight commands from its session
-// will be rejected by the world (see ErrStalePresence).
-func (w *World) Detach(playerID ObjectID) {
+// place; other players in the room see them either "fall asleep" (link
+// dropped) or "go to sleep" (chose to quit). The detached presence is
+// marked stale so any in-flight commands from its session will be
+// rejected by the world (see ErrStalePresence).
+//
+// After the broadcast has flushed, a registered DetachObserver is invoked
+// synchronously with the playerID, the room they were in, and the reason.
+// NPC memory uses this to detect a conversation-end signal without having
+// to string-parse the room broadcast.
+func (w *World) Detach(playerID ObjectID, reason DisconnectReason) {
 	w.mu.Lock()
 	p, ok := w.presencesByID[playerID]
 	if !ok {
@@ -166,10 +189,24 @@ func (w *World) Detach(playerID ObjectID) {
 	loc := w.locations[playerID]
 	w.detachAt(p, loc.RoomID)
 	p.detached.Store(true)
+	name := playerDisplayName(w.objects[playerID])
 	pending := w.collectBroadcastLocked(loc.RoomID, playerID,
-		fmt.Sprintf("%s falls asleep.\r\n", playerDisplayName(w.objects[playerID])))
+		fmt.Sprintf("%s %s\r\n", name, disconnectVerbPhrase(reason)))
+	observer := w.detachObserver
 	w.mu.Unlock()
 	flush(pending)
+	if observer != nil {
+		observer(playerID, loc.RoomID, reason)
+	}
+}
+
+func disconnectVerbPhrase(r DisconnectReason) string {
+	switch r {
+	case DisconnectQuit:
+		return "goes to sleep."
+	default:
+		return "fell asleep."
+	}
 }
 
 func (w *World) attachAt(p *Presence, room RoomID) {
@@ -264,9 +301,13 @@ func (w *World) Move(ctx context.Context, p *Presence, dir string) (RoomID, erro
 		fmt.Sprintf("%s leaves %s.\r\n", name, directionPhrase(dir)))
 	arriving := w.collectBroadcastLocked(toID, p.PlayerID,
 		fmt.Sprintf("%s arrives.\r\n", name))
+	observer := w.moveObserver
 	w.mu.Unlock()
 	flush(leaving)
 	flush(arriving)
+	if observer != nil {
+		observer(p.PlayerID, from.RoomID, toID, dir)
+	}
 	return toID, nil
 }
 

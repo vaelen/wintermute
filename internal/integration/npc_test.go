@@ -140,10 +140,13 @@ func startServerWithNPC(t *testing.T, defaults config.LLMBackend) *testServer {
 		_ = ln.Close()
 		cancel()
 		wg.Wait()
-		// Drain any in-flight NPC dispatch goroutines before closing the
-		// DB — a Chat that races with db.Close() could otherwise touch a
-		// shut-down writer goroutine.
-		reg.Wait()
+		// Drain any in-flight NPC dispatch goroutines AND memory state
+		// (summarisation workers + per-player buffers) before closing
+		// the DB. A Worker's Insert that races with db.Close() would
+		// otherwise touch a shut-down writer goroutine.
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancelShutdown()
+		_ = reg.Shutdown(shutdownCtx)
 		_ = db.Close()
 	}
 	t.Cleanup(srv.close)

@@ -330,7 +330,7 @@ func TestDetachLeavesBodyVisibleAsAsleep(t *testing.T) {
 		t.Fatalf("Attach bob: %v", err)
 	}
 	lobby, _ := w.LobbyID()
-	w.Detach(bob.PlayerID)
+	w.Detach(bob.PlayerID, DisconnectDropped)
 
 	players := w.PlayersInRoom(lobby)
 	var sawBobAsleep bool
@@ -367,7 +367,7 @@ func TestDetachedPresenceIsRejected(t *testing.T) {
 	if _, err := w.Attach(alice.Presence); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
-	w.Detach(alice.PlayerID)
+	w.Detach(alice.PlayerID, DisconnectDropped)
 	if !alice.Presence.IsDetached() {
 		t.Errorf("expected Presence.IsDetached after Detach")
 	}
@@ -411,7 +411,7 @@ func TestForceDetachReplacesAttachment(t *testing.T) {
 			return nil
 		},
 	}
-	w.Detach(first.PlayerID)
+	w.Detach(first.PlayerID, DisconnectDropped)
 	if _, err := w.Attach(second); err != nil {
 		t.Fatalf("Attach second: %v", err)
 	}

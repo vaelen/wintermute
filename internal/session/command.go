@@ -17,12 +17,19 @@ import (
 // the world command handler (look/move/say/...); anything the world
 // doesn't recognize is dispatched here as a session-level command
 // (terminal, motd, help).
+//
+// The exit reason determines how the world broadcasts the player's
+// departure: an explicit `quit` produces "X goes to sleep." while a
+// dropped socket or force-detach produces "X fell asleep.". Defaulting
+// to dropped means a panic or unhandled error path is still surfaced as
+// a link drop, never a clean quit.
 func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 	wh := h.attachToWorld(ctx, s)
 	if wh == nil {
 		return
 	}
-	defer h.detachFromWorld(s)
+	reason := world.DisconnectDropped
+	defer func() { h.detachFromWorld(s, reason) }()
 
 	wh.ShowRoom()
 
@@ -41,6 +48,7 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 
 		switch wh.Dispatch(ctx, line) {
 		case worldcmd.OutcomeQuit:
+			reason = world.DisconnectQuit
 			return
 		case worldcmd.OutcomeDetached:
 			// The world has unregistered our presence — typically because
@@ -99,7 +107,7 @@ func (h *Handler) attachToWorld(ctx context.Context, s *Session) *worldcmd.Handl
 	}
 	if _, err := h.World.Attach(pres); err != nil {
 		if err == world.ErrAlreadyAttached {
-			h.World.Detach(playerID)
+			h.World.Detach(playerID, world.DisconnectDropped)
 			if _, err = h.World.Attach(pres); err != nil {
 				s.log.Error("re-attach failed", "err", err)
 				_ = s.writeString("You are already logged in elsewhere.\r\n")
@@ -114,11 +122,11 @@ func (h *Handler) attachToWorld(ctx context.Context, s *Session) *worldcmd.Handl
 	return &worldcmd.Handler{World: h.World, Presence: pres, NPC: h.NPC}
 }
 
-func (h *Handler) detachFromWorld(s *Session) {
+func (h *Handler) detachFromWorld(s *Session, reason world.DisconnectReason) {
 	if h.World == nil || s.playerID == 0 {
 		return
 	}
-	h.World.Detach(s.playerID)
+	h.World.Detach(s.playerID, reason)
 }
 
 func splitCmd(line string) (cmd, rest string) {
