@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/vaelen/wintermute/internal/config"
@@ -18,36 +19,57 @@ import (
 	"github.com/vaelen/wintermute/internal/world"
 )
 
-// Registry holds every NPC in the world keyed by id and lowercase name. The
-// world layer (or the session command loop) calls HandleSay after every
-// `say`; the registry decides which NPCs should respond and dispatches the
-// LLM round-trips on background goroutines.
+// dispatchTimeout bounds a single LLM Chat round-trip kicked off by a `say`
+// event so a hung backend can't pin a goroutine forever. The dispatch
+// context is derived from the registry's server-lifetime root context, not
+// from any per-session context, so a speaker disconnecting mid-call does
+// not cancel the in-flight reply.
+const dispatchTimeout = 30 * time.Second
+
+// Registry holds every NPC in the world keyed by id. The world layer (or
+// the session command loop) calls HandleSay after every `say`; the registry
+// decides which NPCs should respond and dispatches the LLM round-trips on
+// background goroutines.
+//
+// The registry stores a server-lifetime root context (set by Load and used
+// as the parent of every dispatch's per-call timeout context). Callers must
+// NOT pass a per-session context here — when a player disconnects, their
+// session ctx cancels, and we don't want that to kill an NPC's in-flight
+// reply on its way to other listeners in the room.
 type Registry struct {
 	world    *world.World
 	db       *store.DB
 	logger   *slog.Logger
 	defaults config.LLMBackend
+	rootCtx  context.Context
 
-	mu     sync.RWMutex
-	byID   map[world.ObjectID]*NPC
-	byName map[string]world.ObjectID
+	mu   sync.RWMutex
+	byID map[world.ObjectID]*NPC
 }
 
 // Load builds a Registry by reading every npc_config row, opening the
 // configured backend per NPC, and indexing the result. A missing object or
 // failed Open is logged at WARN and the registry continues; the failed NPC
 // is recorded with a nil llm so HandleSay silently skips it.
-func Load(ctx context.Context, db *store.DB, w *world.World, defaults config.LLMBackend, logger *slog.Logger) (*Registry, error) {
+//
+// serverCtx is retained as the parent of every dispatch's timeout context;
+// it must be a server-lifetime context, not a per-session one. It is also
+// used for the initial schema query.
+func Load(serverCtx context.Context, db *store.DB, w *world.World, defaults config.LLMBackend, logger *slog.Logger) (*Registry, error) {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if serverCtx == nil {
+		serverCtx = context.Background()
 	}
 	r := &Registry{
 		world:    w,
 		db:       db,
 		logger:   logger,
 		defaults: defaults,
+		rootCtx:  serverCtx,
 	}
-	if err := r.rebuild(ctx); err != nil {
+	if err := r.rebuild(serverCtx); err != nil {
 		return nil, err
 	}
 	return r, nil
@@ -74,7 +96,6 @@ func (r *Registry) rebuild(ctx context.Context) error {
 	defer rows.Close()
 
 	byID := map[world.ObjectID]*NPC{}
-	byName := map[string]world.ObjectID{}
 
 	for rows.Next() {
 		var (
@@ -129,7 +150,6 @@ func (r *Registry) rebuild(ctx context.Context) error {
 		}
 
 		byID[id] = n
-		byName[strings.ToLower(name)] = id
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("npc: iterate npc_config: %w", err)
@@ -137,7 +157,6 @@ func (r *Registry) rebuild(ctx context.Context) error {
 
 	r.mu.Lock()
 	r.byID = byID
-	r.byName = byName
 	r.mu.Unlock()
 	return nil
 }
@@ -172,7 +191,11 @@ func (r *Registry) NPCsInRoom(roomID world.RoomID) []*NPC {
 // dispatches an LLM round-trip on its own goroutine. The world is the only
 // channel through which replies become visible — failed/empty replies do
 // not broadcast anything.
-func (r *Registry) HandleSay(ctx context.Context, roomID world.RoomID, speakerID world.ObjectID, speakerName, text string) {
+//
+// No ctx parameter on purpose: dispatch derives its own timeout context
+// from the registry's server-lifetime root so a speaker disconnecting
+// mid-call does not cancel the NPC's reply for everyone else in the room.
+func (r *Registry) HandleSay(roomID world.RoomID, speakerID world.ObjectID, speakerName, text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
@@ -188,19 +211,24 @@ func (r *Registry) HandleSay(ctx context.Context, roomID world.RoomID, speakerID
 		if !addressed(n, text, otherEntities) {
 			continue
 		}
-		go r.dispatch(ctx, n, speakerName, text)
+		go r.dispatch(n, speakerName, text)
 	}
 }
 
-func (r *Registry) dispatch(ctx context.Context, n *NPC, speakerName, text string) {
+func (r *Registry) dispatch(n *NPC, speakerName, text string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if n.llm == nil {
-		r.logger.Info("npc: no llm configured, ignoring say",
+		// Load already logged a WARN when Open failed; re-logging per
+		// say event would just be noise.
+		r.logger.Debug("npc: no llm configured, ignoring say",
 			"npc", n.Name, "backend", n.Backend)
 		return
 	}
+
+	ctx, cancel := context.WithTimeout(r.rootCtx, dispatchTimeout)
+	defer cancel()
 
 	userMsg := llm.Message{
 		Role:    llm.RoleUser,
@@ -218,6 +246,10 @@ func (r *Registry) dispatch(ctx context.Context, n *NPC, speakerName, text strin
 		return
 	}
 	reply := strings.TrimSpace(resp.Content)
+	// Empty replies are dropped silently: some backends (and personas)
+	// produce blank output when an utterance was not actually meant for
+	// the NPC; broadcasting nothing keeps the room quiet rather than
+	// emitting a phantom "the bartender says: " line.
 	if reply == "" {
 		return
 	}
@@ -291,7 +323,7 @@ var nameStopwords = map[string]struct{}{
 
 func significantWords(name string) []string {
 	tokens := tokenize(name)
-	out := tokens[:0]
+	var out []string
 	for _, t := range tokens {
 		if _, skip := nameStopwords[t]; skip {
 			continue

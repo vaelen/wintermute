@@ -223,7 +223,7 @@ func TestLoadGracefulOnUnregisteredBackend(t *testing.T) {
 	// HandleSay must not crash and must not broadcast anything.
 	alice := e.attachPlayer(t, "alice")
 	alice.drain()
-	e.reg.HandleSay(context.Background(), lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
+	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
 	alice.assertSilent(t, 200*time.Millisecond)
 }
 
@@ -244,7 +244,7 @@ func TestHandleSayAddressedByName(t *testing.T) {
 	alice.drain()
 	bob.drain()
 
-	e.reg.HandleSay(context.Background(), lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
+	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
 	alice.waitFor(t, bartenderResponse, 2*time.Second)
 }
 
@@ -253,7 +253,7 @@ func TestHandleSayAddressedAsSoleEntity(t *testing.T) {
 	alice := e.attachPlayer(t, "alice")
 	alice.drain()
 
-	e.reg.HandleSay(context.Background(), lobbyID(t, e), alice.PlayerID, "alice", "hi")
+	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi")
 	alice.waitFor(t, bartenderResponse, 2*time.Second)
 }
 
@@ -264,7 +264,7 @@ func TestHandleSayNotAddressedWhenAnotherPlayerPresent(t *testing.T) {
 	alice.drain()
 	bob.drain()
 
-	e.reg.HandleSay(context.Background(), lobbyID(t, e), alice.PlayerID, "alice", "hi")
+	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi")
 	alice.assertSilent(t, 200*time.Millisecond)
 	bob.assertSilent(t, 1*time.Millisecond) // Drain again; shouldn't have changed.
 }
@@ -295,7 +295,7 @@ func TestHandleSayLLMErrorDoesNotCrash(t *testing.T) {
 
 	alice := e.attachPlayer(t, "alice")
 	alice.drain()
-	e.reg.HandleSay(context.Background(), lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
+	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
 	alice.assertSilent(t, 200*time.Millisecond)
 }
 
@@ -306,7 +306,7 @@ func TestHandleSayHistoryAccumulatesAndTrims(t *testing.T) {
 
 	for i := 0; i < historyWindow+2; i++ {
 		alice.drain()
-		e.reg.HandleSay(context.Background(), lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
+		e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
 		alice.waitFor(t, bartenderResponse, 2*time.Second)
 	}
 
@@ -389,14 +389,14 @@ func TestHandleSayWholeWordViaLiveDispatch(t *testing.T) {
 	bob.drain()
 
 	// "bartenderly" must NOT trigger.
-	e.reg.HandleSay(context.Background(), lobbyID(t, e), alice.PlayerID, "alice",
+	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice",
 		"speaking bartenderly today")
 	alice.assertSilent(t, 200*time.Millisecond)
 
 	// "BARTENDER!" must trigger.
 	alice.drain()
 	bob.drain()
-	e.reg.HandleSay(context.Background(), lobbyID(t, e), alice.PlayerID, "alice",
+	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice",
 		"BARTENDER!")
 	alice.waitFor(t, bartenderResponse, 2*time.Second)
 }
