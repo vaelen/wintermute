@@ -12,16 +12,6 @@ import (
 	"github.com/vaelen/wintermute/internal/llm"
 )
 
-func TestFakeRegistered(t *testing.T) {
-	got, err := llm.Open("fake", nil)
-	if err != nil {
-		t.Fatalf("Open(\"fake\"): unexpected error: %v", err)
-	}
-	if got == nil {
-		t.Fatalf("Open(\"fake\") returned nil LLM")
-	}
-}
-
 func TestFakeChatScriptedMatch(t *testing.T) {
 	backend, err := llm.Open("fake", map[string]any{
 		"responses": map[string]any{

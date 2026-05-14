@@ -14,9 +14,8 @@ const (
 	RoleTool      Role = "tool"
 )
 
-// Message is a single chat turn. Tool-call fields are declared now but unused
-// at runtime in M3; locking them in keeps the type stable across backends so
-// later milestones can wire tool calling without breaking persisted shapes.
+// Tool-call fields are declared now but unused at runtime in M3; later
+// milestones wire tool calling without reshaping persisted messages.
 type Message struct {
 	Role       Role
 	Content    string
