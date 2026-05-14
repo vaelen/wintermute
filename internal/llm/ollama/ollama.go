@@ -19,9 +19,7 @@ const defaultURL = "http://localhost:11434"
 
 func init() { llm.Register("ollama", New) }
 
-// Client is the Ollama-backed implementation of llm.LLM. It is constructed by
-// New and returned via the registry as an llm.LLM.
-type Client struct {
+type client struct {
 	url            *url.URL
 	model          string
 	embeddingModel string
@@ -30,7 +28,7 @@ type Client struct {
 	api            *api.Client
 }
 
-// New builds a Client from an opts map. Recognised keys:
+// New builds a client from an opts map. Recognised keys:
 //
 //	url             string   base URL, defaults to OLLAMA_HOST env or http://localhost:11434
 //	model           string   chat model; may be overridden per-call via ChatOpts.Model
@@ -38,7 +36,7 @@ type Client struct {
 //	keep_alive      string   time.ParseDuration value (e.g. "5m")
 //	temperature     float    default temperature when ChatOpts.Temperature is zero
 func New(opts map[string]any) (llm.LLM, error) {
-	c := &Client{}
+	c := &client{}
 
 	rawURL := defaultURL
 	if v := os.Getenv("OLLAMA_HOST"); v != "" {
@@ -104,7 +102,7 @@ func New(opts map[string]any) (llm.LLM, error) {
 	return c, nil
 }
 
-func (c *Client) Chat(ctx context.Context, msgs []llm.Message, tools []llm.ToolDef, opts llm.ChatOpts) (llm.Response, error) {
+func (c *client) Chat(ctx context.Context, msgs []llm.Message, tools []llm.ToolDef, opts llm.ChatOpts) (llm.Response, error) {
 	model := opts.Model
 	if model == "" {
 		model = c.model
@@ -172,7 +170,7 @@ func (c *Client) Chat(ctx context.Context, msgs []llm.Message, tools []llm.ToolD
 	}, nil
 }
 
-func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
+func (c *client) Embed(ctx context.Context, text string) ([]float32, error) {
 	if c.embeddingModel == "" {
 		return nil, fmt.Errorf("ollama: no embedding_model configured")
 	}
