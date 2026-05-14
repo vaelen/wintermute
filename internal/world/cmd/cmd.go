@@ -8,15 +8,26 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/world"
 	"github.com/vaelen/wintermute/internal/world/render"
 )
+
+// NPCReloader is the minimal interface the cmd package needs from the
+// NPC registry. Keeping it as an interface avoids importing the npc
+// package (and the LLM/sqlite chain) into the world cmd package.
+type NPCReloader interface {
+	Reload(ctx context.Context) error
+}
 
 // Handler binds a Presence to a World. Each session creates one Handler
 // after login and routes every input line through Dispatch.
 type Handler struct {
 	World    *world.World
 	Presence *world.Presence
+	// NPC is the npc registry, used by admin commands. May be nil
+	// (e.g. in tests where NPC reactivity isn't exercised).
+	NPC NPCReloader
 }
 
 // Outcome reports a special command result that the session loop must act
@@ -87,7 +98,16 @@ func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
 	case "help", "?":
 		h.cmdHelp()
 		outcome = OutcomeContinue
+	case "@npcreload":
+		outcome = h.cmdNPCReload(ctx)
 	default:
+		return OutcomeUnknown
+	}
+	// Admin-only commands return OutcomeUnknown when the caller lacks
+	// access; surface that to the session loop so it falls through to
+	// the unknown-command path and the command stays invisible to
+	// non-admins.
+	if outcome == OutcomeUnknown {
 		return OutcomeUnknown
 	}
 	if outcome == OutcomeDetached {
@@ -106,7 +126,12 @@ func (h *Handler) cmdLook(target string) Outcome {
 	}
 	obj, err := h.World.FindVisible(h.Presence.PlayerID, target)
 	if err != nil {
-		_ = h.Presence.Write("You see nothing like that here.\r\n")
+		var amb *world.AmbiguousMatchError
+		if errors.As(err, &amb) {
+			_ = h.Presence.Write(didYouMean(amb.Candidates))
+		} else {
+			_ = h.Presence.Write("You see nothing like that here.\r\n")
+		}
 		return OutcomeContinue
 	}
 	_ = h.Presence.Write(render.ObjectLong(obj))
@@ -184,11 +209,12 @@ func (h *Handler) cmdTake(ctx context.Context, target string) Outcome {
 	}
 	obj, err := h.World.Take(ctx, h.Presence, target)
 	if err != nil {
+		var amb *world.AmbiguousMatchError
 		switch {
 		case errors.Is(err, world.ErrStalePresence):
 			return OutcomeDetached
-		case errors.Is(err, world.ErrAmbiguousTarget):
-			_ = h.Presence.Write("Which one?\r\n")
+		case errors.As(err, &amb):
+			_ = h.Presence.Write(didYouMean(amb.Candidates))
 		case errors.Is(err, world.ErrNotTakeable):
 			_ = h.Presence.Write("You can't take that.\r\n")
 		default:
@@ -207,17 +233,37 @@ func (h *Handler) cmdDrop(ctx context.Context, target string) Outcome {
 	}
 	obj, err := h.World.Drop(ctx, h.Presence, target)
 	if err != nil {
+		var amb *world.AmbiguousMatchError
 		switch {
 		case errors.Is(err, world.ErrStalePresence):
 			return OutcomeDetached
-		case errors.Is(err, world.ErrAmbiguousTarget):
-			_ = h.Presence.Write("Which one?\r\n")
+		case errors.As(err, &amb):
+			_ = h.Presence.Write(didYouMean(amb.Candidates))
 		default:
 			_ = h.Presence.Write("You aren't carrying that.\r\n")
 		}
 		return OutcomeContinue
 	}
 	_ = h.Presence.Write("You drop " + obj.Name + ".\r\n")
+	return OutcomeContinue
+}
+
+// cmdNPCReload re-reads npc_config from the database. Admin-only; hidden
+// from non-admins by returning OutcomeUnknown so they see the same
+// "Unknown command" reply as for any other unrecognised input.
+func (h *Handler) cmdNPCReload(ctx context.Context) Outcome {
+	if h.NPC == nil {
+		return OutcomeUnknown
+	}
+	if h.Presence == nil || h.Presence.Account == nil ||
+		h.Presence.Account.AccessLevel != auth.AccessAdmin {
+		return OutcomeUnknown
+	}
+	if err := h.NPC.Reload(ctx); err != nil {
+		_ = h.Presence.Write("NPC reload failed: " + err.Error() + "\r\n")
+		return OutcomeContinue
+	}
+	_ = h.Presence.Write("NPC registry reloaded.\r\n")
 	return OutcomeContinue
 }
 
@@ -267,6 +313,7 @@ func (h *Handler) showRoom() {
 		Room:    room,
 		Self:    h.Presence.PlayerID,
 		Players: h.World.PlayersInRoom(loc.RoomID),
+		NPCs:    h.World.NPCsInRoom(loc.RoomID),
 		Items:   h.World.ItemsInRoom(loc.RoomID),
 	}
 	_ = h.Presence.Write(render.Room(view))
@@ -318,5 +365,21 @@ func canonicalDirection(s string) string {
 		return "out"
 	default:
 		return strings.ToLower(strings.TrimSpace(s))
+	}
+}
+
+// didYouMean renders a disambiguation prompt for a list of candidate
+// object names. Returns a complete line ending with CRLF.
+func didYouMean(candidates []string) string {
+	switch len(candidates) {
+	case 0:
+		return "Which one?\r\n"
+	case 1:
+		return "Did you mean " + candidates[0] + "?\r\n"
+	case 2:
+		return "Did you mean " + candidates[0] + " or " + candidates[1] + "?\r\n"
+	default:
+		head := strings.Join(candidates[:len(candidates)-1], ", ")
+		return "Did you mean " + head + ", or " + candidates[len(candidates)-1] + "?\r\n"
 	}
 }

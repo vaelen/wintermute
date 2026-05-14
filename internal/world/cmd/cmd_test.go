@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -221,3 +222,155 @@ func TestDispatchEmptyContinues(t *testing.T) {
 		t.Errorf("Dispatch('') = %v, want OutcomeContinue", got)
 	}
 }
+
+// newHandlerWithLevel builds a Handler whose Presence has the requested
+// access level. Used by the @npcreload admin-gate tests.
+func newHandlerWithLevel(t *testing.T, username string, level auth.AccessLevel) (*Handler, *recordingWriter) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "world.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db, err := store.Open(context.Background(), path, logger)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	w, err := world.Load(context.Background(), db, logger)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	a := auth.NewStore(db)
+	acc, err := a.Create(context.Background(), username, "hunter22", level)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	playerID, err := w.CreatePlayer(context.Background(), acc)
+	if err != nil {
+		t.Fatalf("CreatePlayer: %v", err)
+	}
+	rw := &recordingWriter{}
+	pres := &world.Presence{
+		PlayerID: playerID,
+		Account:  acc,
+		Write:    rw.Write,
+	}
+	if _, err := w.Attach(pres); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	rw.Drain()
+	return &Handler{World: w, Presence: pres}, rw
+}
+
+type stubReloader struct {
+	mu      sync.Mutex
+	calls   int
+	failErr error
+}
+
+func (s *stubReloader) Reload(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	return s.failErr
+}
+
+func (s *stubReloader) called() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func TestDispatchNPCReloadAdminSuccess(t *testing.T) {
+	h, rw := newHandlerWithLevel(t, "admin", auth.AccessAdmin)
+	stub := &stubReloader{}
+	h.NPC = stub
+	if got := h.Dispatch(context.Background(), "@npcreload"); got != OutcomeContinue {
+		t.Errorf("Dispatch(@npcreload) = %v, want OutcomeContinue", got)
+	}
+	if stub.called() != 1 {
+		t.Errorf("Reload called %d times, want 1", stub.called())
+	}
+	if !strings.Contains(rw.Drain(), "NPC registry reloaded.") {
+		t.Errorf("expected success message")
+	}
+}
+
+func TestDispatchNPCReloadAdminFailure(t *testing.T) {
+	h, rw := newHandlerWithLevel(t, "admin", auth.AccessAdmin)
+	stub := &stubReloader{failErr: errors.New("boom")}
+	h.NPC = stub
+	if got := h.Dispatch(context.Background(), "@npcreload"); got != OutcomeContinue {
+		t.Errorf("Dispatch(@npcreload) = %v, want OutcomeContinue", got)
+	}
+	if stub.called() != 1 {
+		t.Errorf("Reload called %d times, want 1", stub.called())
+	}
+	out := rw.Drain()
+	if !strings.Contains(out, "NPC reload failed:") || !strings.Contains(out, "boom") {
+		t.Errorf("expected failure message; got:\n%s", out)
+	}
+}
+
+func TestDispatchNPCReloadNonAdminHiddenAsUnknown(t *testing.T) {
+	h, _ := newHandlerWithLevel(t, "bob", auth.AccessPlayer)
+	stub := &stubReloader{}
+	h.NPC = stub
+	if got := h.Dispatch(context.Background(), "@npcreload"); got != OutcomeUnknown {
+		t.Errorf("Dispatch(@npcreload) for non-admin = %v, want OutcomeUnknown", got)
+	}
+	if stub.called() != 0 {
+		t.Errorf("Reload called %d times for non-admin, want 0", stub.called())
+	}
+}
+
+func TestDispatchNPCReloadNoRegistryHiddenAsUnknown(t *testing.T) {
+	h, _ := newHandlerWithLevel(t, "admin", auth.AccessAdmin)
+	// h.NPC stays nil.
+	if got := h.Dispatch(context.Background(), "@npcreload"); got != OutcomeUnknown {
+		t.Errorf("Dispatch(@npcreload) with nil NPC = %v, want OutcomeUnknown", got)
+	}
+}
+
+func TestDidYouMean(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want string
+	}{
+		{nil, "Which one?\r\n"},
+		{[]string{"a coffee cup"}, "Did you mean a coffee cup?\r\n"},
+		{[]string{"a coffee cup", "a teacup"}, "Did you mean a coffee cup or a teacup?\r\n"},
+		{[]string{"a", "b", "c"}, "Did you mean a, b, or c?\r\n"},
+		{[]string{"a", "b", "c", "d"}, "Did you mean a, b, c, or d?\r\n"},
+	}
+	for _, tc := range cases {
+		if got := didYouMean(tc.in); got != tc.want {
+			t.Errorf("didYouMean(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestDispatchLookPartialMatchAndDisambiguation(t *testing.T) {
+	h, rw := newHandler(t, "alice")
+	// Lobby has a keycard; corridor has a coffee cup. Move east to be near it.
+	if got := h.Dispatch(context.Background(), "e"); got != OutcomeContinue {
+		t.Fatalf("move east outcome = %v", got)
+	}
+	rw.Drain()
+
+	// Token match: 'cup' should resolve 'coffee cup' — render the long desc.
+	h.Dispatch(context.Background(), "look cup")
+	out := rw.Drain()
+	if strings.Contains(out, "nothing like that here") {
+		t.Errorf("look cup should match coffee cup; got refusal:\n%s", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "lukewarm") {
+		t.Errorf("look cup should render the coffee cup's long desc; got:\n%s", out)
+	}
+
+	// Token match: 'coffee' should also resolve.
+	h.Dispatch(context.Background(), "look coffee")
+	out = rw.Drain()
+	if !strings.Contains(strings.ToLower(out), "lukewarm") {
+		t.Errorf("look coffee should render the coffee cup; got:\n%s", out)
+	}
+}
+

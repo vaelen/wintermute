@@ -16,12 +16,14 @@ type RoomView struct {
 	Room    world.Room
 	Self    world.ObjectID
 	Players []world.PresentPlayer
+	NPCs    []world.Object
 	Items   []world.Object
 }
 
 // Room formats the canonical room view: name, description, sorted exit
-// list, players present (with "(asleep)" tag for unattached bodies),
-// items. The viewer (Self) is omitted from the players list.
+// list, players and NPCs present (players with "(asleep)" tag for
+// unattached bodies), items. The viewer (Self) is omitted from the
+// players list.
 func Room(v RoomView) string {
 	var b strings.Builder
 	b.WriteString(v.Room.Name)
@@ -37,7 +39,7 @@ func Room(v RoomView) string {
 	} else {
 		b.WriteString("Exits: none\r\n")
 	}
-	if line := formatPlayers(v.Players, v.Self); line != "" {
+	if line := formatPresences(v.Players, v.NPCs, v.Self); line != "" {
 		b.WriteString("Also here: ")
 		b.WriteString(line)
 		b.WriteString("\r\n")
@@ -118,7 +120,7 @@ func formatExits(exits map[string]world.RoomID) string {
 	return strings.Join(keys, ", ")
 }
 
-func formatPlayers(players []world.PresentPlayer, self world.ObjectID) string {
+func formatPresences(players []world.PresentPlayer, npcs []world.Object, self world.ObjectID) string {
 	var parts []string
 	for _, p := range players {
 		if p.ObjectID == self {
@@ -129,6 +131,9 @@ func formatPlayers(players []world.PresentPlayer, self world.ObjectID) string {
 		} else {
 			parts = append(parts, p.Name+" (asleep)")
 		}
+	}
+	for _, n := range npcs {
+		parts = append(parts, n.Name)
 	}
 	return strings.Join(parts, ", ")
 }

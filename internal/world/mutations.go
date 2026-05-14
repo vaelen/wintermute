@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/vaelen/wintermute/internal/auth"
@@ -293,6 +294,43 @@ func (w *World) Say(p *Presence, text string) error {
 	// Add the speaker's self-echo to the pending list so all writes
 	// happen *after* the lock is released.
 	pending = append(pending, pendingWrite{write: p.Write, msg: selfMsg, log: p.Log})
+	roomID := loc.RoomID
+	speakerID := p.PlayerID
+	observer := w.sayObserver
+	w.mu.RUnlock()
+	flush(pending)
+	// Observer is invoked synchronously so any goroutines it registers
+	// (e.g. NPC dispatch goroutines) are accounted for in their owner's
+	// WaitGroup before Say returns. Observers MUST be cheap — see
+	// SayObserver's doc comment.
+	if observer != nil {
+		observer(roomID, speakerID, name, text)
+	}
+	return nil
+}
+
+// NPCSay broadcasts a line as the NPC to everyone in the NPC's room. Unlike
+// Say, the NPC has no session so there is no self-echo. Returns
+// ErrUnknownObject if the id is unknown and ErrPresenceNotFound if the NPC
+// has no room location.
+func (w *World) NPCSay(npcID ObjectID, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	w.mu.RLock()
+	o, ok := w.objects[npcID]
+	if !ok {
+		w.mu.RUnlock()
+		return ErrUnknownObject
+	}
+	loc, ok := w.locations[npcID]
+	if !ok || loc.RoomID == 0 {
+		w.mu.RUnlock()
+		return ErrPresenceNotFound
+	}
+	line := fmt.Sprintf("%s says, \"%s\"\r\n", o.Name, text)
+	pending := w.collectBroadcastLocked(loc.RoomID, 0, line)
 	w.mu.RUnlock()
 	flush(pending)
 	return nil
@@ -436,62 +474,39 @@ func (w *World) collectBroadcastLocked(room RoomID, except ObjectID, msg string)
 }
 
 // findInRoom locates a single object in room whose slug or name matches
-// target (case-insensitive). Returns ErrNotPresent or ErrAmbiguousTarget.
-//
-// Matching is: exact slug → exact name → unique case-insensitive name
-// match. Substring matching is deferred per plan.
+// target. Returns ErrNotPresent on no match, or an *AmbiguousMatchError
+// (which also satisfies errors.Is(err, ErrAmbiguousTarget)) on multiple.
 func (w *World) findInRoom(room RoomID, target string) (ObjectID, error) {
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return 0, ErrNotPresent
-	}
-	set := w.objectAt[room]
-	if len(set) == 0 {
-		return 0, ErrNotPresent
-	}
-	lc := strings.ToLower(target)
-	var bySlug, byNameExact ObjectID
-	var byNameCI []ObjectID
-	for id := range set {
-		o := w.objects[id]
-		if o == nil {
-			continue
-		}
-		if o.Slug == target {
-			bySlug = id
-		}
-		if o.Name == target && byNameExact == 0 {
-			byNameExact = id
-		}
-		if strings.ToLower(o.Name) == lc {
-			byNameCI = append(byNameCI, id)
-		}
-	}
-	switch {
-	case bySlug != 0:
-		return bySlug, nil
-	case byNameExact != 0:
-		return byNameExact, nil
-	case len(byNameCI) == 1:
-		return byNameCI[0], nil
-	case len(byNameCI) > 1:
-		return 0, ErrAmbiguousTarget
-	}
-	return 0, ErrNotPresent
+	return w.matchTarget(w.objectAt[room], target, ErrNotPresent)
 }
 
 func (w *World) findHeldBy(holder ObjectID, target string) (ObjectID, error) {
+	return w.matchTarget(w.heldBy[holder], target, ErrNotHeld)
+}
+
+// matchTarget resolves target against the given object-id set using a
+// tiered matcher:
+//   1. Exact slug match.
+//   2. Exact name match (case-sensitive).
+//   3. Whole-name case-insensitive match.
+//   4. Whole-word token match: target lowercased equals one of the name's
+//      word tokens (alphanumerics split by other runes).
+//   5. Token-prefix match: target lowercased is a prefix of one of the
+//      name's word tokens.
+//
+// The first tier that yields ANY candidate decides the result. If that
+// tier yields multiple candidates, an *AmbiguousMatchError is returned
+// listing their names (sorted). If no tier yields a candidate, missErr
+// is returned (ErrNotPresent for rooms, ErrNotHeld for inventories).
+func (w *World) matchTarget(set map[ObjectID]struct{}, target string, missErr error) (ObjectID, error) {
 	target = strings.TrimSpace(target)
-	if target == "" {
-		return 0, ErrNotHeld
-	}
-	set := w.heldBy[holder]
-	if len(set) == 0 {
-		return 0, ErrNotHeld
+	if target == "" || len(set) == 0 {
+		return 0, missErr
 	}
 	lc := strings.ToLower(target)
+
 	var bySlug, byNameExact ObjectID
-	var byNameCI []ObjectID
+	var byNameCI, byToken, byPrefix []ObjectID
 	for id := range set {
 		o := w.objects[id]
 		if o == nil {
@@ -503,21 +518,88 @@ func (w *World) findHeldBy(holder ObjectID, target string) (ObjectID, error) {
 		if o.Name == target && byNameExact == 0 {
 			byNameExact = id
 		}
-		if strings.ToLower(o.Name) == lc {
+		nameLC := strings.ToLower(o.Name)
+		if nameLC == lc {
 			byNameCI = append(byNameCI, id)
+			continue
+		}
+		switch nameTokenMatch(nameLC, lc) {
+		case tokenMatchEqual:
+			byToken = append(byToken, id)
+		case tokenMatchPrefix:
+			byPrefix = append(byPrefix, id)
 		}
 	}
+
 	switch {
 	case bySlug != 0:
 		return bySlug, nil
 	case byNameExact != 0:
 		return byNameExact, nil
-	case len(byNameCI) == 1:
-		return byNameCI[0], nil
-	case len(byNameCI) > 1:
-		return 0, ErrAmbiguousTarget
 	}
-	return 0, ErrNotHeld
+	for _, tier := range [][]ObjectID{byNameCI, byToken, byPrefix} {
+		switch len(tier) {
+		case 0:
+			continue
+		case 1:
+			return tier[0], nil
+		default:
+			return 0, &AmbiguousMatchError{Candidates: w.objectNames(tier)}
+		}
+	}
+	return 0, missErr
+}
+
+// objectNames returns the display names of the given objects, sorted. The
+// caller must already hold w.mu (read is sufficient).
+func (w *World) objectNames(ids []ObjectID) []string {
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if o := w.objects[id]; o != nil {
+			names = append(names, o.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// tokenRelation describes how target relates to a word token of name.
+type tokenRelation int
+
+const (
+	tokenMatchNone tokenRelation = iota
+	tokenMatchPrefix
+	tokenMatchEqual
+)
+
+// Both name and target must already be lowercased.
+func nameTokenMatch(name, target string) tokenRelation {
+	best := tokenMatchNone
+	start := -1
+	for i := 0; i <= len(name); i++ {
+		end := i == len(name)
+		if !end && isNameTokenRune(name[i]) {
+			if start == -1 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 {
+			tok := name[start:i]
+			switch {
+			case tok == target:
+				return tokenMatchEqual
+			case strings.HasPrefix(tok, target):
+				best = tokenMatchPrefix
+			}
+			start = -1
+		}
+	}
+	return best
+}
+
+func isNameTokenRune(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
 
 func playerSlug(username string) string { return "player/" + strings.ToLower(username) }

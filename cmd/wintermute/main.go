@@ -21,7 +21,9 @@ import (
 
 	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/config"
+	_ "github.com/vaelen/wintermute/internal/llm/ollama"
 	wnettls "github.com/vaelen/wintermute/internal/net/tls"
+	"github.com/vaelen/wintermute/internal/npc"
 	"github.com/vaelen/wintermute/internal/session"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
@@ -73,8 +75,17 @@ func run(cfgPath string) error {
 		return err
 	})
 
+	npcReg, err := npc.Load(ctx, db, w, cfg.LLM.Default, logger)
+	if err != nil {
+		return fmt.Errorf("load npc registry: %w", err)
+	}
+	w.SetSayObserver(func(roomID world.RoomID, speakerID world.ObjectID, speakerName, text string) {
+		npcReg.HandleSay(roomID, speakerID, speakerName, text)
+	})
+	logger.Info("npc registry loaded")
+
 	motd := defaultMOTD()
-	handler := session.DefaultHandler(authStore, w, logger, motd)
+	handler := session.DefaultHandler(authStore, w, npcReg, logger, motd)
 
 	// wg tracks BOTH the accept-loop goroutines and every per-session
 	// goroutine. On shutdown we Wait on it before letting `defer db.Close()`
@@ -122,6 +133,20 @@ func run(cfgPath string) error {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		logger.Warn("forced shutdown after 2s")
+	}
+
+	// Drain NPC dispatch goroutines before `defer db.Close()` runs.
+	// Each dispatch holds a per-NPC mutex across an LLM Chat call and
+	// then calls into the world (and, in future milestones, the DB).
+	// Letting db.Close() race with an in-flight dispatch would leak
+	// goroutines and risks "send on closed channel" once NPCSay starts
+	// writing. Bound the wait so a hung backend can't pin shutdown.
+	npcDone := make(chan struct{})
+	go func() { npcReg.Wait(); close(npcDone) }()
+	select {
+	case <-npcDone:
+	case <-time.After(3 * time.Second):
+		logger.Warn("npc dispatch goroutines did not drain within 3s")
 	}
 	return nil
 }

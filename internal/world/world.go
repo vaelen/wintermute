@@ -32,6 +32,38 @@ var (
 	ErrStalePresence = errors.New("world: presence has been detached")
 )
 
+// AmbiguousMatchError reports a target string that matched more than one
+// object. Candidates holds the human-readable names of the matched
+// objects in sorted order so callers can render a disambiguation prompt.
+//
+// AmbiguousMatchError satisfies errors.Is(err, ErrAmbiguousTarget); existing
+// callers that only need to know "the lookup was ambiguous" continue to work
+// without changes.
+type AmbiguousMatchError struct {
+	Candidates []string
+}
+
+func (e *AmbiguousMatchError) Error() string { return "world: ambiguous target" }
+func (e *AmbiguousMatchError) Is(target error) bool {
+	return target == ErrAmbiguousTarget
+}
+
+// SayObserver receives a notification AFTER World.Say has finished
+// broadcasting. roomID is the speaker's room; speakerID is the player
+// who spoke; speakerName is their display name; text is the raw text.
+//
+// The observer is invoked SYNCHRONOUSLY (after Say's lock is released
+// and the broadcast has flushed) so any goroutines the observer spawns
+// can be registered with their owner's WaitGroup before Say returns —
+// otherwise a shutdown reaching Wait() between Say returning and the
+// observer running would not see those goroutines and could race with
+// teardown. Implementations MUST therefore be cheap: do not perform
+// I/O or LLM calls on the observer thread; spawn a (tracked) goroutine
+// for any blocking work. Implementations MUST NOT call back into world
+// mutation methods that would deadlock (in particular, do not take
+// w.mu in the observer).
+type SayObserver func(roomID RoomID, speakerID ObjectID, speakerName, text string)
+
 // World is the in-memory authoritative view of rooms, objects, and where
 // every object currently is. All mutations go through the store.DB writer
 // goroutine; the in-memory cache is updated optimistically and rolled back
@@ -54,6 +86,17 @@ type World struct {
 	presences map[RoomID]map[ObjectID]*Presence
 	// presencesByID maps an object id to its Presence, when attached.
 	presencesByID map[ObjectID]*Presence
+	// sayObserver is notified asynchronously after every Say broadcast.
+	// Guarded by w.mu (write under Lock, read under RLock).
+	sayObserver SayObserver
+}
+
+// SetSayObserver registers an observer to be notified after each Say
+// completes. Pass nil to clear. The previous observer is discarded.
+func (w *World) SetSayObserver(fn SayObserver) {
+	w.mu.Lock()
+	w.sayObserver = fn
+	w.mu.Unlock()
 }
 
 // Load constructs a World by reading the entire world state from db. The

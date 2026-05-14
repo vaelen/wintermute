@@ -9,9 +9,11 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/store"
@@ -443,5 +445,210 @@ func TestFindInRoomAmbiguous(t *testing.T) {
 	}
 }
 
-func join(parts []string) string     { return strings.Join(parts, "") }
-func contains(s, sub string) bool    { return strings.Contains(s, sub) }
+func TestFindInRoomTokenAndPrefixMatching(t *testing.T) {
+	// Seeded lobby already contains "the bartender" NPC.
+	w, a, _ := newTestWorld(t)
+	rp := newRecordingPresence(w, t, a, "alice")
+	if _, err := w.Attach(rp.Presence); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	// Whole-word token match on a multi-word name.
+	obj, err := w.FindVisible(rp.PlayerID, "bartender")
+	if err != nil {
+		t.Fatalf("FindVisible(bartender): %v", err)
+	}
+	if obj.Name != "the bartender" {
+		t.Errorf("got %q, want 'the bartender'", obj.Name)
+	}
+
+	// Prefix match: "bart" should also resolve "the bartender" when it's
+	// the only token with that prefix.
+	obj, err = w.FindVisible(rp.PlayerID, "bart")
+	if err != nil || obj.Name != "the bartender" {
+		t.Errorf("prefix 'bart' should match 'the bartender'; got %q, err=%v", obj.Name, err)
+	}
+}
+
+func TestFindInRoomAmbiguousReturnsCandidates(t *testing.T) {
+	w, a, _ := newTestWorld(t)
+	rp := newRecordingPresence(w, t, a, "alice")
+	if _, err := w.Attach(rp.Presence); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	lobby, _ := w.LobbyID()
+	// Seed lobby already has "the bartender"; add a colliding token.
+	addTestNPC(t, w, lobby, "npc/bartholomew", "bartholomew")
+
+	_, err := w.FindVisible(rp.PlayerID, "bart")
+	if err == nil {
+		t.Fatalf("expected ambiguous error, got nil")
+	}
+	if !errors.Is(err, ErrAmbiguousTarget) {
+		t.Errorf("expected errors.Is(err, ErrAmbiguousTarget); got %v", err)
+	}
+	var amb *AmbiguousMatchError
+	if !errors.As(err, &amb) {
+		t.Fatalf("expected *AmbiguousMatchError; got %T", err)
+	}
+	wantCandidates := []string{"bartholomew", "the bartender"}
+	if !reflect.DeepEqual(amb.Candidates, wantCandidates) {
+		t.Errorf("candidates = %v, want %v", amb.Candidates, wantCandidates)
+	}
+}
+
+// addTestNPC inserts a fresh NPC object into room directly into the world's
+// in-memory maps. Lets the world tests cover NPC-aware methods without
+// depending on the npc package or hand-writing seed migrations.
+func addTestNPC(t *testing.T, w *World, room RoomID, slug, name string) ObjectID {
+	t.Helper()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	id := ObjectID(0)
+	for i := ObjectID(10000); ; i++ {
+		if _, exists := w.objects[i]; !exists {
+			id = i
+			break
+		}
+	}
+	w.objects[id] = &Object{ID: id, Slug: slug, Name: name, Kind: KindNPC}
+	w.objBy[slug] = id
+	w.locations[id] = Location{ObjectID: id, RoomID: room}
+	w.indexInRoom(id, room)
+	return id
+}
+
+func TestNPCsInRoom(t *testing.T) {
+	w, a, _ := newTestWorld(t)
+	rp := newRecordingPresence(w, t, a, "alice")
+	if _, err := w.Attach(rp.Presence); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	corridor, err := w.RoomBySlug("corridor")
+	if err != nil {
+		t.Fatalf("RoomBySlug corridor: %v", err)
+	}
+	if _, err := w.Move(context.Background(), rp.Presence, "e"); err != nil {
+		t.Fatalf("Move east: %v", err)
+	}
+	npcID := addTestNPC(t, w, corridor.ID, "npc/test-mechanic", "the mechanic")
+
+	npcs := w.NPCsInRoom(corridor.ID)
+	if len(npcs) != 1 {
+		t.Fatalf("NPCsInRoom = %d entries, want 1: %+v", len(npcs), npcs)
+	}
+	if npcs[0].ID != npcID || npcs[0].Name != "the mechanic" {
+		t.Errorf("NPCsInRoom returned %+v, want id=%d name=the mechanic", npcs[0], npcID)
+	}
+	for _, n := range npcs {
+		if n.Kind != KindNPC {
+			t.Errorf("NPCsInRoom returned non-NPC: %+v", n)
+		}
+	}
+}
+
+func TestNPCSayBroadcastsToRoom(t *testing.T) {
+	w, a, _ := newTestWorld(t)
+	alice := newRecordingPresence(w, t, a, "alice")
+	bob := newRecordingPresence(w, t, a, "bob")
+	if _, err := w.Attach(alice.Presence); err != nil {
+		t.Fatalf("Attach alice: %v", err)
+	}
+	if _, err := w.Attach(bob.Presence); err != nil {
+		t.Fatalf("Attach bob: %v", err)
+	}
+	lobby, _ := w.LobbyID()
+	// The seed migrations already place "the bartender" in the lobby.
+	npcs := w.NPCsInRoom(lobby)
+	if len(npcs) == 0 {
+		t.Fatalf("expected the seed bartender NPC in the lobby")
+	}
+	bartender := npcs[0]
+
+	alice.Drain()
+	bob.Drain()
+
+	if err := w.NPCSay(bartender.ID, "what'll it be"); err != nil {
+		t.Fatalf("NPCSay: %v", err)
+	}
+
+	want := `the bartender says, "what'll it be"`
+	if !contains(join(alice.Drain()), want) {
+		t.Errorf("alice did not receive NPC line containing %q", want)
+	}
+	if !contains(join(bob.Drain()), want) {
+		t.Errorf("bob did not receive NPC line containing %q", want)
+	}
+}
+
+func TestNPCSayUnknownObject(t *testing.T) {
+	w, _, _ := newTestWorld(t)
+	if err := w.NPCSay(ObjectID(424242), "anyone there"); !errors.Is(err, ErrUnknownObject) {
+		t.Errorf("NPCSay unknown id = %v, want ErrUnknownObject", err)
+	}
+}
+
+func TestSayObserverInvokedAfterBroadcast(t *testing.T) {
+	w, a, _ := newTestWorld(t)
+	alice := newRecordingPresence(w, t, a, "alice")
+	bob := newRecordingPresence(w, t, a, "bob")
+	if _, err := w.Attach(alice.Presence); err != nil {
+		t.Fatalf("Attach alice: %v", err)
+	}
+	if _, err := w.Attach(bob.Presence); err != nil {
+		t.Fatalf("Attach bob: %v", err)
+	}
+	alice.Drain()
+	bob.Drain()
+
+	type call struct {
+		roomID      RoomID
+		speakerID   ObjectID
+		speakerName string
+		text        string
+	}
+	ch := make(chan call, 1)
+	w.SetSayObserver(func(roomID RoomID, speakerID ObjectID, speakerName, text string) {
+		ch <- call{roomID, speakerID, speakerName, text}
+	})
+
+	if err := w.Say(alice.Presence, "hello"); err != nil {
+		t.Fatalf("Say: %v", err)
+	}
+
+	lobby, _ := w.LobbyID()
+	select {
+	case got := <-ch:
+		if got.roomID != lobby {
+			t.Errorf("observer roomID = %d, want %d", got.roomID, lobby)
+		}
+		if got.speakerID != alice.PlayerID {
+			t.Errorf("observer speakerID = %d, want %d", got.speakerID, alice.PlayerID)
+		}
+		if got.speakerName != "alice" {
+			t.Errorf("observer speakerName = %q, want %q", got.speakerName, "alice")
+		}
+		if got.text != "hello" {
+			t.Errorf("observer text = %q, want %q", got.text, "hello")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("observer not invoked within 1s")
+	}
+
+	// Clearing the observer makes subsequent Says silent (no panic, nothing
+	// in the channel).
+	w.SetSayObserver(nil)
+	alice.Drain()
+	bob.Drain()
+	if err := w.Say(alice.Presence, "again"); err != nil {
+		t.Fatalf("Say (post-clear): %v", err)
+	}
+	select {
+	case got := <-ch:
+		t.Errorf("observer fired after clear: %+v", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func join(parts []string) string  { return strings.Join(parts, "") }
+func contains(s, sub string) bool { return strings.Contains(s, sub) }
