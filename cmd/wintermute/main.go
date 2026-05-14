@@ -142,7 +142,13 @@ func run(cfgPath string) error {
 	// summarised and persisted. Letting db.Close() race with either
 	// would leak goroutines and risk "send on closed channel" / SQLite
 	// errors. Bound the wait so a hung backend can't pin shutdown.
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	//
+	// The inner Shutdown ctx is strictly tighter than the outer wait so
+	// Shutdown is guaranteed to return first. The outer wait is the
+	// belt-and-suspenders for the case where Shutdown itself wedges
+	// (it shouldn't — it's context-aware end-to-end — but db.Close()
+	// is destructive, so we never want to race it).
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancelShutdown()
 	npcDone := make(chan struct{})
 	go func() {

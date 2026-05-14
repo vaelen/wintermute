@@ -68,7 +68,6 @@ func TestWorkerSummarizesAndStores(t *testing.T) {
 		LLM:             newFakeLLM(t),
 		Store:           rec,
 		SummarizerModel: "fake-summarizer",
-		EmbeddingModel:  "fake-embed",
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -76,7 +75,7 @@ func TestWorkerSummarizesAndStores(t *testing.T) {
 	done := make(chan struct{})
 	go func() { w.Run(ctx); close(done) }()
 
-	w.Submit(SummaryJob{
+	w.Submit(ctx, SummaryJob{
 		PlayerID: world.ObjectID(7),
 		Turns: []Turn{
 			{Speaker: "alice", Text: "transcript: ask about the gate"},
@@ -117,11 +116,50 @@ func TestWorkerSkipsEmptyJobs(t *testing.T) {
 	done := make(chan struct{})
 	go func() { w.Run(ctx); close(done) }()
 
-	w.Submit(SummaryJob{PlayerID: world.ObjectID(7)})
+	w.Submit(ctx, SummaryJob{PlayerID: world.ObjectID(7)})
 	time.Sleep(50 * time.Millisecond)
 
 	if got := len(rec.snapshot()); got != 0 {
 		t.Errorf("empty job produced %d memories, want 0", got)
+	}
+}
+
+// TestWorkerSubmitHonoursContext verifies that a Submit caller is not
+// pinned indefinitely when the jobs channel is saturated and the worker
+// is not actively draining. Cancelling the submit ctx drops the job.
+func TestWorkerSubmitHonoursContext(t *testing.T) {
+	rec := &recordingStore{}
+	w := NewWorker(WorkerConfig{
+		NPCID:     world.ObjectID(42),
+		LLM:       newFakeLLM(t),
+		Store:     rec,
+		JobBuffer: 1,
+	})
+	// Do NOT call w.Run — leaves the queue stuck so Submit blocks once
+	// the buffer is full.
+
+	// First Submit fills the buffer.
+	w.Submit(context.Background(), SummaryJob{
+		PlayerID: world.ObjectID(7),
+		Turns:    []Turn{{Speaker: "alice", Text: "first"}},
+	})
+
+	// Second Submit would block forever on a context-blind implementation.
+	// With a cancelled ctx it must return promptly.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		w.Submit(ctx, SummaryJob{
+			PlayerID: world.ObjectID(7),
+			Turns:    []Turn{{Speaker: "alice", Text: "second"}},
+		})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("Submit did not return after its context expired (would have leaked the caller)")
 	}
 }
 
@@ -138,7 +176,7 @@ func TestWorkerStopDrainsPending(t *testing.T) {
 	go func() { w.Run(ctx); close(done) }()
 
 	for i := 0; i < 3; i++ {
-		w.Submit(SummaryJob{
+		w.Submit(ctx, SummaryJob{
 			PlayerID: world.ObjectID(7),
 			Turns: []Turn{
 				{Speaker: "alice", Text: "transcript: number " + string(rune('a'+i))},

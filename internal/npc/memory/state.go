@@ -100,8 +100,12 @@ func (s *State) Recent(playerID world.ObjectID, n int) []Turn {
 
 // EndConversation drains the player's short-term buffer and submits it
 // to the worker for summarisation. The buffer is left empty; a fresh
-// conversation can begin with the next Append.
-func (s *State) EndConversation(playerID world.ObjectID) {
+// conversation can begin with the next Append. ctx bounds how long
+// EndConversation is willing to block on a saturated worker queue —
+// the shutdown path passes its shutdown context, observer-driven calls
+// pass a generous timeout, and the idle-timer fallback derives one
+// internally.
+func (s *State) EndConversation(ctx context.Context, playerID world.ObjectID) {
 	s.mu.Lock()
 	c, ok := s.convs[playerID]
 	if !ok {
@@ -118,7 +122,7 @@ func (s *State) EndConversation(playerID world.ObjectID) {
 	if len(turns) == 0 || s.cfg.Worker == nil {
 		return
 	}
-	s.cfg.Worker.Submit(SummaryJob{PlayerID: playerID, Turns: turns})
+	s.cfg.Worker.Submit(ctx, SummaryJob{PlayerID: playerID, Turns: turns})
 }
 
 // Retrieve embeds the recent short-term buffer for the player and asks
@@ -185,7 +189,7 @@ func (s *State) Stop(ctx context.Context) error {
 		s.mu.Unlock()
 		if s.cfg.Worker != nil {
 			for _, j := range drains {
-				s.cfg.Worker.Submit(j)
+				s.cfg.Worker.Submit(ctx, j)
 			}
 			stopErr = s.cfg.Worker.Stop(ctx)
 		}
@@ -203,15 +207,25 @@ func (s *State) convOrInitLocked(playerID world.ObjectID) *conversation {
 	return c
 }
 
-// resetIdleLocked (re)arms the per-(NPC, player) idle timer. Caller must
-// hold s.mu. The timer fires in a fresh goroutine and re-enters EndConversation,
-// which locks s.mu — so we deliberately do NOT call EndConversation directly.
+// idleSubmitTimeout bounds how long the idle-timer callback is willing
+// to wait on a saturated worker queue. Generous because a stalled
+// queue here means the engine is already in trouble; we'd rather log a
+// drop than wedge the goroutine forever.
+const idleSubmitTimeout = 30 * time.Second
+
+// resetIdleLocked (re)arms the per-(NPC, player) idle timer. Caller
+// must hold s.mu. The timer fires in a fresh goroutine and re-enters
+// EndConversation, which locks s.mu — so we deliberately do NOT call
+// EndConversation directly. The callback derives a fresh bounded
+// context so a wedged worker queue cannot pin the timer goroutine.
 func (s *State) resetIdleLocked(playerID world.ObjectID, c *conversation) {
 	if c.idle != nil {
 		c.idle.Stop()
 	}
 	c.idle = time.AfterFunc(s.cfg.IdleTimeout, func() {
-		s.EndConversation(playerID)
+		ctx, cancel := context.WithTimeout(context.Background(), idleSubmitTimeout)
+		defer cancel()
+		s.EndConversation(ctx, playerID)
 	})
 }
 

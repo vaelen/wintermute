@@ -36,12 +36,17 @@ type SummaryJob struct {
 
 // WorkerConfig parameterises a Worker. Only Store and LLM are required;
 // every other field has a sensible default.
+//
+// The embedding model is intentionally absent: llm.LLM.Embed has no
+// model parameter, so the configured embed model is a property of the
+// LLM client itself (set at construction via the backend's opts). If a
+// later milestone wants per-NPC or per-job embed-model overrides, the
+// place to add it is the llm.LLM interface, not here.
 type WorkerConfig struct {
 	NPCID           world.ObjectID
 	LLM             llm.LLM
 	Store           Store
-	SummarizerModel string // model used for Chat; empty defers to LLM defaults
-	EmbeddingModel  string // model used for Embed; empty defers to LLM defaults
+	SummarizerModel string // model passed to Chat; empty defers to the backend's default
 	JobBuffer       int    // pending job channel capacity; 0 → defaultJobBuffer
 	Logger          *slog.Logger
 }
@@ -76,11 +81,13 @@ func NewWorker(cfg WorkerConfig) *Worker {
 	}
 }
 
-// Submit enqueues a job. Discards jobs with no turns (nothing to summarise).
-// Blocks if the queue is full so callers see backpressure rather than
-// silent drops; with the default buffer of 16, hitting this is a sign of
-// either a stalled LLM or an unrealistic burst of conversation-ends.
-func (w *Worker) Submit(j SummaryJob) {
+// Submit enqueues a job. Discards jobs with no turns (nothing to
+// summarise). If the queue is full the caller is bounded by ctx: a
+// cancelled or expired context drops the job (with a warn log) rather
+// than blocking. Callers in the shutdown path pass their shutdown
+// context; non-shutdown callers should pass a context with a
+// reasonable timeout so a stalled LLM cannot pin them indefinitely.
+func (w *Worker) Submit(ctx context.Context, j SummaryJob) {
 	if len(j.Turns) == 0 {
 		return
 	}
@@ -89,6 +96,9 @@ func (w *Worker) Submit(j SummaryJob) {
 	case <-w.stopCh:
 		w.cfg.Logger.Debug("memory worker: submit after stop, dropping job",
 			"npc", w.cfg.NPCID, "player", j.PlayerID)
+	case <-ctx.Done():
+		w.cfg.Logger.Warn("memory worker: submit cancelled, dropping job",
+			"npc", w.cfg.NPCID, "player", j.PlayerID, "err", ctx.Err())
 	}
 }
 

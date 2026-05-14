@@ -147,7 +147,7 @@ func TestStateEndConversationDrainsToWorker(t *testing.T) {
 	st.Append(playerID, Turn{Speaker: "alice", Text: "transcript: looking for the gate"})
 	st.Append(playerID, Turn{Speaker: "<npc>", Text: "the bartender nods"})
 
-	st.EndConversation(playerID)
+	st.EndConversation(context.Background(), playerID)
 	waitFor(t, "memory recorded after EndConversation", 2*time.Second, func() bool {
 		return store.count() == 1
 	})

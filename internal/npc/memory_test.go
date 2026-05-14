@@ -186,6 +186,81 @@ func attachPlayerOn(t *testing.T, w *world.World, a *auth.Store, username string
 	return rp
 }
 
+// TestNPCRegistryShutdownHonoursContext verifies Shutdown returns at
+// or before its context's deadline even when in-flight dispatch work
+// would otherwise run longer. Without this, main.go's outer timeout
+// races the inner shutdownCtx and db.Close() can fire while Shutdown
+// is still touching the DB.
+func TestNPCRegistryShutdownHonoursContext(t *testing.T) {
+	e := newFakeBackendEnv(t)
+
+	// Pin a fake in-flight dispatch by adding to inFlightWG directly
+	// and never calling Done. This is the "hung dispatch" model:
+	// Shutdown must not wait for it past its own deadline.
+	e.reg.inFlightWG.Add(1)
+	defer e.reg.inFlightWG.Done()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := e.reg.Shutdown(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Errorf("Shutdown returned nil; want a context error from the deadline")
+	}
+	// Allow generous slack so a slow CI runner doesn't flake; the
+	// failure mode would be a multi-second wait.
+	if elapsed > 1*time.Second {
+		t.Fatalf("Shutdown returned after %v, want at or near the 100ms ctx deadline", elapsed)
+	}
+}
+
+// TestNPCMemoryReloadDrainsOldStates verifies that Registry.Reload
+// drains every existing per-NPC State BEFORE cancelling the old worker
+// context. Otherwise late idle timers or in-flight observer goroutines
+// could submit jobs onto a dead channel, silently losing data.
+func TestNPCMemoryReloadDrainsOldStates(t *testing.T) {
+	e := newFakeBackendEnv(t)
+	alice := e.attachPlayer(t, "alice")
+	bob := e.attachPlayer(t, "bob")
+	_ = bob
+	alice.drain()
+	bob.drain()
+
+	// Engage so the bartender's short-term buffer has content that
+	// MUST be summarised before the old workers are torn down.
+	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
+	alice.waitFor(t, bartenderResponse, 2*time.Second)
+	e.reg.Wait()
+
+	// Sanity: short-term has the two turns. No memory row yet.
+	var rows int
+	if err := e.db.Read().QueryRow(`SELECT COUNT(*) FROM npc_memories`).Scan(&rows); err != nil {
+		t.Fatalf("count pre-reload: %v", err)
+	}
+	if rows != 0 {
+		t.Fatalf("pre-reload npc_memories rows = %d, want 0", rows)
+	}
+
+	if err := e.reg.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	// After Reload, the old state's buffer must have been drained
+	// through its worker, producing a row.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := e.db.Read().QueryRow(`SELECT COUNT(*) FROM npc_memories`).Scan(&rows); err == nil && rows >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if rows < 1 {
+		t.Fatalf("expected Reload to drain the prior conversation into a memory row; got %d", rows)
+	}
+}
+
 // TestNPCMemoryShutdownDrainsBuffers verifies that Registry.Shutdown
 // drains every per-NPC short-term buffer through the workers and waits
 // for the resulting summarisation to land before returning.
