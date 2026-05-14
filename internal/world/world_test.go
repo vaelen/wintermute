@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -441,6 +442,58 @@ func TestFindInRoomAmbiguous(t *testing.T) {
 	// Substring/exact-slug "keycard" still matches the original by slug.
 	if _, err := w.Take(context.Background(), rp.Presence, "keycard"); err != nil {
 		t.Errorf("expected exact-slug 'keycard' to disambiguate; got %v", err)
+	}
+}
+
+func TestFindInRoomTokenAndPrefixMatching(t *testing.T) {
+	// Seeded lobby already contains "the bartender" NPC.
+	w, a, _ := newTestWorld(t)
+	rp := newRecordingPresence(w, t, a, "alice")
+	if _, err := w.Attach(rp.Presence); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+
+	// Whole-word token match on a multi-word name.
+	obj, err := w.FindVisible(rp.PlayerID, "bartender")
+	if err != nil {
+		t.Fatalf("FindVisible(bartender): %v", err)
+	}
+	if obj.Name != "the bartender" {
+		t.Errorf("got %q, want 'the bartender'", obj.Name)
+	}
+
+	// Prefix match: "bart" should also resolve "the bartender" when it's
+	// the only token with that prefix.
+	obj, err = w.FindVisible(rp.PlayerID, "bart")
+	if err != nil || obj.Name != "the bartender" {
+		t.Errorf("prefix 'bart' should match 'the bartender'; got %q, err=%v", obj.Name, err)
+	}
+}
+
+func TestFindInRoomAmbiguousReturnsCandidates(t *testing.T) {
+	w, a, _ := newTestWorld(t)
+	rp := newRecordingPresence(w, t, a, "alice")
+	if _, err := w.Attach(rp.Presence); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	lobby, _ := w.LobbyID()
+	// Seed lobby already has "the bartender"; add a colliding token.
+	addTestNPC(t, w, lobby, "npc/bartholomew", "bartholomew")
+
+	_, err := w.FindVisible(rp.PlayerID, "bart")
+	if err == nil {
+		t.Fatalf("expected ambiguous error, got nil")
+	}
+	if !errors.Is(err, ErrAmbiguousTarget) {
+		t.Errorf("expected errors.Is(err, ErrAmbiguousTarget); got %v", err)
+	}
+	var amb *AmbiguousMatchError
+	if !errors.As(err, &amb) {
+		t.Fatalf("expected *AmbiguousMatchError; got %T", err)
+	}
+	wantCandidates := []string{"bartholomew", "the bartender"}
+	if !reflect.DeepEqual(amb.Candidates, wantCandidates) {
+		t.Errorf("candidates = %v, want %v", amb.Candidates, wantCandidates)
 	}
 }
 

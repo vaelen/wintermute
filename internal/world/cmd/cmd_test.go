@@ -329,3 +329,48 @@ func TestDispatchNPCReloadNoRegistryHiddenAsUnknown(t *testing.T) {
 		t.Errorf("Dispatch(@npcreload) with nil NPC = %v, want OutcomeUnknown", got)
 	}
 }
+
+func TestDidYouMean(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want string
+	}{
+		{nil, "Which one?\r\n"},
+		{[]string{"a coffee cup"}, "Did you mean a coffee cup?\r\n"},
+		{[]string{"a coffee cup", "a teacup"}, "Did you mean a coffee cup or a teacup?\r\n"},
+		{[]string{"a", "b", "c"}, "Did you mean a, b, or c?\r\n"},
+		{[]string{"a", "b", "c", "d"}, "Did you mean a, b, c, or d?\r\n"},
+	}
+	for _, tc := range cases {
+		if got := didYouMean(tc.in); got != tc.want {
+			t.Errorf("didYouMean(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestDispatchLookPartialMatchAndDisambiguation(t *testing.T) {
+	h, rw := newHandler(t, "alice")
+	// Lobby has a keycard; corridor has a coffee cup. Move east to be near it.
+	if got := h.Dispatch(context.Background(), "e"); got != OutcomeContinue {
+		t.Fatalf("move east outcome = %v", got)
+	}
+	rw.Drain()
+
+	// Token match: 'cup' should resolve 'coffee cup' — render the long desc.
+	h.Dispatch(context.Background(), "look cup")
+	out := rw.Drain()
+	if strings.Contains(out, "nothing like that here") {
+		t.Errorf("look cup should match coffee cup; got refusal:\n%s", out)
+	}
+	if !strings.Contains(strings.ToLower(out), "lukewarm") {
+		t.Errorf("look cup should render the coffee cup's long desc; got:\n%s", out)
+	}
+
+	// Token match: 'coffee' should also resolve.
+	h.Dispatch(context.Background(), "look coffee")
+	out = rw.Drain()
+	if !strings.Contains(strings.ToLower(out), "lukewarm") {
+		t.Errorf("look coffee should render the coffee cup; got:\n%s", out)
+	}
+}
+

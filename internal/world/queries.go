@@ -3,7 +3,10 @@
 
 package world
 
-import "sort"
+import (
+	"errors"
+	"sort"
+)
 
 // PresentPlayer describes a player visible in a room, including whether
 // they are currently attached to a session.
@@ -104,6 +107,11 @@ func (w *World) WhoOnline() []string {
 // FindVisible looks up an object reachable from the player's current room:
 // items in the room (including players' bodies) or items the player holds.
 // Used by `look <target>`.
+//
+// If the room lookup is ambiguous, that error is returned without
+// falling through to the inventory — a "did you mean..." prompt from
+// the room is more useful than a generic "not present" once we know
+// the player named something the room can almost match.
 func (w *World) FindVisible(playerID ObjectID, target string) (Object, error) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -111,11 +119,13 @@ func (w *World) FindVisible(playerID ObjectID, target string) (Object, error) {
 	if !ok {
 		return Object{}, ErrPresenceNotFound
 	}
-	// Try the room first.
-	if id, err := w.findInRoom(loc.RoomID, target); err == nil {
+	id, err := w.findInRoom(loc.RoomID, target)
+	if err == nil {
 		return *w.objects[id], nil
 	}
-	// Then the player's inventory.
+	if errors.Is(err, ErrAmbiguousTarget) {
+		return Object{}, err
+	}
 	if id, err := w.findHeldBy(playerID, target); err == nil {
 		return *w.objects[id], nil
 	}

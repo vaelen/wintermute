@@ -126,7 +126,12 @@ func (h *Handler) cmdLook(target string) Outcome {
 	}
 	obj, err := h.World.FindVisible(h.Presence.PlayerID, target)
 	if err != nil {
-		_ = h.Presence.Write("You see nothing like that here.\r\n")
+		var amb *world.AmbiguousMatchError
+		if errors.As(err, &amb) {
+			_ = h.Presence.Write(didYouMean(amb.Candidates))
+		} else {
+			_ = h.Presence.Write("You see nothing like that here.\r\n")
+		}
 		return OutcomeContinue
 	}
 	_ = h.Presence.Write(render.ObjectLong(obj))
@@ -204,11 +209,12 @@ func (h *Handler) cmdTake(ctx context.Context, target string) Outcome {
 	}
 	obj, err := h.World.Take(ctx, h.Presence, target)
 	if err != nil {
+		var amb *world.AmbiguousMatchError
 		switch {
 		case errors.Is(err, world.ErrStalePresence):
 			return OutcomeDetached
-		case errors.Is(err, world.ErrAmbiguousTarget):
-			_ = h.Presence.Write("Which one?\r\n")
+		case errors.As(err, &amb):
+			_ = h.Presence.Write(didYouMean(amb.Candidates))
 		case errors.Is(err, world.ErrNotTakeable):
 			_ = h.Presence.Write("You can't take that.\r\n")
 		default:
@@ -227,11 +233,12 @@ func (h *Handler) cmdDrop(ctx context.Context, target string) Outcome {
 	}
 	obj, err := h.World.Drop(ctx, h.Presence, target)
 	if err != nil {
+		var amb *world.AmbiguousMatchError
 		switch {
 		case errors.Is(err, world.ErrStalePresence):
 			return OutcomeDetached
-		case errors.Is(err, world.ErrAmbiguousTarget):
-			_ = h.Presence.Write("Which one?\r\n")
+		case errors.As(err, &amb):
+			_ = h.Presence.Write(didYouMean(amb.Candidates))
 		default:
 			_ = h.Presence.Write("You aren't carrying that.\r\n")
 		}
@@ -358,5 +365,21 @@ func canonicalDirection(s string) string {
 		return "out"
 	default:
 		return strings.ToLower(strings.TrimSpace(s))
+	}
+}
+
+// didYouMean renders a disambiguation prompt for a list of candidate
+// object names. Returns a complete line ending with CRLF.
+func didYouMean(candidates []string) string {
+	switch len(candidates) {
+	case 0:
+		return "Which one?\r\n"
+	case 1:
+		return "Did you mean " + candidates[0] + "?\r\n"
+	case 2:
+		return "Did you mean " + candidates[0] + " or " + candidates[1] + "?\r\n"
+	default:
+		head := strings.Join(candidates[:len(candidates)-1], ", ")
+		return "Did you mean " + head + ", or " + candidates[len(candidates)-1] + "?\r\n"
 	}
 }

@@ -32,6 +32,22 @@ var (
 	ErrStalePresence = errors.New("world: presence has been detached")
 )
 
+// AmbiguousMatchError reports a target string that matched more than one
+// object. Candidates holds the human-readable names of the matched
+// objects in sorted order so callers can render a disambiguation prompt.
+//
+// AmbiguousMatchError satisfies errors.Is(err, ErrAmbiguousTarget); existing
+// callers that only need to know "the lookup was ambiguous" continue to work
+// without changes.
+type AmbiguousMatchError struct {
+	Candidates []string
+}
+
+func (e *AmbiguousMatchError) Error() string { return "world: ambiguous target" }
+func (e *AmbiguousMatchError) Is(target error) bool {
+	return target == ErrAmbiguousTarget
+}
+
 // SayObserver receives a notification AFTER World.Say has finished
 // broadcasting. roomID is the speaker's room; speakerID is the player
 // who spoke; speakerName is their display name; text is the raw text.
