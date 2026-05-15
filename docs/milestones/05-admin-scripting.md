@@ -111,7 +111,38 @@ wintermute.tool.unregister("sell_drink")
 local list = wintermute.tool.list()
 ```
 
-All API functions raise Lua errors on failure with a stable message format `"wintermute: <code>: <details>"`.
+All API functions raise Lua errors on failure with a stable message format `"wintermute: <code>: <details>"`. In particular, the strict `create` functions raise `wintermute: duplicate_slug: <slug>` when the slug is already taken; use the `ensure` siblings below for idempotent creation.
+
+### Idempotent creation for init scripts
+
+Init scripts re-run on every boot, so the strict slug-uniqueness constraint would make `wintermute.room.create({slug="bar", ...})` fail on the second startup. To keep init scripts terse and re-runnable, every creator has an `ensure` sibling:
+
+```lua
+local room, created = wintermute.room.ensure({
+    slug = "bar", name = "The Sprawl Bar", description = "...",
+})
+
+local obj = wintermute.object.ensure({
+    slug = "keycard", name = "ICE keycard", kind = "item",
+})
+
+local door = wintermute.door.ensure({
+    slug      = "bar-roof-up",
+    from      = bar, direction = "up", to = roof,
+    leave_msg = "{actor} climbs up the ladder.",
+})
+
+local npc = wintermute.npc.ensure({
+    slug    = "bartender", name = "the bartender",
+    persona = "...", backend = "ollama", model = "llama3.2:3b",
+})
+```
+
+`ensure` performs the create on first run; on subsequent runs with the same slug it updates the descriptive fields supplied in the table (name, description, persona, model, door message templates, etc.) and returns the existing handle plus a `created` boolean.
+
+`ensure` deliberately does *not* touch live world state beyond those descriptive fields: it will not move objects to a different room, change ownership, or evict players. Re-locations stay behind explicit setters (`object.move`, `account.set_level`) so a reboot doesn't clobber runtime activity.
+
+The one-off admin commands (`@create-room`, `@create-npc`, `@create-door`) use the strict `create` form, so a typo at the prompt surfaces as `wintermute: duplicate_slug: <slug>` rather than silently mutating an existing entity.
 
 ### Doors as first-class objects
 
@@ -278,7 +309,7 @@ The migration also accounts for the M2 → M5 ordering: a fresh DB built up thro
 2. Implement `internal/world/api` — pure Go layer over `internal/world` and `internal/npc`. Stable error codes. No Lua imports.
 3. Promote exits to doors in `internal/world`: add a `Door` type carrying direction, source/destination rooms, and message templates; load `doors` into the world cache at startup; replace `Room.Exits map[string]RoomID` with a direction → door-id lookup. Update `Move` to resolve the door, run template substitution (`{actor}`, `{direction}`) via `internal/world/render`, and broadcast the resulting strings.
 4. Implement `internal/script/lua` with the VM pool.
-5. Bind the world API into the Lua state as `wintermute.*`, including `wintermute.door.create/set_messages/delete`. Each binding is a small `func(L *lua.LState) int` adapter.
+5. Bind the world API into the Lua state as `wintermute.*`, including `wintermute.door.create/set_messages/delete` and the `ensure` siblings for `room`, `object`, `door`, and `npc`. Each binding is a small `func(L *lua.LState) int` adapter. `ensure` is implemented in `internal/world/api` as a single transaction (lookup-by-slug → insert or descriptive-field update), not as a Lua-side `find`+`create` composition, so it remains race-free.
 6. Implement the tool registry types and the binding for `wintermute.tool.register/unregister/list`.
 7. Implement the `@`-commands in the M2 command parser, restricted by access level. Include `@create-door <slug> <dir> <to-room>` and `@door-msg <slug> leave|arrive "<template>"`. `@dig` is rewritten to create a door pair (one in each direction) rather than two exit rows.
 8. Implement `@edit` line editor as a session sub-mode (replace the normal line handler while editing; restore on `q`).
@@ -288,6 +319,7 @@ The migration also accounts for the M2 → M5 ordering: a fresh DB built up thro
     - World API surface (create/move/delete a room from Go directly).
     - Lua binding round-trips (create a room from Lua, fetch from Go, verify).
     - Tool registration with schema validation.
+    - `create` vs. `ensure` semantics: `room.create({slug="x", ...})` on an existing slug raises `wintermute: duplicate_slug: x`; `room.ensure({slug="x", name="new"})` called twice succeeds, returns the same id both times, returns `created=true` then `created=false`, and the second call propagates the updated `name` while leaving non-supplied fields untouched. Equivalent coverage for `object`, `door`, and `npc`.
     - Door template substitution: `{actor}` and `{direction}` resolve correctly; missing placeholders are left as literal text; default templates match the M2 strings.
     - Migration `0009_doors.sql` against a database populated by the M2 seed: every former `exits` row appears as a `doors` row with default templates and the `exits` table is gone.
 12. Integration test: log in as admin, create a room via `@create-room`, `@dig` north to it, walk there, see it.
@@ -308,10 +340,11 @@ The migration also accounts for the M2 → M5 ordering: a fresh DB built up thro
 3. After migrating an existing M2 database through 0009, every former exit is reachable as a door and walking through it produces the same default broadcast strings as before. The `exits` table no longer exists.
 4. An admin can create a door whose `leave_msg` is `"{actor} climbs up the ladder."`; a player walking that direction triggers exactly that broadcast in the source room (with the player's name substituted), and the matching `arrive_msg` in the destination room.
 5. Scripts persist across restart. `init.*` scripts run automatically at boot.
-6. `@tools` lists at least one tool registered by a startup script. `@invoke <tool> '{"...":"..."}'` runs it and prints its return.
-7. A non-admin attempting an `@`-command sees a clear refusal and the action is not performed.
-8. The VM pool reuses VMs (verified via a debug stat exposed on an admin command).
-9. All new files carry the MIT header.
+6. Re-running an `init.*` script (manually via `@reload-scripts` or implicitly on restart) is a no-op when it uses `ensure`: no duplicate rooms/objects/NPCs are created and no errors are raised, and edits to descriptive fields in the script propagate to the existing entities. The strict `create` form continues to raise `wintermute: duplicate_slug: <slug>` on conflict.
+7. `@tools` lists at least one tool registered by a startup script. `@invoke <tool> '{"...":"..."}'` runs it and prints its return.
+8. A non-admin attempting an `@`-command sees a clear refusal and the action is not performed.
+9. The VM pool reuses VMs (verified via a debug stat exposed on an admin command).
+10. All new files carry the MIT header.
 
 ## Risks & open questions
 

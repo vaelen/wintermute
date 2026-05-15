@@ -248,7 +248,8 @@ func (w *World) validatePresenceLocked(p *Presence) error {
 }
 
 // Move moves the attached player in the given direction. Returns the new
-// room id on success.
+// room id on success. Leave/arrive broadcasts use the door's per-direction
+// templates with {actor} and {direction} substitutions.
 func (w *World) Move(ctx context.Context, p *Presence, dir string) (RoomID, error) {
 	dir = strings.ToLower(strings.TrimSpace(dir))
 	w.mu.Lock()
@@ -262,16 +263,17 @@ func (w *World) Move(ctx context.Context, p *Presence, dir string) (RoomID, erro
 		w.mu.Unlock()
 		return 0, ErrPresenceNotFound
 	}
-	fromRoom := w.rooms[from.RoomID]
-	if fromRoom == nil {
+	if w.rooms[from.RoomID] == nil {
 		w.mu.Unlock()
 		return 0, ErrUnknownRoom
 	}
-	toID, ok := fromRoom.Exits[dir]
+	byDir := w.doorBy[from.RoomID]
+	door, ok := byDir[dir]
 	if !ok {
 		w.mu.Unlock()
 		return 0, ErrNoExit
 	}
+	toID := door.ToRoom
 	if w.rooms[toID] == nil {
 		w.mu.Unlock()
 		return 0, ErrUnknownRoom
@@ -297,10 +299,10 @@ func (w *World) Move(ctx context.Context, p *Presence, dir string) (RoomID, erro
 	}
 
 	name := playerDisplayName(w.objects[p.PlayerID])
-	leaving := w.collectBroadcastLocked(from.RoomID, p.PlayerID,
-		fmt.Sprintf("%s leaves %s.\r\n", name, directionPhrase(dir)))
-	arriving := w.collectBroadcastLocked(toID, p.PlayerID,
-		fmt.Sprintf("%s arrives.\r\n", name))
+	leaveMsg := SubstituteDoorTemplate(door.LeaveMsg, name, dir)
+	arriveMsg := SubstituteDoorTemplate(door.ArriveMsg, name, dir)
+	leaving := w.collectBroadcastLocked(from.RoomID, p.PlayerID, leaveMsg+"\r\n")
+	arriving := w.collectBroadcastLocked(toID, p.PlayerID, arriveMsg+"\r\n")
 	observer := w.moveObserver
 	w.mu.Unlock()
 	flush(leaving)
@@ -653,7 +655,8 @@ func playerDisplayName(o *Object) string {
 }
 
 // directionPhrase converts a direction code into a natural-language phrase
-// for departure broadcasts ("X leaves to the north.").
+// for departure broadcasts ("X leaves to the north."). Used to render the
+// {direction} placeholder in door message templates.
 func directionPhrase(dir string) string {
 	switch dir {
 	case "n":
@@ -675,4 +678,15 @@ func directionPhrase(dir string) string {
 	default:
 		return dir
 	}
+}
+
+// SubstituteDoorTemplate renders a door message template by replacing the
+// supported placeholders. {actor} becomes the actor's display name;
+// {direction} becomes the natural-language direction phrase (e.g. "to the
+// north" for "n"). Unknown placeholders are left as literal text so a
+// typo surfaces in the broadcast rather than disappearing silently.
+func SubstituteDoorTemplate(tmpl, actor, dir string) string {
+	out := strings.ReplaceAll(tmpl, "{actor}", actor)
+	out = strings.ReplaceAll(out, "{direction}", directionPhrase(dir))
+	return out
 }

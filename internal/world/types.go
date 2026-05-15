@@ -28,6 +28,11 @@ const (
 	KindItem   Kind = "item"
 	KindPlayer Kind = "player"
 	KindNPC    Kind = "npc"
+	// KindDoor is a navigable connection between two rooms. Doors are
+	// objects so the same admin tooling (slug, owner, permissions) applies
+	// uniformly, but they do not appear in room object listings — the
+	// renderer surfaces them on the Exits line instead.
+	KindDoor Kind = "door"
 )
 
 // Room is a single location in the world.
@@ -58,6 +63,22 @@ type Location struct {
 	ObjectID ObjectID
 	RoomID   RoomID
 	HolderID ObjectID
+}
+
+// Door is a navigable connection between two rooms. The underlying row
+// is a 'door' object plus a doors extension row carrying the direction,
+// destination, and broadcast templates. Templates support placeholders
+// {actor} (the actor's display name) and {direction} (the rendered
+// direction phrase, e.g. "to the north").
+type Door struct {
+	ID         ObjectID
+	Slug       string
+	Name       string
+	FromRoom   RoomID
+	Direction  string
+	ToRoom     RoomID
+	LeaveMsg   string
+	ArriveMsg  string
 }
 
 // Presence is a session's window into the world. The session layer
