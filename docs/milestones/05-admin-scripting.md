@@ -15,7 +15,7 @@ Admins can write and store Lua scripts that create rooms, spawn NPCs, register N
 - Admin world API surface exposed to Lua: rooms (CRUD), exits, objects, doors, NPCs (create, configure, set persona), MOTD, system broadcast, kick/disconnect, account access-level change.
 - Doors as first-class objects: the bare `exits` table from M2 is promoted to a `kind='door'` flavor of `objects` with per-door direction, destination, and configurable leave/arrive message templates (e.g. a "ladder" door rendering `"X climbs up the ladder."` instead of the default `"X leaves up."`). Doors are created and edited with the same tooling as other objects. Lockability, examinability, and door-scoped scripts are stubbed out in the schema and API but not exercised until later milestones.
 - Tool registry: admin scripts call `tool.register(name, fn)` to register a Lua function. NPC config references tools by name. M5 ships the registry + a manual-invocation command; autonomous tool calls land in M7.
-- Persistent script storage: `scripts` table. In-world editor command `@edit <script>` (line-based; modeled on `ed`/`MUSH @decompile`).
+- Persistent script storage: `scripts` table. In-world editor command `@edit <script>` ships in paste-mode form for M5: subsequent input lines accumulate as script source until a single `.` on its own line saves the buffer; `.abort` cancels without saving. Re-opening an existing slug seeds the buffer with its current source. The fuller `ed`/`MUSH @decompile`-style line editor (`i`/`a`/`d`/`p`/`r`/`w`/`q`) is deferred to a later milestone — paste-mode covers the workflow most admins reach for anyway.
 - Admin command surface: `@create-room`, `@dig` (create room + door pair), `@create-door`, `@door-msg` (set a door's leave/arrive templates), `@create-npc`, `@persona`, `@script`, `@edit`, `@run`, `@tools`, `@invoke`, `@reload-scripts`, `@boot` (force disconnect a session).
 - ACL plumbing groundwork: `permissions` is a column on `rooms`/`objects` capturing the owner-set permission bitmask. The full ACL table for delegated permissions lands in M8 (player tier).
 
@@ -24,7 +24,8 @@ Admins can write and store Lua scripts that create rooms, spawn NPCs, register N
 - Player-facing scripting (M8).
 - Lua sandboxing (M8).
 - NPCs calling tools (M7).
-- A real text editor (line editor is fine for M5; a screen editor is a much later concern).
+- A full `ed`/MUSH-style line editor with `i`/`a`/`d`/`p`/`r`/`w`/`q` commands — M5 ships paste-mode only. The full line editor is a later QoL pass.
+- A real (curses/screen) text editor — much later concern, not on the roadmap.
 
 ## Architecture
 
@@ -202,7 +203,7 @@ Used by:
 - `@create-npc <slug> "<name>" "<persona>"` — defaults backend to `"ollama"`, models to config defaults.
 - `@persona <npc> "<new persona>"`.
 - `@script <slug>` — show script source.
-- `@edit <slug>` — line-based editor (commands `i`, `a`, `d`, `p`, `r`, `w`, `q`); minimal but workable.
+- `@edit <slug>` — opens paste-mode: subsequent input lines accumulate as script source until a single `.` saves and exits; `.abort` cancels. Re-opening an existing slug seeds the buffer with its current source. The full line editor (`i`/`a`/`d`/`p`/`r`/`w`/`q`) is deferred.
 - `@run <slug>` — execute (re-execute) a script.
 - `@tools` — list registered tools.
 - `@invoke <tool> <json>` — admin executes a tool with a JSON argument string.
@@ -312,7 +313,7 @@ The migration also accounts for the M2 → M5 ordering: a fresh DB built up thro
 5. Bind the world API into the Lua state as `wintermute.*`, including `wintermute.door.create/set_messages/delete` and the `ensure` siblings for `room`, `object`, `door`, and `npc`. Each binding is a small `func(L *lua.LState) int` adapter. `ensure` is implemented in `internal/world/api` as a single transaction (lookup-by-slug → insert or descriptive-field update), not as a Lua-side `find`+`create` composition, so it remains race-free.
 6. Implement the tool registry types and the binding for `wintermute.tool.register/unregister/list`.
 7. Implement the `@`-commands in the M2 command parser, restricted by access level. Include `@create-door <slug> <dir> <to-room>` and `@door-msg <slug> leave|arrive "<template>"`. `@dig` is rewritten to create a door pair (one in each direction) rather than two exit rows.
-8. Implement `@edit` line editor as a session sub-mode (replace the normal line handler while editing; restore on `q`).
+8. Implement `@edit` paste-mode as a session sub-mode: while the command parser's `editor` field is non-`nil`, every input line is appended to the buffer until a line containing only `.` saves the buffer to the `scripts` table (or `.abort` discards it). Re-opening an existing slug seeds the buffer with its current source. The full `i`/`a`/`d`/`p`/`r`/`w`/`q` line editor is deferred to a later milestone.
 9. On startup, after world load, run all `init.*` scripts in slug order.
 10. Add structured slog fields for script execution: `script`, `tool`, duration, error.
 11. Unit tests:
@@ -351,6 +352,6 @@ The migration also accounts for the M2 → M5 ordering: a fresh DB built up thro
 - **Lua error surface**: gopher-lua returns Go errors and Lua errors somewhat distinctly. Wrap both in a single `script.Error` type with a `Source` field (`go`/`lua`) and a stable message format.
 - **VM pool state leakage**: even admin code can leave globals lying around. Reset the `wintermute.*` table to a known shape on `Put` (re-bind from scratch), and clear non-stdlib globals. This is cheap and avoids debugging weirdness later.
 - **Tool argument schemas**: M3 defined `ToolDef.Schema` as `map[string]any` (JSON schema). Decide whether to validate the args server-side before invoking the Lua function — yes, with a tiny in-house validator (just type and required-fields), to avoid pulling in a full JSON-Schema dep.
-- **Line editor UX**: line editors are widely hated but cheap. The MUSH community is used to `@edit`. Provide a `paste` mode that accepts a heredoc terminated by a `.` on its own line, which is what most actual users will use.
+- **Editor UX (resolved for M5)**: M5 ships paste-mode only (`.` to save, `.abort` to cancel, prior content auto-loaded on re-edit). The ed-style `i`/`a`/`d`/`p`/`r`/`w`/`q` line editor is left for a later milestone — paste-mode is what most users reach for anyway, and the engine has more pressing work first. When the full editor lands, it should reuse the existing `editorState` machinery on the command handler.
 - **Migration ordering**: M4's `0006_memory.sql` came before M5's `0007_scripts.sql`. Migrations are forward-only and numbered; running M5 against a DB built up to M2 must apply 0003 through 0008 cleanly. The test harness should cover the "fresh DB to current" path.
 - **The seed world transition**: keeping both the SQL seed fixture and the Lua `init.*` scripts is intentional duplication for M5. Pick one in M7 (or whenever a milestone has spare time) and remove the other. Don't do it in M5.
