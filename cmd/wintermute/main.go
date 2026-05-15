@@ -24,9 +24,12 @@ import (
 	_ "github.com/vaelen/wintermute/internal/llm/ollama"
 	wnettls "github.com/vaelen/wintermute/internal/net/tls"
 	"github.com/vaelen/wintermute/internal/npc"
+	scriptlua "github.com/vaelen/wintermute/internal/script/lua"
 	"github.com/vaelen/wintermute/internal/session"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
+	worldapi "github.com/vaelen/wintermute/internal/world/api"
+	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
 )
 
 func main() {
@@ -84,8 +87,44 @@ func run(cfgPath string) error {
 	})
 	logger.Info("npc registry loaded")
 
-	motd := defaultMOTD()
+	// Admin scripting layer (M5): world API, Lua VM pool with the
+	// wintermute.* table pre-loaded, tool registry, scripts table access.
+	// Wired into the session handler so admin @-commands can mutate the
+	// world from inside the game.
+	adminAPI := worldapi.New(w, db, authStore, npcReg, logger)
+	luaAPI := scriptlua.NewAPI(adminAPI, nil, ctx)
+	luaPool := scriptlua.NewPool(scriptlua.PoolConfig{Size: 4, API: luaAPI})
+	defer luaPool.Close()
+	scripts := scriptlua.NewScriptStore(db)
+	adminBackend := &worldcmd.AdminBackend{
+		API:     adminAPI,
+		Scripts: scripts,
+		Pool:    luaPool,
+		Tools:   luaAPI.Tools,
+	}
+
+	// Run every init.* script in slug order. Failures abort startup so
+	// admin-script regressions surface immediately rather than leaving
+	// the world in a half-built state.
+	if err := scriptlua.RunInit(ctx, luaPool, scripts, func(slug string, err error) {
+		if err != nil {
+			logger.Error("init script failed", "script", slug, "err", err)
+		} else {
+			logger.Info("init script", "script", slug, "status", "ok")
+		}
+	}); err != nil {
+		return fmt.Errorf("run init scripts: %w", err)
+	}
+
+	// MOTD: prefer the value stored via wintermute.system.motd, falling
+	// back to the built-in banner so the engine always has something to
+	// show new sessions.
+	motd := adminAPI.GetMOTD()
+	if motd == "" {
+		motd = defaultMOTD()
+	}
 	handler := session.DefaultHandler(authStore, w, npcReg, logger, motd)
+	handler.Admin = adminBackend
 
 	// wg tracks BOTH the accept-loop goroutines and every per-session
 	// goroutine. On shutdown we Wait on it before letting `defer db.Close()`

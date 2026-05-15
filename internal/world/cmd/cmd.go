@@ -28,6 +28,16 @@ type Handler struct {
 	// NPC is the npc registry, used by admin commands. May be nil
 	// (e.g. in tests where NPC reactivity isn't exercised).
 	NPC NPCReloader
+	// Admin bundles the dependencies the admin @-commands need
+	// (world API, scripts table access, Lua pool, tool registry).
+	// May be nil; affected commands then return OutcomeUnknown so
+	// they stay invisible.
+	Admin *AdminBackend
+
+	// editor, when non-nil, captures every subsequent input line as
+	// script source until a "." terminator closes paste mode. See
+	// cmdEdit and editorLine in admin.go.
+	editor *editorState
 }
 
 // Outcome reports a special command result that the session loop must act
@@ -55,6 +65,13 @@ const (
 func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
 	if h.Presence.IsDetached() {
 		return OutcomeDetached
+	}
+	// @edit paste-mode: lines after `@edit <slug>` are captured here
+	// until a line containing only "." closes the editor and writes
+	// the script. Trimming happens inside editorLine so an empty
+	// content line ("") still becomes part of the script source.
+	if h.editor != nil {
+		return h.editorLine(ctx, line)
 	}
 	line = strings.TrimSpace(line)
 	if line == "" {
@@ -100,6 +117,32 @@ func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
 		outcome = OutcomeContinue
 	case "@npcreload":
 		outcome = h.cmdNPCReload(ctx)
+	case "@create-room":
+		outcome = h.cmdCreateRoom(ctx, rest)
+	case "@dig":
+		outcome = h.cmdDig(ctx, rest)
+	case "@create-door":
+		outcome = h.cmdCreateDoor(ctx, rest)
+	case "@door-msg":
+		outcome = h.cmdDoorMsg(ctx, rest)
+	case "@create-npc":
+		outcome = h.cmdCreateNPC(ctx, rest)
+	case "@persona":
+		outcome = h.cmdPersona(ctx, rest)
+	case "@script":
+		outcome = h.cmdScript(ctx, rest)
+	case "@run":
+		outcome = h.cmdRun(ctx, rest)
+	case "@tools":
+		outcome = h.cmdTools()
+	case "@invoke":
+		outcome = h.cmdInvoke(ctx, rest)
+	case "@reload-scripts":
+		outcome = h.cmdReloadScripts(ctx)
+	case "@boot":
+		outcome = h.cmdBoot(ctx, rest)
+	case "@edit":
+		outcome = h.cmdEdit(rest)
 	default:
 		return OutcomeUnknown
 	}
