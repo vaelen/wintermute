@@ -143,6 +143,8 @@ func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
 		outcome = h.cmdBoot(ctx, rest)
 	case "@edit":
 		outcome = h.cmdEdit(ctx, rest)
+	case "@help":
+		outcome = h.cmdAtHelp()
 	default:
 		return OutcomeUnknown
 	}
@@ -311,7 +313,7 @@ func (h *Handler) cmdNPCReload(ctx context.Context) Outcome {
 }
 
 func (h *Handler) cmdHelp() {
-	_ = h.Presence.Write(strings.Join([]string{
+	lines := []string{
 		"Commands available:",
 		"",
 		"Movement and looking:",
@@ -336,7 +338,57 @@ func (h *Handler) cmdHelp() {
 		"    terminal color on|off | lines vt100|native | echo on|off",
 		"  quit               — disconnect (aliases: logout, disconnect)",
 		"",
-	}, "\r\n"))
+	}
+	lines = append(lines, h.adminHelpLines()...)
+	_ = h.Presence.Write(strings.Join(lines, "\r\n"))
+}
+
+// adminHelpLines returns the access-gated portion of the help output:
+// nothing for ordinary players, the build subset for builders, and the
+// full @-command surface for admins. Returned slice is empty when the
+// caller has no elevated access so callers can append unconditionally.
+func (h *Handler) adminHelpLines() []string {
+	if h.Presence == nil || h.Presence.Account == nil {
+		return nil
+	}
+	lvl := h.Presence.Account.AccessLevel
+	if lvl != auth.AccessAdmin && lvl != auth.AccessBuilder {
+		return nil
+	}
+	out := []string{
+		"World building (admin or builder):",
+		"  @create-room <slug> \"<name>\"           — create a new room",
+		"  @dig <direction> <room-slug>           — create a door pair from here",
+		"  @create-door <slug> <dir> <to-room>    — single one-way door from here",
+		"  @door-msg <slug> leave|arrive \"<tmpl>\" — set door broadcast template",
+		"",
+	}
+	if lvl != auth.AccessAdmin {
+		return out
+	}
+	out = append(out,
+		"NPCs (admin):",
+		"  @create-npc <slug> \"<name>\" \"<persona>\" — spawn an NPC here",
+		"  @persona <npc-slug> \"<persona>\"         — replace an NPC's persona",
+		"  @npcreload                              — re-read npc_config from disk",
+		"",
+		"Scripts and tools (admin):",
+		"  @script <slug>                          — show a stored script's source",
+		"  @edit <slug>                            — open paste-mode editor",
+		"                                            (end with \".\"; cancel with \".abort\")",
+		"  @run <slug>                             — execute a stored script",
+		"  @tools                                  — list registered tools",
+		"  @invoke <tool> [json-args]              — manually invoke a tool",
+		"  @reload-scripts                         — re-run every init.* script",
+		"",
+		"Sessions (admin):",
+		"  @boot <username> [message]              — force-disconnect a user",
+		"",
+		"Help:",
+		"  @help                                   — same as help, listed for discoverability",
+		"",
+	)
+	return out
 }
 
 // showRoom renders the player's current room. Called after `look` with no

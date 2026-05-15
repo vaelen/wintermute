@@ -487,6 +487,19 @@ func normaliseCRLF(s string) string {
 	return strings.ReplaceAll(s, "\n", "\r\n")
 }
 
+// cmdAtHelp is `@help` — gated to admin/builder so it stays invisible
+// to ordinary players (same hiding rule as every other @-command), but
+// the output it produces is identical to the plain `help` command. The
+// alias exists for discoverability: an admin who has just typed an
+// @-command is more likely to guess `@help` than `help`.
+func (h *Handler) cmdAtHelp() Outcome {
+	if outcome, ok := h.requireAdmin(true); !ok {
+		return outcome
+	}
+	h.cmdHelp()
+	return OutcomeContinue
+}
+
 // editorState carries the in-progress paste-mode capture for @edit.
 // While editor is non-nil on the Handler, every input line goes into
 // lines until the user types "." on its own line, at which point the
