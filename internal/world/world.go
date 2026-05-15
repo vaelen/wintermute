@@ -97,6 +97,10 @@ type World struct {
 	heldBy map[ObjectID]map[ObjectID]struct{}
 	// locations[object] mirrors the object_locations row for that object.
 	locations map[ObjectID]Location
+	// doors[id] is the door object with that id, when kind='door'.
+	doors map[ObjectID]*Door
+	// doorBy[from_room][direction] resolves a doorway out of a room.
+	doorBy map[RoomID]map[string]*Door
 	// presences[room] is the set of attached sessions currently in that room.
 	presences map[RoomID]map[ObjectID]*Presence
 	// presencesByID maps an object id to its Presence, when attached.
@@ -148,16 +152,18 @@ func Load(ctx context.Context, db *store.DB, logger *slog.Logger) (*World, error
 		objectAt:      map[RoomID]map[ObjectID]struct{}{},
 		heldBy:        map[ObjectID]map[ObjectID]struct{}{},
 		locations:     map[ObjectID]Location{},
+		doors:         map[ObjectID]*Door{},
+		doorBy:        map[RoomID]map[string]*Door{},
 		presences:     map[RoomID]map[ObjectID]*Presence{},
 		presencesByID: map[ObjectID]*Presence{},
 	}
 	if err := w.loadRooms(ctx); err != nil {
 		return nil, err
 	}
-	if err := w.loadExits(ctx); err != nil {
+	if err := w.loadObjects(ctx); err != nil {
 		return nil, err
 	}
-	if err := w.loadObjects(ctx); err != nil {
+	if err := w.loadDoors(ctx); err != nil {
 		return nil, err
 	}
 	if err := w.loadLocations(ctx); err != nil {
@@ -185,26 +191,63 @@ func (w *World) loadRooms(ctx context.Context) error {
 	return rows.Err()
 }
 
-func (w *World) loadExits(ctx context.Context) error {
+// loadDoors joins doors with their backing object row and populates both
+// the per-id door map and the (from_room, direction) lookup. It also fills
+// each room's Exits map with (direction → to_room) so the renderer (which
+// only needs to display direction codes) does not have to know about the
+// door layer.
+func (w *World) loadDoors(ctx context.Context) error {
 	rows, err := w.db.Read().QueryContext(ctx,
-		`SELECT from_room, direction, to_room FROM exits`)
+		`SELECT o.id, o.slug, o.name,
+		        d.from_room, d.direction, d.to_room,
+		        d.leave_msg, d.arrive_msg
+		   FROM doors d
+		   JOIN objects o ON o.id = d.object_id`)
 	if err != nil {
-		return fmt.Errorf("world: load exits: %w", err)
+		return fmt.Errorf("world: load doors: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var from, to RoomID
-		var dir string
-		if err := rows.Scan(&from, &dir, &to); err != nil {
-			return fmt.Errorf("world: scan exit: %w", err)
+		var dr Door
+		if err := rows.Scan(&dr.ID, &dr.Slug, &dr.Name,
+			&dr.FromRoom, &dr.Direction, &dr.ToRoom,
+			&dr.LeaveMsg, &dr.ArriveMsg); err != nil {
+			return fmt.Errorf("world: scan door: %w", err)
 		}
-		r, ok := w.rooms[from]
-		if !ok {
-			continue
-		}
-		r.Exits[dir] = to
+		d := dr
+		w.indexDoorLocked(&d)
 	}
 	return rows.Err()
+}
+
+// indexDoorLocked installs door into the in-memory indexes and exposes
+// it on the source room's Exits map. Caller must hold w.mu (write lock).
+func (w *World) indexDoorLocked(d *Door) {
+	w.doors[d.ID] = d
+	byDir := w.doorBy[d.FromRoom]
+	if byDir == nil {
+		byDir = map[string]*Door{}
+		w.doorBy[d.FromRoom] = byDir
+	}
+	byDir[d.Direction] = d
+	if r := w.rooms[d.FromRoom]; r != nil {
+		r.Exits[d.Direction] = d.ToRoom
+	}
+}
+
+// unindexDoorLocked removes a door from the in-memory indexes. Caller
+// must hold w.mu (write lock).
+func (w *World) unindexDoorLocked(d *Door) {
+	delete(w.doors, d.ID)
+	if byDir := w.doorBy[d.FromRoom]; byDir != nil {
+		delete(byDir, d.Direction)
+		if len(byDir) == 0 {
+			delete(w.doorBy, d.FromRoom)
+		}
+	}
+	if r := w.rooms[d.FromRoom]; r != nil {
+		delete(r.Exits, d.Direction)
+	}
 }
 
 func (w *World) loadObjects(ctx context.Context) error {

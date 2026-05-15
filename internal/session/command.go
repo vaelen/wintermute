@@ -119,7 +119,7 @@ func (h *Handler) attachToWorld(ctx context.Context, s *Session) *worldcmd.Handl
 			return nil
 		}
 	}
-	return &worldcmd.Handler{World: h.World, Presence: pres, NPC: h.NPC}
+	return &worldcmd.Handler{World: h.World, Presence: pres, NPC: h.NPC, Admin: h.Admin}
 }
 
 func (h *Handler) detachFromWorld(s *Session, reason world.DisconnectReason) {

@@ -26,6 +26,7 @@ type Handler struct {
 	Auth   *auth.Store
 	World  *world.World
 	NPC    worldcmd.NPCReloader
+	Admin  *worldcmd.AdminBackend
 	Logger *slog.Logger
 	MOTD   string
 

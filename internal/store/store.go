@@ -160,6 +160,24 @@ func migrate(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+
+	// Pin a dedicated connection for migrations so PRAGMA foreign_keys
+	// applies to the same connection that runs the transactions. Per
+	// SQLite docs, the recommended pattern for table rewrites (notably
+	// 0009_doors) is to disable foreign keys for the migration, run the
+	// schema changes inside a transaction, verify integrity with
+	// foreign_key_check, then re-enable. Doing this once for the whole
+	// migration loop keeps the runner simple and safe for any future
+	// migration that needs to rebuild a table.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("store: pin migration connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("store: disable foreign keys: %w", err)
+	}
+
 	for _, m := range migs {
 		if applied[m.version] {
 			continue
@@ -169,7 +187,7 @@ func migrate(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 			return fmt.Errorf("store: read %s: %w", m.name, err)
 		}
 		logger.Info("applying migration", "version", m.version, "name", m.name)
-		tx, err := db.BeginTx(ctx, nil)
+		tx, err := conn.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("store: begin %s: %w", m.name, err)
 		}
@@ -187,6 +205,35 @@ func migrate(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("store: commit %s: %w", m.name, err)
 		}
+	}
+
+	rows, err := conn.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return fmt.Errorf("store: foreign_key_check: %w", err)
+	}
+	var violations []string
+	for rows.Next() {
+		var table, parent string
+		var rowid sql.NullInt64
+		var fkid sql.NullInt64
+		if err := rows.Scan(&table, &rowid, &parent, &fkid); err != nil {
+			rows.Close()
+			return fmt.Errorf("store: scan foreign_key_check: %w", err)
+		}
+		violations = append(violations,
+			fmt.Sprintf("%s.rowid=%d references missing %s (fkid=%d)",
+				table, rowid.Int64, parent, fkid.Int64))
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("store: iterate foreign_key_check: %w", err)
+	}
+	rows.Close()
+	if len(violations) > 0 {
+		return fmt.Errorf("store: foreign-key violations after migrations: %v", violations)
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		return fmt.Errorf("store: re-enable foreign keys: %w", err)
 	}
 	return nil
 }
