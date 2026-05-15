@@ -20,10 +20,24 @@ import (
 // init cost in the (rare) overflow case. M8's player-tier pool will be
 // strictly bounded.
 type Pool struct {
-	mu   sync.Mutex
-	free []*lua.LState
-	size int
-	api  *API
+	mu     sync.Mutex
+	free   []*lua.LState
+	size   int
+	api    *API
+	closed bool
+
+	// execMu serializes Lua execution across every VM the pool hands
+	// out. Tool callbacks registered from one script carry a pointer
+	// to that script's VM globals via their Env (gopher-lua Lua
+	// closures, unlike LGFunction Go callbacks, are NOT state-
+	// independent), so running them on a different VM concurrently
+	// with another script on the originating VM is a data race.
+	// Holding execMu around every Run / Invoke makes that race
+	// impossible without resorting to dump+load (which gopher-lua
+	// 1.1.2 does not support — string.dump raises an error).
+	// Coarser than necessary; M7 will revisit when NPC tools demand
+	// real concurrency.
+	execMu sync.Mutex
 }
 
 // PoolConfig is the input for NewPool. Size is the number of warm VMs
@@ -67,7 +81,9 @@ func (p *Pool) Get() *lua.LState {
 
 // Put returns a VM to the pool. The wintermute global is re-bound to a
 // fresh table so any mutation by the previous script is wiped. VMs in
-// excess of the pool's size are closed.
+// excess of the pool's size, or returned after Close, are closed in
+// place rather than re-cached — otherwise a Put racing with shutdown
+// would leak gopher-lua state.
 func (p *Pool) Put(L *lua.LState) {
 	if L == nil {
 		return
@@ -75,19 +91,21 @@ func (p *Pool) Put(L *lua.LState) {
 	p.api.Reset(L)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.free) >= p.size {
+	if p.closed || len(p.free) >= p.size {
 		L.Close()
 		return
 	}
 	p.free = append(p.free, L)
 }
 
-// Close releases every pooled VM. Subsequent Get calls return brand-new
-// VMs; the pool may be reused after Close, but typical lifetime is
-// once-per-process.
+// Close releases every pooled VM. Marks the pool closed so subsequent
+// Put calls close the returned VM rather than re-cache it. Get on a
+// closed pool still returns a fresh VM — typical lifetime is once-per-
+// process and re-opening the pool is not exercised.
 func (p *Pool) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.closed = true
 	for _, L := range p.free {
 		if L != nil {
 			L.Close()

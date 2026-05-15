@@ -29,11 +29,19 @@ type RoomSpec struct {
 // CreateRoom inserts a new room with the given spec. Returns the room's
 // id. ErrSlugInUse is returned if a room with that slug already exists.
 func (w *World) CreateRoom(ctx context.Context, spec RoomSpec) (RoomID, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.createRoomLocked(ctx, spec)
+}
+
+// createRoomLocked is the lock-already-held workhorse for CreateRoom. It
+// is also the path UpsertRoom takes when the slug is new, so the
+// "check-then-insert" sequence stays atomic without a lock release in
+// the middle.
+func (w *World) createRoomLocked(ctx context.Context, spec RoomSpec) (RoomID, error) {
 	if spec.Slug == "" || spec.Name == "" {
 		return 0, fmt.Errorf("world: room slug and name are required")
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	if _, exists := w.roomBy[spec.Slug]; exists {
 		return 0, ErrSlugInUse
 	}
@@ -73,51 +81,55 @@ func (w *World) CreateRoom(ctx context.Context, spec RoomSpec) (RoomID, error) {
 // (descriptive fields updated to spec.Name/spec.Description if non-empty)
 // or (id, true) when a fresh row is inserted. Designed for init.* scripts
 // that should be safe to re-run.
+//
+// Holds w.mu around the DB write to keep the read-then-update sequence
+// atomic against a concurrent DeleteRoom — otherwise a snapshot of the
+// *Room pointer could be mutated after the row had already been removed
+// from the cache, leaving DB and in-memory state out of sync.
 func (w *World) UpsertRoom(ctx context.Context, spec RoomSpec) (RoomID, bool, error) {
 	if spec.Slug == "" {
 		return 0, false, fmt.Errorf("world: room slug required")
 	}
 	w.mu.Lock()
-	if id, exists := w.roomBy[spec.Slug]; exists {
-		room := w.rooms[id]
-		newName := spec.Name
-		newDesc := spec.Description
-		if newName == "" {
-			newName = room.Name
-		}
-		if newDesc == "" {
-			newDesc = room.Description
-		}
-		w.mu.Unlock()
-		if err := w.db.Write(ctx, func(tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx,
-				`UPDATE rooms SET name = ?, description = ? WHERE id = ?`,
-				newName, newDesc, id,
-			)
-			return err
-		}); err != nil {
-			return 0, false, fmt.Errorf("world: update room: %w", err)
-		}
-		w.mu.Lock()
-		room.Name = newName
-		room.Description = newDesc
-		w.mu.Unlock()
-		return id, false, nil
+	defer w.mu.Unlock()
+	id, exists := w.roomBy[spec.Slug]
+	if !exists {
+		newID, err := w.createRoomLocked(ctx, spec)
+		return newID, true, err
 	}
-	w.mu.Unlock()
-	id, err := w.CreateRoom(ctx, spec)
-	return id, true, err
+	room := w.rooms[id]
+	newName := spec.Name
+	newDesc := spec.Description
+	if newName == "" {
+		newName = room.Name
+	}
+	if newDesc == "" {
+		newDesc = room.Description
+	}
+	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`UPDATE rooms SET name = ?, description = ? WHERE id = ?`,
+			newName, newDesc, id,
+		)
+		return err
+	}); err != nil {
+		return 0, false, fmt.Errorf("world: update room: %w", err)
+	}
+	room.Name = newName
+	room.Description = newDesc
+	return id, false, nil
 }
 
 // SetRoomDescription updates the description text of an existing room.
+// Holds w.mu across the DB write to keep the read-then-update sequence
+// atomic against a concurrent DeleteRoom.
 func (w *World) SetRoomDescription(ctx context.Context, id RoomID, desc string) error {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	room, ok := w.rooms[id]
 	if !ok {
-		w.mu.Unlock()
 		return ErrUnknownRoom
 	}
-	w.mu.Unlock()
 	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			`UPDATE rooms SET description = ? WHERE id = ?`, desc, id,
@@ -126,41 +138,36 @@ func (w *World) SetRoomDescription(ctx context.Context, id RoomID, desc string) 
 	}); err != nil {
 		return fmt.Errorf("world: set room description: %w", err)
 	}
-	w.mu.Lock()
 	room.Description = desc
-	w.mu.Unlock()
 	return nil
 }
 
 // DeleteRoom removes the room with the given id. Fails if the room still
 // contains any objects (players, items, NPCs) or originates any doors.
-// Inbound doors are dropped by ON DELETE CASCADE at the SQL level.
+// Inbound doors are dropped by ON DELETE CASCADE at the SQL level. Holds
+// w.mu across the DB write so a concurrent Upsert cannot observe a
+// removed room.
 func (w *World) DeleteRoom(ctx context.Context, id RoomID) error {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	room, ok := w.rooms[id]
 	if !ok {
-		w.mu.Unlock()
 		return ErrUnknownRoom
 	}
 	if len(w.objectAt[id]) > 0 {
-		w.mu.Unlock()
 		return fmt.Errorf("world: room %q still has occupants", room.Slug)
 	}
 	if len(w.doorBy[id]) > 0 {
-		w.mu.Unlock()
 		return fmt.Errorf("world: room %q still has outbound doors", room.Slug)
 	}
-	w.mu.Unlock()
 	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `DELETE FROM rooms WHERE id = ?`, id)
 		return err
 	}); err != nil {
 		return fmt.Errorf("world: delete room: %w", err)
 	}
-	w.mu.Lock()
 	delete(w.rooms, id)
 	delete(w.roomBy, room.Slug)
-	w.mu.Unlock()
 	return nil
 }
 
@@ -190,11 +197,18 @@ const (
 // object's id. The (from_room, direction) pair must be unique. Returns
 // ErrSlugInUse if the slug or (from,direction) collides.
 func (w *World) CreateDoor(ctx context.Context, spec DoorSpec) (ObjectID, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.createDoorLocked(ctx, spec)
+}
+
+// createDoorLocked is the lock-already-held workhorse for CreateDoor.
+// UpsertDoor uses it for the new-slug fall-through so the check-then-
+// insert stays atomic.
+func (w *World) createDoorLocked(ctx context.Context, spec DoorSpec) (ObjectID, error) {
 	if spec.Slug == "" || spec.Direction == "" {
 		return 0, fmt.Errorf("world: door slug and direction are required")
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	if _, exists := w.objBy[spec.Slug]; exists {
 		return 0, ErrSlugInUse
 	}
@@ -272,66 +286,67 @@ func (w *World) CreateDoor(ctx context.Context, spec DoorSpec) (ObjectID, error)
 // updated to the new descriptive fields, or (id, true) for a fresh one.
 // Templates are updated when non-empty; the destination room and
 // direction are NOT modified on upsert — those define the door's
-// identity for routing purposes.
+// identity for routing purposes. Holds w.mu across the DB write to
+// keep the read-then-update sequence atomic against a concurrent
+// DeleteDoor.
 func (w *World) UpsertDoor(ctx context.Context, spec DoorSpec) (ObjectID, bool, error) {
 	if spec.Slug == "" {
 		return 0, false, fmt.Errorf("world: door slug required")
 	}
 	w.mu.Lock()
-	if id, exists := w.objBy[spec.Slug]; exists {
-		obj := w.objects[id]
-		if obj == nil || obj.Kind != KindDoor {
-			w.mu.Unlock()
-			return 0, false, fmt.Errorf("world: slug %q is not a door", spec.Slug)
-		}
-		d := w.doors[id]
-		newLeave := spec.LeaveMsg
-		newArrive := spec.ArriveMsg
-		newName := spec.Name
-		if newLeave == "" {
-			newLeave = d.LeaveMsg
-		}
-		if newArrive == "" {
-			newArrive = d.ArriveMsg
-		}
-		if newName == "" {
-			newName = obj.Name
-		}
-		w.mu.Unlock()
-		if err := w.db.Write(ctx, func(tx *sql.Tx) error {
-			if _, err := tx.ExecContext(ctx,
-				`UPDATE objects SET name = ? WHERE id = ?`, newName, id,
-			); err != nil {
-				return err
-			}
-			_, err := tx.ExecContext(ctx,
-				`UPDATE doors SET leave_msg = ?, arrive_msg = ? WHERE object_id = ?`,
-				newLeave, newArrive, id,
-			)
-			return err
-		}); err != nil {
-			return 0, false, fmt.Errorf("world: update door: %w", err)
-		}
-		w.mu.Lock()
-		obj.Name = newName
-		d.Name = newName
-		d.LeaveMsg = newLeave
-		d.ArriveMsg = newArrive
-		w.mu.Unlock()
-		return id, false, nil
+	defer w.mu.Unlock()
+	id, exists := w.objBy[spec.Slug]
+	if !exists {
+		newID, err := w.createDoorLocked(ctx, spec)
+		return newID, true, err
 	}
-	w.mu.Unlock()
-	id, err := w.CreateDoor(ctx, spec)
-	return id, true, err
+	obj := w.objects[id]
+	if obj == nil || obj.Kind != KindDoor {
+		return 0, false, fmt.Errorf("world: slug %q is not a door", spec.Slug)
+	}
+	d := w.doors[id]
+	newLeave := spec.LeaveMsg
+	newArrive := spec.ArriveMsg
+	newName := spec.Name
+	if newLeave == "" {
+		newLeave = d.LeaveMsg
+	}
+	if newArrive == "" {
+		newArrive = d.ArriveMsg
+	}
+	if newName == "" {
+		newName = obj.Name
+	}
+	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE objects SET name = ? WHERE id = ?`, newName, id,
+		); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx,
+			`UPDATE doors SET leave_msg = ?, arrive_msg = ? WHERE object_id = ?`,
+			newLeave, newArrive, id,
+		)
+		return err
+	}); err != nil {
+		return 0, false, fmt.Errorf("world: update door: %w", err)
+	}
+	obj.Name = newName
+	d.Name = newName
+	d.LeaveMsg = newLeave
+	d.ArriveMsg = newArrive
+	return id, false, nil
 }
 
 // SetDoorMessages updates leave and/or arrive templates. An empty string
-// for either argument leaves the existing template intact.
+// for either argument leaves the existing template intact. Holds w.mu
+// across the DB write so a concurrent DeleteDoor cannot leave the
+// cache writing to an orphaned struct.
 func (w *World) SetDoorMessages(ctx context.Context, id ObjectID, leave, arrive string) error {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	d, ok := w.doors[id]
 	if !ok {
-		w.mu.Unlock()
 		return ErrUnknownObject
 	}
 	newLeave := leave
@@ -342,7 +357,6 @@ func (w *World) SetDoorMessages(ctx context.Context, id ObjectID, leave, arrive 
 	if newArrive == "" {
 		newArrive = d.ArriveMsg
 	}
-	w.mu.Unlock()
 	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			`UPDATE doors SET leave_msg = ?, arrive_msg = ? WHERE object_id = ?`,
@@ -352,23 +366,22 @@ func (w *World) SetDoorMessages(ctx context.Context, id ObjectID, leave, arrive 
 	}); err != nil {
 		return fmt.Errorf("world: set door messages: %w", err)
 	}
-	w.mu.Lock()
 	d.LeaveMsg = newLeave
 	d.ArriveMsg = newArrive
-	w.mu.Unlock()
 	return nil
 }
 
-// DeleteDoor removes the door's object and doors row.
+// DeleteDoor removes the door's object and doors row. Holds w.mu
+// across the DB write so a concurrent Upsert cannot observe a removed
+// door.
 func (w *World) DeleteDoor(ctx context.Context, id ObjectID) error {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	d, ok := w.doors[id]
 	if !ok {
-		w.mu.Unlock()
 		return ErrUnknownObject
 	}
 	obj := w.objects[id]
-	w.mu.Unlock()
 	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
 		// objects ON DELETE CASCADE propagates to doors.
 		_, err := tx.ExecContext(ctx, `DELETE FROM objects WHERE id = ?`, id)
@@ -376,13 +389,11 @@ func (w *World) DeleteDoor(ctx context.Context, id ObjectID) error {
 	}); err != nil {
 		return fmt.Errorf("world: delete door: %w", err)
 	}
-	w.mu.Lock()
 	w.unindexDoorLocked(d)
 	delete(w.objects, id)
 	if obj != nil {
 		delete(w.objBy, obj.Slug)
 	}
-	w.mu.Unlock()
 	return nil
 }
 
@@ -431,14 +442,21 @@ type ObjectSpec struct {
 // CreateObject inserts a new object (and optionally places it). Kind must
 // be one of KindItem or KindNPC; for doors use CreateDoor.
 func (w *World) CreateObject(ctx context.Context, spec ObjectSpec) (ObjectID, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.createObjectLocked(ctx, spec)
+}
+
+// createObjectLocked is the lock-already-held workhorse for CreateObject.
+// UpsertObject uses it for the new-slug fall-through so the check-then-
+// insert stays atomic.
+func (w *World) createObjectLocked(ctx context.Context, spec ObjectSpec) (ObjectID, error) {
 	if spec.Slug == "" || spec.Name == "" {
 		return 0, fmt.Errorf("world: object slug and name are required")
 	}
 	if spec.Kind != KindItem && spec.Kind != KindNPC {
 		return 0, fmt.Errorf("world: invalid kind %q for CreateObject", spec.Kind)
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	if _, exists := w.objBy[spec.Slug]; exists {
 		return 0, ErrSlugInUse
 	}
@@ -496,61 +514,61 @@ func (w *World) CreateObject(ctx context.Context, spec ObjectSpec) (ObjectID, er
 // new descriptive fields, or (id, true) for a fresh one. Descriptive
 // fields (Name, ShortDesc, LongDesc) are updated from spec when non-
 // empty; Kind, InitialRoom, and OwnerID are not modified on upsert.
+// Holds w.mu across the DB write to keep the read-then-update sequence
+// atomic against a concurrent DeleteObject.
 func (w *World) UpsertObject(ctx context.Context, spec ObjectSpec) (ObjectID, bool, error) {
 	if spec.Slug == "" {
 		return 0, false, fmt.Errorf("world: object slug required")
 	}
 	w.mu.Lock()
-	if id, exists := w.objBy[spec.Slug]; exists {
-		obj := w.objects[id]
-		newName := spec.Name
-		newShort := spec.ShortDesc
-		newLong := spec.LongDesc
-		if newName == "" {
-			newName = obj.Name
-		}
-		if newShort == "" {
-			newShort = obj.ShortDesc
-		}
-		if newLong == "" {
-			newLong = obj.LongDesc
-		}
-		w.mu.Unlock()
-		if err := w.db.Write(ctx, func(tx *sql.Tx) error {
-			_, err := tx.ExecContext(ctx,
-				`UPDATE objects SET name = ?, short_desc = ?, long_desc = ? WHERE id = ?`,
-				newName, newShort, newLong, id,
-			)
-			return err
-		}); err != nil {
-			return 0, false, fmt.Errorf("world: update object: %w", err)
-		}
-		w.mu.Lock()
-		obj.Name = newName
-		obj.ShortDesc = newShort
-		obj.LongDesc = newLong
-		w.mu.Unlock()
-		return id, false, nil
+	defer w.mu.Unlock()
+	id, exists := w.objBy[spec.Slug]
+	if !exists {
+		newID, err := w.createObjectLocked(ctx, spec)
+		return newID, true, err
 	}
-	w.mu.Unlock()
-	id, err := w.CreateObject(ctx, spec)
-	return id, true, err
+	obj := w.objects[id]
+	newName := spec.Name
+	newShort := spec.ShortDesc
+	newLong := spec.LongDesc
+	if newName == "" {
+		newName = obj.Name
+	}
+	if newShort == "" {
+		newShort = obj.ShortDesc
+	}
+	if newLong == "" {
+		newLong = obj.LongDesc
+	}
+	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`UPDATE objects SET name = ?, short_desc = ?, long_desc = ? WHERE id = ?`,
+			newName, newShort, newLong, id,
+		)
+		return err
+	}); err != nil {
+		return 0, false, fmt.Errorf("world: update object: %w", err)
+	}
+	obj.Name = newName
+	obj.ShortDesc = newShort
+	obj.LongDesc = newLong
+	return id, false, nil
 }
 
 // MoveObject relocates an object to a different room. Used by admin
 // tooling to move items, NPCs, or players directly (bypassing exits).
+// Holds w.mu across the DB write so the cache mutation stays in sync
+// with the persisted location.
 func (w *World) MoveObject(ctx context.Context, id ObjectID, to RoomID) error {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	if _, ok := w.objects[id]; !ok {
-		w.mu.Unlock()
 		return ErrUnknownObject
 	}
 	if w.rooms[to] == nil {
-		w.mu.Unlock()
 		return ErrUnknownRoom
 	}
 	prev := w.locations[id]
-	w.mu.Unlock()
 	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO object_locations(object_id, room_id, holder_id) VALUES (?, ?, NULL)
@@ -561,7 +579,6 @@ func (w *World) MoveObject(ctx context.Context, id ObjectID, to RoomID) error {
 	}); err != nil {
 		return fmt.Errorf("world: move object: %w", err)
 	}
-	w.mu.Lock()
 	if prev.RoomID != 0 {
 		w.unindexFromRoom(id, prev.RoomID)
 	} else if prev.HolderID != 0 {
@@ -569,36 +586,32 @@ func (w *World) MoveObject(ctx context.Context, id ObjectID, to RoomID) error {
 	}
 	w.indexInRoom(id, to)
 	w.locations[id] = Location{ObjectID: id, RoomID: to}
-	w.mu.Unlock()
 	return nil
 }
 
 // DeleteObject removes an object and its location row. Players (kind
-// 'player') cannot be deleted through this path.
+// 'player') cannot be deleted through this path. Holds w.mu across
+// the DB write so a concurrent Upsert cannot observe a removed object.
 func (w *World) DeleteObject(ctx context.Context, id ObjectID) error {
 	w.mu.Lock()
+	defer w.mu.Unlock()
 	obj, ok := w.objects[id]
 	if !ok {
-		w.mu.Unlock()
 		return ErrUnknownObject
 	}
 	if obj.Kind == KindPlayer {
-		w.mu.Unlock()
 		return fmt.Errorf("world: refusing to delete a player object")
 	}
 	if obj.Kind == KindDoor {
-		w.mu.Unlock()
 		return fmt.Errorf("world: use DeleteDoor for door objects")
 	}
 	loc := w.locations[id]
-	w.mu.Unlock()
 	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `DELETE FROM objects WHERE id = ?`, id)
 		return err
 	}); err != nil {
 		return fmt.Errorf("world: delete object: %w", err)
 	}
-	w.mu.Lock()
 	if loc.RoomID != 0 {
 		w.unindexFromRoom(id, loc.RoomID)
 	}
@@ -608,7 +621,6 @@ func (w *World) DeleteObject(ctx context.Context, id ObjectID) error {
 	delete(w.locations, id)
 	delete(w.objects, id)
 	delete(w.objBy, obj.Slug)
-	w.mu.Unlock()
 	return nil
 }
 
@@ -642,41 +654,33 @@ func (w *World) Broadcast(msg string) {
 // BootByAccount detaches every presence belonging to the given account.
 // Returns the number of presences detached. Used by @boot / forced
 // disconnect.
+//
+// Snapshot semantics: the target set is captured once under a single
+// RLock and that set drives both the optional pre-detach message and
+// the detach loop. Sessions that attach *after* the snapshot are not
+// swept by this call, even if they belong to the same account, so
+// admins issuing @boot do not accidentally disconnect a fresh login
+// that happened to race with the command.
 func (w *World) BootByAccount(accountID int64, msg string) int {
-	if msg != "" {
-		w.mu.RLock()
-		var pending []pendingWrite
-		var targets []ObjectID
-		for id, pr := range w.presencesByID {
-			if pr.Account == nil || pr.Account.ID != accountID {
-				continue
-			}
+	w.mu.RLock()
+	var pending []pendingWrite
+	targets := make([]ObjectID, 0)
+	for id, pr := range w.presencesByID {
+		if pr.Account == nil || pr.Account.ID != accountID {
+			continue
+		}
+		if msg != "" {
 			pending = append(pending, pendingWrite{write: pr.Write, msg: msg, log: pr.Log})
-			targets = append(targets, id)
 		}
-		w.mu.RUnlock()
-		flush(pending)
-		_ = targets // referenced below
+		targets = append(targets, id)
 	}
-	n := 0
-	for {
-		w.mu.RLock()
-		var target ObjectID
-		var found bool
-		for id, pr := range w.presencesByID {
-			if pr.Account != nil && pr.Account.ID == accountID {
-				target = id
-				found = true
-				break
-			}
-		}
-		w.mu.RUnlock()
-		if !found {
-			break
-		}
-		w.Detach(target, DisconnectDropped)
-		n++
+	w.mu.RUnlock()
+	flush(pending)
+	for _, id := range targets {
+		// Detach is idempotent — a no-op if the presence has already
+		// gone away on its own between the snapshot and here.
+		w.Detach(id, DisconnectDropped)
 	}
-	return n
+	return len(targets)
 }
 

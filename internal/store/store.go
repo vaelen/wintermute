@@ -224,6 +224,10 @@ func migrate(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 			fmt.Sprintf("%s.rowid=%d references missing %s (fkid=%d)",
 				table, rowid.Int64, parent, fkid.Int64))
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("store: iterate foreign_key_check: %w", err)
+	}
 	rows.Close()
 	if len(violations) > 0 {
 		return fmt.Errorf("store: foreign-key violations after migrations: %v", violations)

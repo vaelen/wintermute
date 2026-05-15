@@ -143,7 +143,11 @@ func (h *Handler) cmdCreateDoor(ctx context.Context, rest string) Outcome {
 		_ = h.Presence.Write("You float in undefined void.\r\n")
 		return OutcomeContinue
 	}
-	room, _ := h.World.Room(loc.RoomID)
+	room, err := h.World.Room(loc.RoomID)
+	if err != nil {
+		_ = h.Presence.Write("Your current room is missing.\r\n")
+		return OutcomeContinue
+	}
 	if _, err := be.API.CreateDoor(ctx, worldapi.DoorSpec{
 		Slug: slug, FromRoomSlug: room.Slug,
 		Direction: canonicalDirection(dir), ToRoomSlug: toSlug,
@@ -211,7 +215,11 @@ func (h *Handler) cmdCreateNPC(ctx context.Context, rest string) Outcome {
 		_ = h.Presence.Write("You float in undefined void.\r\n")
 		return OutcomeContinue
 	}
-	room, _ := h.World.Room(loc.RoomID)
+	room, err := h.World.Room(loc.RoomID)
+	if err != nil {
+		_ = h.Presence.Write("Your current room is missing.\r\n")
+		return OutcomeContinue
+	}
 	if _, err := be.API.CreateNPC(ctx, worldapi.NPCSpec{
 		Slug: slug, Name: name, Persona: persona,
 		RoomSlug: room.Slug, OwnerID: h.Presence.Account.ID,
@@ -491,7 +499,7 @@ type editorState struct {
 // cmdEdit opens paste-mode for a script slug. The session prompt is
 // replaced by a brief instruction; subsequent lines are captured until
 // a single-dot terminator. ".abort" cancels without saving.
-func (h *Handler) cmdEdit(rest string) Outcome {
+func (h *Handler) cmdEdit(ctx context.Context, rest string) Outcome {
 	if outcome, ok := h.requireAdmin(false); !ok {
 		return outcome
 	}
@@ -508,7 +516,7 @@ func (h *Handler) cmdEdit(rest string) Outcome {
 	// If an existing script lives at slug, seed the editor with its
 	// source. ".abort" still cancels without saving, so the safety net
 	// stays intact.
-	if sc, err := be.Scripts.Get(context.Background(), slug); err == nil {
+	if sc, err := be.Scripts.Get(ctx, slug); err == nil {
 		h.editor.lines = strings.Split(strings.ReplaceAll(sc.Source, "\r\n", "\n"), "\n")
 		// strings.Split on a trailing "\n" produces an empty tail
 		// element; drop it so the user does not see an extra blank

@@ -216,6 +216,69 @@ func TestLuaToolRegisterListInvoke(t *testing.T) {
 	}
 }
 
+// TestLuaToolConcurrentInvokeWithScriptIsSerialized verifies the fix for
+// the cross-VM data race that was flagged on PR #5: a tool callback
+// registered on VM A is invoked from one goroutine while another
+// goroutine runs an unrelated script (which is dispatched onto VM A or
+// some other VM via Pool.Run). gopher-lua Lua closures carry an Env
+// pointer to the originating VM's globals — running them concurrently
+// with mutation on that VM would race. The pool's execMu makes the two
+// paths serialize.
+//
+// The test is best-effort: -race is what would actually catch a
+// regression. The assertion here just makes sure both paths can run
+// without deadlock when interleaved.
+func TestLuaToolConcurrentInvokeWithScriptIsSerialized(t *testing.T) {
+	pool, _ := newTestPool(t)
+	if err := runScript(t, pool, `
+		wintermute.tool.register("ping", function(args)
+			return { ok = true, message = "pong" }
+		end)
+	`); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	reg := pool.api.Tools
+	done := make(chan error, 2)
+	go func() {
+		for i := 0; i < 50; i++ {
+			if err := pool.Run(context.Background(), `local x = 1 + 1`); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	go func() {
+		for i := 0; i < 50; i++ {
+			if _, err := reg.Invoke(context.Background(), pool, "ping", nil); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("concurrent path failed: %v", err)
+		}
+	}
+}
+
+// TestLuaPoolPutAfterCloseDoesNotLeak exercises the close-then-put
+// path that was flagged on PR #5: a VM returned after Close must be
+// closed in place rather than re-cached, otherwise gopher-lua state
+// leaks. We can't assert "no leak" directly from Go-side, but we can
+// verify the pool's cache count stays at zero after the put.
+func TestLuaPoolPutAfterCloseDoesNotLeak(t *testing.T) {
+	pool, _ := newTestPool(t)
+	L := pool.Get()
+	pool.Close()
+	pool.Put(L) // must close L, not append to a closed pool.
+	if got := pool.Stats().Cached; got != 0 {
+		t.Errorf("Cached after close+put = %d, want 0", got)
+	}
+}
+
 func TestLuaToolSchemaValidationRejectsWrongType(t *testing.T) {
 	pool, _ := newTestPool(t)
 	err := runScript(t, pool, `

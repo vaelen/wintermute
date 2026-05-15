@@ -25,10 +25,14 @@ func TestPermissionsColumns(t *testing.T) {
 		}
 	}
 
-	// New rows default to 0.
-	if _, err := d.Read().Exec(
-		`SELECT permissions FROM rooms WHERE slug='lobby' AND permissions = 0`,
-	); err != nil {
-		t.Errorf("lobby.permissions default 0 lookup failed: %v", err)
+	// Existing seed rows pick up the column with its default value.
+	var perms int
+	if err := d.Read().QueryRow(
+		`SELECT permissions FROM rooms WHERE slug='lobby'`,
+	).Scan(&perms); err != nil {
+		t.Errorf("query lobby permissions: %v", err)
+	}
+	if perms != 0 {
+		t.Errorf("lobby.permissions = %d, want 0 (default)", perms)
 	}
 }

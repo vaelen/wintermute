@@ -142,7 +142,7 @@ func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
 	case "@boot":
 		outcome = h.cmdBoot(ctx, rest)
 	case "@edit":
-		outcome = h.cmdEdit(rest)
+		outcome = h.cmdEdit(ctx, rest)
 	default:
 		return OutcomeUnknown
 	}

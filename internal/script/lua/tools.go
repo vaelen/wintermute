@@ -92,11 +92,12 @@ func (r *ToolRegistry) Names() []string {
 // NPC tool returns: {ok=true, message="..."}). Validation is performed
 // against the entry's Schema before invocation.
 //
-// The invocation borrows a VM from pool, runs the callback on it, then
-// returns the VM. This is intentional: the VM the tool was originally
-// registered on may have been returned to the pool and reset by now;
-// gopher-lua's LFunction is portable across states constructed from
-// the same lua.NewState path.
+// Holds Pool.execMu around the whole call so no other Lua activity
+// runs on any of the pool's VMs concurrently. This is needed because
+// the registered callback is a gopher-lua Lua closure carrying an Env
+// pointer to its originating VM's globals — running it on a different
+// borrowed VM while another script mutates the originating VM would
+// be a data race. See the Pool type comment for context.
 func (r *ToolRegistry) Invoke(ctx context.Context, pool *Pool, name string, args map[string]any) (map[string]any, error) {
 	entry := r.Get(name)
 	if entry == nil {
@@ -105,8 +106,13 @@ func (r *ToolRegistry) Invoke(ctx context.Context, pool *Pool, name string, args
 	if err := validateAgainstSchema(args, entry.Schema); err != nil {
 		return nil, fmt.Errorf("wintermute: invalid_argument: %s", err)
 	}
+	pool.execMu.Lock()
+	defer pool.execMu.Unlock()
+
 	L := pool.Get()
 	defer pool.Put(L)
+	L.SetContext(ctx)
+	defer L.RemoveContext()
 
 	luaArgs := goToLua(L, args)
 	L.Push(entry.callback)

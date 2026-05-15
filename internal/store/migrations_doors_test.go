@@ -4,6 +4,8 @@
 package store
 
 import (
+	"context"
+	"database/sql"
 	"testing"
 )
 
@@ -32,19 +34,25 @@ func TestDoorsSchema(t *testing.T) {
 
 func TestObjectsAcceptsDoorKind(t *testing.T) {
 	d := tempDB(t)
+	ctx := context.Background()
 
 	// Inserting an object with kind='door' must succeed (CHECK includes it).
-	_, err := d.Read().Exec(
-		`INSERT INTO objects(slug, name, kind) VALUES ('door-test', 'a test door', 'door')`,
-	)
-	if err != nil {
+	if err := d.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO objects(slug, name, kind) VALUES ('door-test', 'a test door', 'door')`,
+		)
+		return err
+	}); err != nil {
 		t.Fatalf("insert door object: %v", err)
 	}
 
 	// Inserting an unknown kind must still fail.
-	_, err = d.Read().Exec(
-		`INSERT INTO objects(slug, name, kind) VALUES ('bad-kind', 'bad', 'nonsense')`,
-	)
+	err := d.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO objects(slug, name, kind) VALUES ('bad-kind', 'bad', 'nonsense')`,
+		)
+		return err
+	})
 	if err == nil {
 		t.Errorf("unknown kind should be rejected by CHECK constraint")
 	}

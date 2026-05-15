@@ -123,7 +123,14 @@ func (s *ScriptStore) ListInit(ctx context.Context) ([]Script, error) {
 // Run executes a Lua source string against the pool's VMs and returns
 // any error the script raised. Errors are wrapped via luaError so
 // callers see the standard Source=Lua marker.
+//
+// Holds Pool.execMu for the entire run, which means at most one Lua
+// script (or tool invocation) executes at a time across the pool. See
+// the Pool type comment for why this coarse serialization is needed
+// in M5.
 func (p *Pool) Run(ctx context.Context, source string) error {
+	p.execMu.Lock()
+	defer p.execMu.Unlock()
 	L := p.Get()
 	defer p.Put(L)
 	// Honour ctx cancellation for long-running scripts.

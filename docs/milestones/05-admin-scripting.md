@@ -39,16 +39,25 @@ Admins can write and store Lua scripts that create rooms, spawn NPCs, register N
 ```go
 // internal/script/lua/pool.go
 type Pool struct {
-    free chan *lua.LState
-    new  func() *lua.LState
-    size int
+    mu     sync.Mutex
+    free   []*lua.LState   // cached idle VMs, capped at size
+    size   int
+    api    *API
+    closed bool
+    execMu sync.Mutex      // serializes Lua execution across all VMs
 }
 
 func (p *Pool) Get() *lua.LState
 func (p *Pool) Put(L *lua.LState)
+func (p *Pool) Run(ctx context.Context, source string) error
+func (p *Pool) Close()
 ```
 
-Each VM is created with the full admin API pre-loaded as a `wintermute` global table. VMs are pooled and reused; we explicitly *do not* run hostile code in M5, so we don't need to reset VM state aggressively between uses. (M8 will introduce a separate pool with stricter reset rules for player code.)
+Each VM is created with the full admin API pre-loaded as a `wintermute` global table. VMs are pooled and reused; `Pool.Put` re-binds the `wintermute` global on the returning VM (`api.Reset(L)`) before re-caching so a script that overwrote it cannot poison the next user. Other globals are left alone — M5 does not run hostile code, and aggressive whole-state reset would defeat the amortization. (M8 will introduce a separate pool with stricter reset rules for player code.)
+
+`Pool.execMu` is held around every `Run` and around every `ToolRegistry.Invoke`, so at most one Lua callback executes across the entire pool at any moment. The coarseness is deliberate: gopher-lua's Lua closures carry a pointer to their originating VM's globals via `LFunction.Env`, and `string.dump`/`load` (which would let us re-load a tool on a borrowed VM) is not supported by gopher-lua 1.1.2. Running a registered callback on a different VM while another goroutine mutates the originating VM's globals would be a data race; serializing execution makes that impossible without a more invasive rework. M7 will revisit when concurrent NPC tool dispatch becomes a real load.
+
+`Pool.Close` marks the pool closed and drains cached VMs; subsequent `Put` calls close their VM in place rather than re-cache it, so a Put racing with shutdown cannot leak gopher-lua state.
 
 ### World API surface (Lua)
 
@@ -60,8 +69,8 @@ local room = wintermute.room.create({slug="bar", name="The Sprawl Bar", descript
 wintermute.room.set_description(room, "Smoky and dim.")
 wintermute.room.delete(room)
 local r = wintermute.room.find("bar")
-wintermute.exit.create(from_room, "n", to_room)
-wintermute.exit.delete(from_room, "n")
+-- (Room connectivity is established via wintermute.door.* below; M5 has
+-- no separate wintermute.exit.* sub-table because exits are doors.)
 
 -- Objects
 local obj = wintermute.object.create({slug="keycard", name="ICE keycard", kind="item"})
@@ -87,7 +96,8 @@ local npc = wintermute.npc.create({slug="bartender", name="the bartender", room=
                                    persona="...", backend="ollama",
                                    model="llama3.2:3b", gate_model="llama3.2:1b"})
 wintermute.npc.set_persona(npc, "...")
-wintermute.npc.set_tools(npc, {"sell_drink","tell_story"})  -- list of registered tool names
+-- wintermute.npc.set_tools is M7 (autonomous tool dispatch); M5 ships
+-- the tool registry but does not wire NPCs to tool lists yet.
 
 -- Accounts
 wintermute.account.set_level(account, "builder")
