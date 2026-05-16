@@ -4,10 +4,12 @@
 
 Players can send private mail, read and post to shared message boards, and upload/download files via short-lived HTTPS URLs. All metadata is in SQLite; file blobs are content-addressed on disk. BBS-era protocols (X/Y/Z/Kermit) are deferred to M9–M10; this milestone ships the modern path so the features are usable while M9 is being built.
 
+All player-facing mail/board/file commands are reached **inside a terminal engagement** (M5.7) rather than at the world prompt — sitting down at a terminal opens a private command interface, and the commands below run there. Other players in the room see that the engaged player is at the terminal but not the content. The terminal command-table dispatch is set up in M5.7; M6 fleshes out the handlers and the backing services.
+
 ## Dependencies
 
-- M2 (world layer): commands integrate with the session command loop; ACL bits set up in M5 are used.
-- Independent of M3/M4/M5 — could in principle ship right after M2, but in practice will be done after M5 so admin scripts can configure boards.
+- M5.7 (diegetic engagement primitive): the terminal engagement handler hosts every command in this milestone. M5.7 ships these commands as stubs returning `not yet implemented`; M6 replaces the stubs with the real implementations.
+- M2 (world layer): ACL bits set up in M5 are used; the seed world (extended in M5.7 with a lobby terminal) is where these commands first become reachable.
 
 ## Scope
 
@@ -36,18 +38,18 @@ Players can send private mail, read and post to shared message boards, and uploa
 
 ### Mail
 
-Commands:
+Commands (issued inside a terminal engagement; see M5.7):
 
 - `mail` — show inbox: sender, subject, date, unread flag.
 - `mail send <user> "<subject>"` — enters compose mode (same `.`-terminated paste flow as `@edit`).
 - `mail read <id>` — show message body; marks read.
 - `mail delete <id>` — delete from inbox.
 
-A player's unread mail count is shown on login (`You have 3 new messages.`).
+A player's unread mail count is shown on login (`You have 3 new messages.`). The login-time notification is *not* part of an engagement — it's an out-of-band line written at the post-MOTD step.
 
 ### Boards
 
-Commands:
+Commands (issued inside a terminal engagement; see M5.7):
 
 - `bb` — list boards visible to the player (read ACL).
 - `bbread <board> [<id>]` — list posts in board, or read a specific post.
@@ -116,7 +118,9 @@ HTTP routes:
 
 Both routes refuse multiple uses of the same token.
 
-### In-world commands
+### In-engagement commands
+
+Issued inside a terminal engagement (see M5.7):
 
 - `upload "<slug>" [<description>]` — issues an upload token, prints:
   ```
@@ -125,14 +129,14 @@ Both routes refuse multiple uses of the same token.
 
   Example: curl --upload-file <local> https://<public-host>:<port>/upload/<token>
   ```
-  The session continues to be usable; upload completion is signalled to the player via an asynchronous message (`Upload received: "filename.txt" (12.3 KB).`).
+  The terminal stays usable; upload completion is signalled to the player via an asynchronous message (`[terminal] Upload received: "filename.txt" (12.3 KB).`) that is delivered to the player's session whether or not they are still at the terminal. If they have disconnected, it persists for next login.
 - `download <slug>` — checks read ACL on the file, issues a download token, prints the URL.
 
 Both commands also accept a `--noauto` flag (later, when M9 lands ZModem auto-detection) to skip in-band BBS detection. For M6, only the HTTPS path exists.
 
 ## Schema changes
 
-`internal/store/migrations/0009_mail.sql`:
+`internal/store/migrations/0011_mail.sql`:
 
 ```sql
 -- Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
@@ -151,7 +155,7 @@ CREATE TABLE mail (
 CREATE INDEX idx_mail_to_unread ON mail(to_id, read_at);
 ```
 
-`internal/store/migrations/0010_boards.sql`:
+`internal/store/migrations/0012_boards.sql`:
 
 ```sql
 -- Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
@@ -186,7 +190,7 @@ CREATE TABLE board_reads (
 CREATE INDEX idx_board_posts_board_time ON board_posts(board_id, posted_at);
 ```
 
-`internal/store/migrations/0011_files.sql`:
+`internal/store/migrations/0013_files.sql`:
 
 ```sql
 -- Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
@@ -228,13 +232,13 @@ CREATE INDEX idx_file_tokens_expires ON file_tokens(expires_at);
 
 ## Implementation tasks
 
-1. Add migrations 0009–0011.
+1. Add migrations 0011–0013 (mail/boards/files schema).
 2. Implement `internal/mail`: queries, command handlers, paste-mode compose.
 3. Implement `internal/boards`: queries, ACL checks, paste-mode compose, `bbcatchup`.
 4. Implement `internal/files`: blob store on disk, dedup, mime detection, ACL checks, token issuance.
 5. Implement `internal/http` listener with the two routes.
-6. Wire `upload`/`download` in-world commands to issue tokens and print URLs.
-7. Implement the asynchronous "upload complete" notification: when the HTTP handler finalizes the file, it sends a message through the player's session (if still attached); otherwise it just logs.
+6. Replace M5.7's terminal-handler stubs (`mail`, `bb`, `upload`, `download`, …) with real handlers that call into `internal/mail`, `internal/boards`, `internal/files`.
+7. Implement the asynchronous "upload complete" notification: when the HTTP handler finalizes the file, it writes a `[terminal] Upload received…` line to the owner's session via the session writer; persistence for disconnected players uses the existing post-MOTD delivery (same path as unread-mail count).
 8. Implement a periodic janitor goroutine: deletes expired tokens, deletes orphaned blobs (files with no `files` row referencing the hash), runs every N minutes (configurable).
 9. Add `@cleanup-files` admin command that runs the janitor immediately.
 10. Expose `wintermute.board.create/delete`, `wintermute.mail.broadcast`, `wintermute.file.list` to admin Lua.
@@ -245,7 +249,7 @@ CREATE INDEX idx_file_tokens_expires ON file_tokens(expires_at);
     - File hash dedup (uploading same content twice yields one blob).
     - Token expiry and one-shot use.
 13. Integration tests:
-    - End-to-end mail between two sessions.
+    - End-to-end mail between two sessions (each session engages a terminal to send and read).
     - HTTP upload via `httptest` server, then `download`.
     - Concurrent uploads/downloads (no token reuse, no truncated files).
 

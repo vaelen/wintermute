@@ -139,7 +139,7 @@ Owners implicitly have all bits. Admins implicitly have all bits on everything.
 
 ## Schema changes
 
-`internal/store/migrations/0014_acls.sql`:
+`internal/store/migrations/0016_acls.sql`:
 
 ```sql
 -- Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
@@ -160,7 +160,7 @@ CREATE INDEX idx_acls_target  ON acls(target_type, target_id);
 CREATE INDEX idx_acls_account ON acls(account_id);
 ```
 
-`internal/store/migrations/0015_player_scripts.sql`:
+`internal/store/migrations/0017_player_scripts.sql`:
 
 ```sql
 -- Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
