@@ -29,22 +29,29 @@ type NPCBinding struct {
 // The per-NPC mutex (held by internal/npc) serialises concurrent calls;
 // this handler does not impose additional locking.
 type NPCHandler struct {
-	host *Host
-	npc  *NPCBinding
+	host  *Host
+	npc   *NPCBinding
+	close func() // optional callback fired on OnClose
 }
 
-// NewNPCHandler returns a handler ready for the session loop.
-func NewNPCHandler(host *Host, npc *NPCBinding) *NPCHandler {
-	return &NPCHandler{host: host, npc: npc}
+// NewNPCHandler returns a handler ready for the session loop. onClose, if
+// non-nil, is invoked from OnClose for outside-view broadcasts (the
+// engage caller in main.go provides it).
+func NewNPCHandler(host *Host, npc *NPCBinding, onClose func()) *NPCHandler {
+	return &NPCHandler{host: host, npc: npc, close: onClose}
 }
 
 // OnOpen is a no-op. The room-level enter broadcast is the participant's
 // confirmation; an extra prompt would just crowd the screen.
 func (h *NPCHandler) OnOpen(_ *Participant) {}
 
-// OnClose runs when the engagement ends. M4 summarisation will hook in
-// here in a later milestone; M5.7 does nothing.
-func (h *NPCHandler) OnClose(_ *Participant, _ CloseReason) {}
+// OnClose fires the optional close callback (used for outside-view broadcasts).
+// M4 summarisation will hook in here in a later milestone.
+func (h *NPCHandler) OnClose(_ *Participant, _ CloseReason) {
+	if h.close != nil {
+		h.close()
+	}
+}
 
 // Handle sends line to the NPC's LLM. The dispatch is synchronous; the
 // existing per-NPC mutex serialises concurrent NPC calls.

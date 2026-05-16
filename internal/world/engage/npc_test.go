@@ -35,7 +35,7 @@ func TestNPCHandler_dispatchesAndRepliesToParticipant(t *testing.T) {
 		Client:      client,
 		DisplayName: "bartender",
 		Persona:     "You are a gruff bartender.",
-	})
+	}, nil)
 
 	var out strings.Builder
 	p := &Participant{
@@ -62,7 +62,7 @@ func TestNPCHandler_personaIncludesPrivateConversationNote(t *testing.T) {
 		Client:      client,
 		DisplayName: "bartender",
 		Persona:     "Base persona.",
-	})
+	}, nil)
 	p := &Participant{
 		SessionID: "s1", DisplayName: "alice",
 		Write: func(string) error { return nil },
@@ -80,7 +80,7 @@ func TestNPCHandler_personaIncludesPrivateConversationNote(t *testing.T) {
 func TestNPCHandler_emptyLineIgnored(t *testing.T) {
 	client := &fakeNPCClient{reply: "x"}
 	h := NewNPCHandler(&Host{ObjectID: 1, Kind: KindNPC},
-		&NPCBinding{Client: client, DisplayName: "x"})
+		&NPCBinding{Client: client, DisplayName: "x"}, nil)
 	p := &Participant{Write: func(string) error { return nil }}
 	h.Handle(p, "   ")
 	if len(client.calls) != 0 {
@@ -91,7 +91,7 @@ func TestNPCHandler_emptyLineIgnored(t *testing.T) {
 func TestNPCHandler_clientErrorBecomesFallback(t *testing.T) {
 	client := &fakeNPCClient{chatErr: errors.New("boom")}
 	h := NewNPCHandler(&Host{ObjectID: 1, Kind: KindNPC},
-		&NPCBinding{Client: client, DisplayName: "bartender"})
+		&NPCBinding{Client: client, DisplayName: "bartender"}, nil)
 	var out strings.Builder
 	p := &Participant{
 		Write: func(s string) error { out.WriteString(s); return nil },
@@ -104,7 +104,7 @@ func TestNPCHandler_clientErrorBecomesFallback(t *testing.T) {
 
 func TestNPCHandler_nilClientBecomesFallback(t *testing.T) {
 	h := NewNPCHandler(&Host{ObjectID: 1, Kind: KindNPC},
-		&NPCBinding{DisplayName: "ghost"})
+		&NPCBinding{DisplayName: "ghost"}, nil)
 	var out strings.Builder
 	p := &Participant{
 		Write: func(s string) error { out.WriteString(s); return nil },
@@ -112,5 +112,17 @@ func TestNPCHandler_nilClientBecomesFallback(t *testing.T) {
 	h.Handle(p, "hi")
 	if !strings.Contains(out.String(), "stares blankly") {
 		t.Errorf("output = %q; want blank-stare fallback", out.String())
+	}
+}
+
+func TestNPCHandler_onCloseInvoked(t *testing.T) {
+	called := false
+	h := NewNPCHandler(&Host{ObjectID: 1, Kind: KindNPC},
+		&NPCBinding{DisplayName: "x"},
+		func() { called = true })
+	p := &Participant{Write: func(string) error { return nil }}
+	h.OnClose(p, CloseDisconnect)
+	if !called {
+		t.Error("onClose callback was not invoked")
 	}
 }

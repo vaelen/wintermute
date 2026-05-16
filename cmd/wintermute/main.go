@@ -139,10 +139,28 @@ func run(cfgPath string) error {
 	// (normal path), OpenForSession is used so the session's engagement pointer
 	// is set and modal dispatch in commandLoop activates immediately.
 	engageOpen := func(host *engage.Host, presence *world.Presence, sb engage.SessionBinding) error {
+		obj, err := w.Object(host.ObjectID)
+		if err != nil {
+			return fmt.Errorf("engage: lookup host object: %w", err)
+		}
+		hostName := obj.Name
+		displayName := playerNameFor(w, presence.PlayerID)
+
+		// closeBroadcast is passed to the handler and fires on every close
+		// reason (voluntary, movement, forced, disconnect).
+		closeBroadcast := func() {
+			msg := engage.ExpandTemplate(host.ExitMsg, displayName, hostName) + "\r\n"
+			loc, locErr := w.LocationOf(host.ObjectID)
+			if locErr != nil {
+				return
+			}
+			w.BroadcastToRoom(loc.RoomID, 0, msg)
+		}
+
 		var handler engage.Handler
 		switch host.Kind {
 		case engage.KindTerminal:
-			handler = engage.NewTerminalHandler(host)
+			handler = engage.NewTerminalHandler(host, closeBroadcast)
 		case engage.KindNPC:
 			n := npcReg.Get(host.ObjectID)
 			if n == nil {
@@ -152,33 +170,36 @@ func run(cfgPath string) error {
 				Client:      npcChatAdapter{n: n},
 				DisplayName: n.Name,
 				Persona:     n.Persona,
-			})
+			}, closeBroadcast)
 		default:
 			return fmt.Errorf("engage: unsupported kind %q", host.Kind)
 		}
-		displayName := playerNameFor(w, presence.PlayerID)
 		p := &engage.Participant{
 			SessionID:   presence.SessionID,
 			PlayerID:    presence.PlayerID,
 			DisplayName: displayName,
 			Write:       presence.Write,
 		}
-		obj, err := w.Object(host.ObjectID)
-		if err != nil {
-			return fmt.Errorf("engage: lookup host object: %w", err)
-		}
-		// TODO: T14 broadcast open to room (obj available here for name lookup).
-		_ = obj
+		var openErr error
 		if sb == nil {
 			// No session binding (test path or unsupported caller): fall back
 			// to a registry-only open. Modal dispatch in the session loop
 			// will not engage without a binding, but this keeps tests
 			// compilable.
-			_, err = engageReg.Open(host, handler, p)
-			return err
+			_, openErr = engageReg.Open(host, handler, p)
+		} else {
+			_, openErr = engage.OpenForSession(engageReg, sb, host, handler, p)
 		}
-		_, err = engage.OpenForSession(engageReg, sb, host, handler, p)
-		return err
+		if openErr != nil {
+			return openErr
+		}
+		// Enter broadcast — sent after a successful open.
+		enter := engage.ExpandTemplate(host.EnterMsg, displayName, hostName) + "\r\n"
+		loc, locErr := w.LocationOf(host.ObjectID)
+		if locErr == nil {
+			w.BroadcastToRoom(loc.RoomID, 0, enter)
+		}
+		return nil
 	}
 
 	engageBackend := &worldcmd.EngageBackend{

@@ -11,7 +11,7 @@ import (
 func TestTerminalHandler_promptOnOpen(t *testing.T) {
 	var out strings.Builder
 	host := &Host{ObjectID: 1, Kind: KindTerminal, Prompt: "terminal> "}
-	h := NewTerminalHandler(host)
+	h := NewTerminalHandler(host, nil)
 	p := &Participant{
 		SessionID: "s1", PlayerID: 7, DisplayName: "alice",
 		Write: func(s string) error { out.WriteString(s); return nil },
@@ -26,7 +26,7 @@ func TestTerminalHandler_promptDefaults(t *testing.T) {
 	var out strings.Builder
 	// No prompt configured; default applies.
 	host := &Host{ObjectID: 1, Kind: KindTerminal}
-	h := NewTerminalHandler(host)
+	h := NewTerminalHandler(host, nil)
 	p := &Participant{Write: func(s string) error { out.WriteString(s); return nil }}
 	h.OnOpen(p)
 	if !strings.Contains(out.String(), "terminal>") {
@@ -37,7 +37,7 @@ func TestTerminalHandler_promptDefaults(t *testing.T) {
 func TestTerminalHandler_unknownCommand(t *testing.T) {
 	var out strings.Builder
 	host := &Host{ObjectID: 1, Kind: KindTerminal, Prompt: "terminal> "}
-	h := NewTerminalHandler(host)
+	h := NewTerminalHandler(host, nil)
 	p := &Participant{
 		SessionID: "s1",
 		Write:     func(s string) error { out.WriteString(s); return nil },
@@ -51,7 +51,7 @@ func TestTerminalHandler_unknownCommand(t *testing.T) {
 func TestTerminalHandler_stubCommands(t *testing.T) {
 	var out strings.Builder
 	host := &Host{ObjectID: 1, Kind: KindTerminal}
-	h := NewTerminalHandler(host)
+	h := NewTerminalHandler(host, nil)
 	p := &Participant{Write: func(s string) error { out.WriteString(s); return nil }}
 	stubs := []string{"mail", "bb", "bbread", "bbpost", "bbcatchup", "upload", "download"}
 	for _, cmd := range stubs {
@@ -66,7 +66,7 @@ func TestTerminalHandler_stubCommands(t *testing.T) {
 func TestTerminalHandler_helpListsCommands(t *testing.T) {
 	var out strings.Builder
 	host := &Host{ObjectID: 1, Kind: KindTerminal}
-	h := NewTerminalHandler(host)
+	h := NewTerminalHandler(host, nil)
 	p := &Participant{Write: func(s string) error { out.WriteString(s); return nil }}
 	h.Handle(p, "help")
 	got := out.String()
@@ -80,10 +80,21 @@ func TestTerminalHandler_helpListsCommands(t *testing.T) {
 func TestTerminalHandler_emptyLineRedrawsPrompt(t *testing.T) {
 	var out strings.Builder
 	host := &Host{ObjectID: 1, Kind: KindTerminal}
-	h := NewTerminalHandler(host)
+	h := NewTerminalHandler(host, nil)
 	p := &Participant{Write: func(s string) error { out.WriteString(s); return nil }}
 	h.Handle(p, "")
 	if !strings.Contains(out.String(), "terminal>") {
 		t.Errorf("empty-line prompt missing: %q", out.String())
+	}
+}
+
+func TestTerminalHandler_onCloseInvoked(t *testing.T) {
+	called := false
+	h := NewTerminalHandler(&Host{ObjectID: 1, Kind: KindTerminal},
+		func() { called = true })
+	p := &Participant{Write: func(string) error { return nil }}
+	h.OnClose(p, CloseVoluntary)
+	if !called {
+		t.Error("onClose callback was not invoked")
 	}
 }

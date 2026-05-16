@@ -16,12 +16,15 @@ var terminalCommands = []string{
 // In M5.7 every M6 command returns a stub. The prompt is host.Prompt
 // or "terminal> " by default.
 type TerminalHandler struct {
-	host *Host
+	host  *Host
+	close func() // optional callback fired on OnClose
 }
 
-// NewTerminalHandler returns a fresh handler bound to host.
-func NewTerminalHandler(host *Host) *TerminalHandler {
-	return &TerminalHandler{host: host}
+// NewTerminalHandler returns a fresh handler bound to host. onClose, if
+// non-nil, is invoked from OnClose for outside-view broadcasts (the
+// engage caller in main.go provides it).
+func NewTerminalHandler(host *Host, onClose func()) *TerminalHandler {
+	return &TerminalHandler{host: host, close: onClose}
 }
 
 // OnOpen writes the terminal's prompt to the participant.
@@ -29,9 +32,13 @@ func (h *TerminalHandler) OnOpen(p *Participant) {
 	h.writePrompt(p)
 }
 
-// OnClose is a no-op for terminals — the room-level exit broadcast
-// announces departure.
-func (h *TerminalHandler) OnClose(_ *Participant, _ CloseReason) {}
+// OnClose fires the optional close callback (used for outside-view broadcasts)
+// and is otherwise a no-op.
+func (h *TerminalHandler) OnClose(_ *Participant, _ CloseReason) {
+	if h.close != nil {
+		h.close()
+	}
+}
 
 // Handle dispatches a single line of terminal input.
 func (h *TerminalHandler) Handle(p *Participant, line string) {
