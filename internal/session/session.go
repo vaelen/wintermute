@@ -15,6 +15,7 @@ import (
 	"github.com/vaelen/wintermute/internal/auth"
 	wtelnet "github.com/vaelen/wintermute/internal/net/telnet"
 	"github.com/vaelen/wintermute/internal/term"
+	"github.com/vaelen/wintermute/internal/term/readline"
 	"github.com/vaelen/wintermute/internal/world"
 )
 
@@ -46,18 +47,30 @@ type Session struct {
 	// playerID is the world object id of this session's player body, set
 	// after Attach completes.
 	playerID world.ObjectID
+
+	// caps is the post-auto-detect capability snapshot for this session.
+	// Used by readLineEditing to decide whether to engage the in-line
+	// editor. The ANSI bit lives here rather than on the Encoder because
+	// it is decided once at connection time and never reconfigured.
+	caps term.Capabilities
+
+	// history is the per-session in-memory ring buffer used by the
+	// command-loop line editor. nil disables in-line history.
+	history *readline.History
 }
 
 // newSession constructs a Session given an already-accepted connection
 // and the shared dependencies. The handler is expected to attach s.tc
-// before any I/O happens.
-func newSession(conn net.Conn, a *auth.Store, w *world.World, log *slog.Logger) *Session {
+// before any I/O happens. historySize sizes the in-memory line-edit
+// history ring; 0 disables history.
+func newSession(conn net.Conn, a *auth.Store, w *world.World, log *slog.Logger, historySize int) *Session {
 	return &Session{
-		id:    conn.RemoteAddr().String(),
-		conn:  conn,
-		log:   log.With("session", conn.RemoteAddr().String()),
-		auth:  a,
-		world: w,
+		id:      conn.RemoteAddr().String(),
+		conn:    conn,
+		log:     log.With("session", conn.RemoteAddr().String()),
+		auth:    a,
+		world:   w,
+		history: readline.NewHistory(historySize),
 	}
 }
 
@@ -172,6 +185,51 @@ func (s *Session) readLine() (string, error) {
 			line = append(line, b)
 		}
 	}
+}
+
+// readLineEditing reads one edited line. On an ANSI-capable terminal
+// (and only when the encoding can carry CSI bytes and server-side echo
+// is on) this engages the in-line editor; otherwise it falls back to
+// the plain readLine loop so password entry, paste mode, PETSCII
+// sessions, and pre-login phases keep their existing byte-for-byte
+// semantics. ErrInterrupt is translated into an empty line; the caller
+// is expected to print a fresh prompt and continue.
+func (s *Session) readLineEditing() (string, error) {
+	if !s.shouldUseEditor() {
+		return s.readLine()
+	}
+	if s.in == nil {
+		s.in = bufio.NewReader(s.reader())
+	}
+	line, err := readline.ReadLine(s.in, s.writer(), s.caps, s.enc, s.history)
+	if err != nil {
+		if errors.Is(err, readline.ErrInterrupt) {
+			return "", nil
+		}
+		return line, err
+	}
+	return line, nil
+}
+
+// shouldUseEditor reports whether the in-line editor is appropriate for
+// the current session state. The editor requires an ANSI terminal, a
+// configured encoder, server-side echo on (so we know our writes will
+// actually appear on screen), and a non-PETSCII encoding (PETSCII has
+// its own cursor movement bytes incompatible with ANSI CSI).
+func (s *Session) shouldUseEditor() bool {
+	if s.enc == nil {
+		return false
+	}
+	if !s.caps.ANSI {
+		return false
+	}
+	if !s.echoOn() {
+		return false
+	}
+	if s.enc.Capabilities().Encoding == term.EncodingPETSCII {
+		return false
+	}
+	return true
 }
 
 func (s *Session) finishLine(line []byte) string {

@@ -72,6 +72,11 @@ type Capabilities struct {
 	// DECLineDrawing enables substitution of UTF-8 single-line box-drawing
 	// characters with VT100 DEC Special Graphics. Independent of encoding.
 	DECLineDrawing bool
+	// ANSI indicates the terminal understands ANSI CSI sequences for
+	// cursor movement, erase-line, and SGR. Set by AutoDetect from the
+	// press-enter Device Attributes probe. Independent of Color (some
+	// terminals do CSI cursor movement but not color, and vice versa).
+	ANSI bool
 	// TermType is the raw TTYPE value reported by the client, if any.
 	// Informational; the engine does not branch on it past auto-detect.
 	TermType string

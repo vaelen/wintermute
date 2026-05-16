@@ -81,6 +81,43 @@ mode = "nonsense"`), 0o644); err != nil {
 	}
 }
 
+func TestDefaultHistorySize(t *testing.T) {
+	c := Default()
+	if c.Session.HistorySize != 100 {
+		t.Errorf("Default() session.history_size = %d, want 100", c.Session.HistorySize)
+	}
+}
+
+func TestLoadHistorySizeOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wintermute.toml")
+	if err := os.WriteFile(path, []byte(`[session]
+history_size = 0
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Session.HistorySize != 0 {
+		t.Errorf("session.history_size = %d, want 0", c.Session.HistorySize)
+	}
+}
+
+func TestLoadHistorySizeRejectsNegative(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wintermute.toml")
+	if err := os.WriteFile(path, []byte(`[session]
+history_size = -1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatalf("Load: expected error for negative history_size")
+	}
+}
+
 func TestLoadAutocertRequiresHostnames(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wintermute.toml")

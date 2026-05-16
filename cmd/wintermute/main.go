@@ -125,6 +125,7 @@ func run(cfgPath string) error {
 	}
 	handler := session.DefaultHandler(authStore, w, npcReg, logger, motd)
 	handler.Admin = adminBackend
+	handler.HistorySize = cfg.Session.HistorySize
 
 	// wg tracks BOTH the accept-loop goroutines and every per-session
 	// goroutine. On shutdown we Wait on it before letting `defer db.Close()`

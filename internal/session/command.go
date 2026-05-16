@@ -37,7 +37,7 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 		if err := s.writeString("> "); err != nil {
 			return
 		}
-		line, err := s.readLine()
+		line, err := s.readLineEditing()
 		if err != nil && line == "" {
 			return
 		}
@@ -45,6 +45,7 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 		if line == "" {
 			continue
 		}
+		s.history.Add(line)
 
 		switch wh.Dispatch(ctx, line) {
 		case worldcmd.OutcomeQuit:
