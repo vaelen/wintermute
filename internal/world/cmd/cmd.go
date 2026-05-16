@@ -220,6 +220,10 @@ func (h *Handler) cmdMove(ctx context.Context, dir string) Outcome {
 		_ = h.Presence.Write("Go where?\r\n")
 		return OutcomeContinue
 	}
+	// Auto-disengage before moving. Even if the move fails, the player
+	// has stepped away. The handler's OnClose fires the exit broadcast.
+	h.closeEngagementIfAny(engage.CloseMovement)
+
 	if _, err := h.World.Move(ctx, h.Presence, dir); err != nil {
 		if errors.Is(err, world.ErrStalePresence) {
 			return OutcomeDetached
@@ -229,6 +233,16 @@ func (h *Handler) cmdMove(ctx context.Context, dir string) Outcome {
 	}
 	h.showRoom()
 	return OutcomeContinue
+}
+
+// closeEngagementIfAny closes any current engagement for the session
+// owning this handler with the given reason. No-op if there is no
+// active engagement or no SessionBinding configured.
+func (h *Handler) closeEngagementIfAny(reason engage.CloseReason) {
+	if h.Engage == nil || h.Engage.Registry == nil || h.SB == nil {
+		return
+	}
+	engage.CloseForSession(h.Engage.Registry, h.SB, reason)
 }
 
 func (h *Handler) cmdSay(rest string) Outcome {
