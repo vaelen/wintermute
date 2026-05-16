@@ -170,6 +170,7 @@ func startEngageServer(t *testing.T) *testServer {
 	var wg sync.WaitGroup
 
 	w.SetBeforeDeleteObserver(func(id world.ObjectID) {
+		hostCache.Delete(id)
 		eng := engageReg.HostEngagement(id)
 		if eng == nil {
 			return

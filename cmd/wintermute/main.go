@@ -219,6 +219,9 @@ func run(cfgPath string) error {
 	// (which needs w.mu.RLock). The goroutine is tracked in wg so that
 	// shutdown's wg.Wait() cannot return before the broadcast completes.
 	w.SetBeforeDeleteObserver(func(id world.ObjectID) {
+		// Drop the cache entry alongside the DB row (object_engage cascades
+		// from objects). Mirrors the DB+cache pairing in api.ClearEngage.
+		hostCache.Delete(id)
 		eng := engageReg.HostEngagement(id)
 		if eng == nil {
 			return
