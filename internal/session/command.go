@@ -70,19 +70,26 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 		// handler; the meta-command whitelist falls through to the world
 		// parser; disengage verbs close the engagement.
 		if eng := s.Engagement(); eng != nil {
-			if engage.MatchDisengageVerb(line, eng.Host) {
-				if h.EngageRegistry != nil {
-					engage.CloseForSession(h.EngageRegistry, s, engage.CloseVoluntary)
+			// If the registry no longer knows about this engagement, it
+			// was force-closed (e.g. host destroyed). Clear our pointer
+			// and let the world parser handle this line.
+			if h.EngageRegistry != nil && h.EngageRegistry.HostEngagement(eng.Host.ObjectID) != eng {
+				s.SetEngagement(nil)
+			} else {
+				if engage.MatchDisengageVerb(line, eng.Host) {
+					if h.EngageRegistry != nil {
+						engage.CloseForSession(h.EngageRegistry, s, engage.CloseVoluntary)
+					}
+					continue
 				}
-				continue
-			}
-			if !engagementMetaCommand(line, eng) {
-				if p := participantFor(s, eng); p != nil {
-					eng.Handler.Handle(p, line)
+				if !engagementMetaCommand(line, eng) {
+					if p := participantFor(s, eng); p != nil {
+						eng.Handler.Handle(p, line)
+					}
+					continue
 				}
-				continue
+				// fall through to wh.Dispatch
 			}
-			// fall through to wh.Dispatch
 		}
 
 		switch wh.Dispatch(ctx, line) {

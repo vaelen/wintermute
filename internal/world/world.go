@@ -79,6 +79,16 @@ type MoveObserver func(playerID ObjectID, from, to RoomID, direction string)
 // constraints as SayObserver apply.
 type DetachObserver func(playerID ObjectID, roomID RoomID, reason DisconnectReason)
 
+// BeforeDeleteObserver receives a notification immediately before an
+// object is removed from the world. Used by the engage layer to force-
+// close any engagement hosted by the object being destroyed.
+//
+// The observer is invoked SYNCHRONOUSLY while World holds its write
+// lock. Implementations MUST NOT call back into world mutation methods
+// (they would deadlock). For work that needs the world's lock (e.g.
+// broadcasting), spawn a goroutine.
+type BeforeDeleteObserver func(id ObjectID)
+
 // World is the in-memory authoritative view of rooms, objects, and where
 // every object currently is. All mutations go through the store.DB writer
 // goroutine; the in-memory cache is updated optimistically and rolled back
@@ -110,6 +120,7 @@ type World struct {
 	sayObserver    SayObserver
 	moveObserver   MoveObserver
 	detachObserver DetachObserver
+	beforeDelete   BeforeDeleteObserver
 }
 
 // SetSayObserver registers an observer to be notified after each Say
@@ -133,6 +144,17 @@ func (w *World) SetMoveObserver(fn MoveObserver) {
 func (w *World) SetDetachObserver(fn DetachObserver) {
 	w.mu.Lock()
 	w.detachObserver = fn
+	w.mu.Unlock()
+}
+
+// SetBeforeDeleteObserver registers a hook fired right before an object
+// is deleted. Pass nil to clear. The hook fires synchronously while
+// World holds its write lock — implementations must not call back into
+// world mutation methods (deadlock). Spawn a goroutine for any blocking
+// work.
+func (w *World) SetBeforeDeleteObserver(fn BeforeDeleteObserver) {
+	w.mu.Lock()
+	w.beforeDelete = fn
 	w.mu.Unlock()
 }
 

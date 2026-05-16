@@ -202,6 +202,18 @@ func run(cfgPath string) error {
 		return nil
 	}
 
+	// Force-close any live engagement whose host object is being deleted.
+	// The hook fires inside w.mu.Lock, so the close is dispatched to a
+	// goroutine to avoid deadlocking against OnClose's BroadcastToRoom
+	// (which needs w.mu.RLock).
+	w.SetBeforeDeleteObserver(func(id world.ObjectID) {
+		eng := engageReg.HostEngagement(id)
+		if eng == nil {
+			return
+		}
+		go engageReg.Close(eng, engage.CloseForced)
+	})
+
 	engageBackend := &worldcmd.EngageBackend{
 		Registry: engageReg,
 		Hosts:    hostCache,

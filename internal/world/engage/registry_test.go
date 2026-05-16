@@ -110,4 +110,25 @@ func TestParticipantEngagementByPlayer(t *testing.T) {
 	}
 }
 
+func TestForceCloseOnHostDelete_simulated(t *testing.T) {
+	r := NewRegistry()
+	h := &fakeHandler{}
+	eng, err := r.Open(&Host{ObjectID: 5, Kind: KindTerminal}, h,
+		&Participant{SessionID: "s1", PlayerID: 7})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Simulate the BeforeDelete hook firing.
+	r.Close(eng, CloseForced)
+	if h.closes != 1 {
+		t.Errorf("closes = %d, want 1", h.closes)
+	}
+	if h.lastReason != CloseForced {
+		t.Errorf("lastReason = %v, want CloseForced", h.lastReason)
+	}
+	if r.HostEngagement(5) != nil {
+		t.Error("host engagement should be cleared")
+	}
+}
+
 var _ world.ObjectID = world.ObjectID(0) // keep the import "used"
