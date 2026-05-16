@@ -128,6 +128,7 @@ func run(cfgPath string) error {
 	// host cache, and a handler factory that maps host kind to the right
 	// built-in handler.
 	engageReg := engage.NewRegistry()
+	npcReg.SetEngageLookup(engageReg)
 	hostCache := engage.NewHostCache()
 	if err := hostCache.Load(ctx, db); err != nil {
 		return fmt.Errorf("load engage hosts: %w", err)
