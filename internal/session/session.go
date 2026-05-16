@@ -17,6 +17,7 @@ import (
 	"github.com/vaelen/wintermute/internal/term"
 	"github.com/vaelen/wintermute/internal/term/readline"
 	"github.com/vaelen/wintermute/internal/world"
+	"github.com/vaelen/wintermute/internal/world/engage"
 )
 
 // Session represents one connected user across the engine. It owns the
@@ -57,6 +58,12 @@ type Session struct {
 	// history is the per-session in-memory ring buffer used by the
 	// command-loop line editor. nil disables in-line history.
 	history *readline.History
+
+	// engagement is the current modal engagement, or nil. Reads from
+	// other goroutines (e.g. the world's pre-delete hook) must take
+	// engMu.
+	engagement *engage.Engagement
+	engMu      sync.Mutex
 }
 
 // newSession constructs a Session given an already-accepted connection
@@ -302,4 +309,20 @@ func (s *Session) finalize() {
 func (s *Session) close() {
 	s.finalize()
 	_ = s.conn.Close()
+}
+
+// Engagement returns the session's current engagement, or nil. Safe to
+// call from any goroutine.
+func (s *Session) Engagement() *engage.Engagement {
+	s.engMu.Lock()
+	defer s.engMu.Unlock()
+	return s.engagement
+}
+
+// SetEngagement sets the session's current engagement. Called by the
+// engage helpers; not used directly by handlers.
+func (s *Session) SetEngagement(e *engage.Engagement) {
+	s.engMu.Lock()
+	s.engagement = e
+	s.engMu.Unlock()
 }
