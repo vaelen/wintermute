@@ -8,7 +8,7 @@ import "github.com/vaelen/wintermute/internal/world"
 // Host kinds. The string values are persisted in object_engage.kind.
 const (
 	KindTerminal = "terminal"
-	KindNPC      = "npc"
+	KindNPC      = string(world.KindNPC) // must equal world's NPC kind
 	KindCustom   = "custom"
 )
 
