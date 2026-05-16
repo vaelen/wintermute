@@ -9,6 +9,8 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/vaelen/wintermute/internal/term"
@@ -16,11 +18,10 @@ import (
 
 func runReadLine(t *testing.T, input string, hist *History) (string, []byte, error) {
 	t.Helper()
-	caps := term.Capabilities{Encoding: term.EncodingUTF8, ANSI: true}
-	enc := term.Open(caps)
+	enc := term.Open(term.Capabilities{Encoding: term.EncodingUTF8, ANSI: true})
 	br := bufio.NewReader(strings.NewReader(input))
 	var w bytes.Buffer
-	got, err := ReadLine(br, &w, caps, enc, hist)
+	got, err := ReadLine(br, &w, enc, hist, nil)
 	return got, w.Bytes(), err
 }
 
@@ -209,6 +210,52 @@ func TestReadLineEraseToEndOnShrink(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte("\x1B[K")) {
 		t.Errorf("expected erase-to-end CSI in wire bytes: % X", out)
+	}
+}
+
+// countingLocker wraps a sync.Mutex and counts how many times Lock /
+// Unlock are called. Used to verify the editor takes the lock around
+// every emit frame.
+type countingLocker struct {
+	mu     sync.Mutex
+	locks  atomic.Int64
+	maxOut atomic.Int64 // highest concurrent "Locked but not Unlocked" count
+	cur    atomic.Int64
+}
+
+func (c *countingLocker) Lock() {
+	c.mu.Lock()
+	c.locks.Add(1)
+	out := c.cur.Add(1)
+	for {
+		m := c.maxOut.Load()
+		if out <= m || c.maxOut.CompareAndSwap(m, out) {
+			break
+		}
+	}
+}
+
+func (c *countingLocker) Unlock() {
+	c.cur.Add(-1)
+	c.mu.Unlock()
+}
+
+func TestReadLineHoldsLockAroundEmits(t *testing.T) {
+	enc := term.Open(term.Capabilities{Encoding: term.EncodingUTF8, ANSI: true})
+	br := bufio.NewReader(strings.NewReader("abc\r\n"))
+	var w bytes.Buffer
+	var lock countingLocker
+	if _, err := ReadLine(br, &w, enc, nil, &lock); err != nil {
+		t.Fatalf("ReadLine: %v", err)
+	}
+	// "abc\r\n" produces 4 emit frames: three KeyChar redraws + one
+	// KeyEnter. Every frame must take the lock at least once.
+	if got := lock.locks.Load(); got < 4 {
+		t.Errorf("Lock called %d times, want >= 4 (one per emit frame)", got)
+	}
+	// Holding the lock is single-acquire: no nested Lock calls.
+	if got := lock.maxOut.Load(); got != 1 {
+		t.Errorf("max concurrent held-locks = %d, want 1 (no nested Lock)", got)
 	}
 }
 

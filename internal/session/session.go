@@ -201,7 +201,11 @@ func (s *Session) readLineEditing() (string, error) {
 	if s.in == nil {
 		s.in = bufio.NewReader(s.reader())
 	}
-	line, err := readline.ReadLine(s.in, s.writer(), s.caps, s.enc, s.history)
+	// Pass &writeMu so the editor's per-frame emits are serialized
+	// with world broadcasts going through writeString. Without it
+	// the two goroutines would race on enc.inGraphics and interleave
+	// bytes on the wire.
+	line, err := readline.ReadLine(s.in, s.writer(), s.enc, s.history, &s.writeMu)
 	if err != nil {
 		if errors.Is(err, readline.ErrInterrupt) {
 			return "", nil

@@ -25,6 +25,7 @@ func TestAutoDetectDefaults(t *testing.T) {
 			wantWidth: 40,
 			wantColor: false,
 			wantDEC:   false,
+			wantANSI:  false,
 		},
 		{
 			name:      "ANSI capable → UTF-8",
@@ -42,6 +43,7 @@ func TestAutoDetectDefaults(t *testing.T) {
 			wantWidth: 80,
 			wantColor: true,
 			wantDEC:   false,
+			wantANSI:  false,
 		},
 		{
 			name:      "TTYPE c64 → PETSCII",
@@ -50,6 +52,7 @@ func TestAutoDetectDefaults(t *testing.T) {
 			wantWidth: 40,
 			wantColor: true,
 			wantDEC:   false,
+			wantANSI:  false,
 		},
 		{
 			name:      "TTYPE syncterm → CP437",
@@ -58,6 +61,7 @@ func TestAutoDetectDefaults(t *testing.T) {
 			wantWidth: 80,
 			wantColor: true,
 			wantDEC:   false,
+			wantANSI:  false,
 		},
 		{
 			name:       "Telnet + NAWS overrides default size",

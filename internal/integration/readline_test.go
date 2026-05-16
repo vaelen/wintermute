@@ -5,6 +5,8 @@ package integration
 
 import (
 	"bytes"
+	"context"
+	"strings"
 	"testing"
 )
 
@@ -97,5 +99,57 @@ func TestReadlineDumbTerminalUsesSimpleLoop(t *testing.T) {
 	// engaged.
 	if bytes.Contains(out, []byte("\x1B[K")) {
 		t.Errorf("simple loop should not emit \\x1B[K (editor redraw); output:\n% X", out)
+	}
+}
+
+// TestReadlinePasteModeBypassesEditor verifies that when @edit is in
+// paste mode, the in-line editor is disengaged so arrow keys do NOT
+// recall a previous command into the script source. We type a real
+// command first (so history is non-empty), then enter paste mode and
+// send an Up-arrow escape sequence inside the pasted line. With the
+// gate in place the simple readLine drops the ESC byte and the line
+// is saved verbatim; without it, the editor would recall the prior
+// "look" command and either replace the buffer entirely or append it
+// to the script.
+func TestReadlinePasteModeBypassesEditor(t *testing.T) {
+	srv := startAdminServer(t)
+
+	steps := []step{
+		// ANSI-capable, server echo on — the editor will be active for
+		// command-loop lines, which is exactly the precondition we want
+		// to neutralize for the paste-mode segment.
+		{expect: "PRESS ENTER TO BEGIN", send: "\x1B[?1;2c\r\n"},
+		{expect: "ENABLE ECHO", send: "y\r\n"},
+		{expect: "TERMINAL TYPE:", send: "\r\n"},
+		{expect: "Username", send: "new\r\n"},
+		{expect: "Choose a username", send: "pasteboss\r\n"},
+		{expect: "Choose a password", send: "hunter22\r\n"},
+		{expect: "Username", send: "pasteboss\r\n"},
+		{expect: "Password", send: "hunter22\r\n"},
+		{expect: "MOTD", send: ""},
+		// Put a real command in history so a successful Up-arrow recall
+		// would have something distinctive to yank.
+		{expect: ">", send: "look\r\n"},
+		// Enter paste mode.
+		{expect: ">", send: "@edit test.paste-regression\r\n"},
+		// Inside paste mode: send "x = 1" followed by an Up-arrow CSI
+		// sequence, then Enter. The simple readLine drops the ESC and
+		// keeps the trailing "[A" as literal text — the recalled
+		// "look" must not appear.
+		{expect: "End input", send: "x = 1\x1B[A\r\n"},
+		{expect: "", send: ".\r\n"},
+		{expect: "Saved", send: "quit\r\n"},
+	}
+	driveClient(t, srv, steps)
+
+	sc, err := srv.admin.Scripts.Get(context.Background(), "test.paste-regression")
+	if err != nil {
+		t.Fatalf("Scripts.Get: %v", err)
+	}
+	if strings.Contains(sc.Source, "look") {
+		t.Errorf("paste mode recalled history into script source:\n%s", sc.Source)
+	}
+	if !strings.Contains(sc.Source, "x = 1") {
+		t.Errorf("expected literal 'x = 1' in script source, got:\n%s", sc.Source)
 	}
 }

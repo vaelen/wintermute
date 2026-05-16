@@ -37,7 +37,17 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 		if err := s.writeString("> "); err != nil {
 			return
 		}
-		line, err := s.readLineEditing()
+		// Paste mode (@edit) captures every subsequent line as script
+		// source. Falling back to the simple loop keeps arrow keys and
+		// other CSI bytes out of the recall path so the user can't
+		// accidentally yank a previous command into the script.
+		var line string
+		var err error
+		if wh.InPasteMode() {
+			line, err = s.readLine()
+		} else {
+			line, err = s.readLineEditing()
+		}
 		if err != nil && line == "" {
 			return
 		}
@@ -45,7 +55,9 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 		if line == "" {
 			continue
 		}
-		s.history.Add(line)
+		if !wh.InPasteMode() {
+			s.history.Add(line)
+		}
 
 		switch wh.Dispatch(ctx, line) {
 		case worldcmd.OutcomeQuit:

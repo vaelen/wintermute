@@ -10,8 +10,8 @@ package readline
 // currently typing"; cursor in [0, len) indexes a recalled entry, where
 // 0 is the oldest visible entry and len-1 is the newest.
 //
-// The History is single-goroutine (the session's read goroutine). Add /
-// Prev / Next / Reset / Draft are not safe to call concurrently.
+// The History is single-goroutine (the session's read goroutine). Its
+// methods are not safe to call concurrently.
 type History struct {
 	entries []string
 	cap     int

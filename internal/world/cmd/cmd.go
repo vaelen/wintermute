@@ -54,6 +54,15 @@ const (
 	OutcomeDetached
 )
 
+// InPasteMode reports whether the handler is currently capturing input
+// lines into the @edit paste-mode buffer. Session-level callers use
+// this to skip the in-line line editor while paste mode is active —
+// arrow keys must reach the script source as literal bytes (or be
+// dropped), not be interpreted as history recall.
+func (h *Handler) InPasteMode() bool {
+	return h != nil && h.editor != nil
+}
+
 // Dispatch parses a single input line and runs the corresponding command.
 // It returns OutcomeUnknown when the command name is not recognized — the
 // caller decides whether to print an error or fall through to a different

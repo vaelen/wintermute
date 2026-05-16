@@ -117,6 +117,26 @@ func TestReadEventUnknownCSIDiscarded(t *testing.T) {
 	}
 }
 
+func TestReadEventOverflowingCSIDrainsThroughTerminator(t *testing.T) {
+	// A CSI parameter string longer than the defensive cap (32 bytes)
+	// must still consume the terminating byte before returning
+	// KeyUnknown. Otherwise the next readEvent would read the
+	// terminator (an ASCII letter like 'A') as a printable KeyChar
+	// and inject a spurious character into the user's buffer.
+	overflow := strings.Repeat("1;", 40) // 80 bytes of params, then 'A'
+	input := "\x1B[" + overflow + "Ax"
+	evs := eventsFrom(t, input, nil)
+	if len(evs) != 2 {
+		t.Fatalf("got %d events, want 2: %+v", len(evs), evs)
+	}
+	if evs[0].Key != KeyUnknown {
+		t.Errorf("first event = %+v, want KeyUnknown", evs[0])
+	}
+	if evs[1].Key != KeyChar || evs[1].Rune != 'x' {
+		t.Errorf("second event = %+v, want KeyChar 'x' (the 'A' terminator must have been drained)", evs[1])
+	}
+}
+
 func TestReadEventASCIIChars(t *testing.T) {
 	evs := eventsFrom(t, "ab!~", nil)
 	wantRunes := []rune{'a', 'b', '!', '~'}

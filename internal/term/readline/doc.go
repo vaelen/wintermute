@@ -3,9 +3,9 @@
 
 // Package readline provides an in-line editor for sessions whose
 // terminal advertises ANSI CSI support. It owns nothing connection-
-// related: it takes a *bufio.Reader for input, an io.Writer for output,
-// a term.Capabilities and *term.Encoder, and a per-session History
-// ring buffer.
+// related: it takes a *bufio.Reader for input, an io.Writer for
+// output, a *term.Encoder for rune-to-wire conversion, and a
+// per-session History ring buffer.
 //
 // Tier-1 scope (milestone 5.5):
 //

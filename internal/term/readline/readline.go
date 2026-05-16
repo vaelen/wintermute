@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/vaelen/wintermute/internal/term"
 )
@@ -26,8 +27,20 @@ var ErrInterrupt = errors.New("readline: interrupt")
 // returned. On Ctrl-D over an empty buffer, io.EOF is returned.
 //
 // hist may be nil, in which case Up / Down do nothing.
-func ReadLine(in *bufio.Reader, w io.Writer, caps term.Capabilities, enc *term.Encoder, hist *History) (string, error) {
-	ed := &editor{in: in, w: w, caps: caps, enc: enc, hist: hist}
+//
+// lock, if non-nil, is held around each editor "frame" — the encoder
+// + writer interactions for one keystroke. The caller must pass the
+// same lock that serializes any other goroutines writing to w or
+// mutating enc (typically the session's write mutex). With a nil
+// lock the editor is suitable only for single-goroutine use (tests,
+// callers that own the writer exclusively). Note that the lock
+// prevents *byte-level* interleaving between editor frames and
+// foreign writes — it does not prevent a foreign write from
+// printing on top of the editing line and desyncing the editor's
+// cursor model from the screen; Ctrl-L remains the user-visible
+// escape hatch for that.
+func ReadLine(in *bufio.Reader, w io.Writer, enc *term.Encoder, hist *History, lock sync.Locker) (string, error) {
+	ed := &editor{in: in, w: w, enc: enc, hist: hist, lock: lock}
 	return ed.run()
 }
 
@@ -36,19 +49,18 @@ func ReadLine(in *bufio.Reader, w io.Writer, caps term.Capabilities, enc *term.E
 // runes / cursor are the logical content. prevCursor tracks where the
 // physical terminal cursor sits (in columns from the start of the edit
 // area) so we know how many CSI movement bytes to emit when we want to
-// reposition; prevLen records the rune length of the most-recently
-// drawn line so we can size the erase-to-end operation correctly.
+// reposition. Erase-to-end (\x1B[K) is emitted unconditionally after
+// every redraw, so we don't need to remember the previous line length.
 type editor struct {
 	in   *bufio.Reader
 	w    io.Writer
-	caps term.Capabilities
 	enc  *term.Encoder
 	hist *History
+	lock sync.Locker
 
 	runes      []rune
 	cursor     int
 	prevCursor int
-	prevLen    int
 }
 
 func (e *editor) run() (string, error) {
@@ -61,10 +73,13 @@ func (e *editor) run() (string, error) {
 		case KeyEnter:
 			// Park the cursor at end-of-line before the newline so any
 			// post-cursor characters are not skipped over by CRLF.
-			if err := e.moveTo(len(e.runes)); err != nil {
-				return "", err
-			}
-			if _, err := io.WriteString(e.w, "\r\n"); err != nil {
+			if err := e.locked(func() error {
+				if err := e.moveTo(len(e.runes)); err != nil {
+					return err
+				}
+				_, err := io.WriteString(e.w, "\r\n")
+				return err
+			}); err != nil {
 				return "", err
 			}
 			line := string(e.runes)
@@ -74,10 +89,13 @@ func (e *editor) run() (string, error) {
 			return line, nil
 
 		case KeyInterrupt:
-			if err := e.moveTo(len(e.runes)); err != nil {
-				return "", err
-			}
-			if _, err := io.WriteString(e.w, "^C\r\n"); err != nil {
+			if err := e.locked(func() error {
+				if err := e.moveTo(len(e.runes)); err != nil {
+					return err
+				}
+				_, err := io.WriteString(e.w, "^C\r\n")
+				return err
+			}); err != nil {
 				return "", err
 			}
 			if e.hist != nil {
@@ -94,7 +112,7 @@ func (e *editor) run() (string, error) {
 		case KeyChar:
 			e.runes = insertRune(e.runes, e.cursor, ev.Rune)
 			e.cursor++
-			if err := e.redraw(); err != nil {
+			if err := e.locked(e.redraw); err != nil {
 				return "", err
 			}
 
@@ -102,7 +120,7 @@ func (e *editor) run() (string, error) {
 			if e.cursor > 0 {
 				e.runes = append(e.runes[:e.cursor-1], e.runes[e.cursor:]...)
 				e.cursor--
-				if err := e.redraw(); err != nil {
+				if err := e.locked(e.redraw); err != nil {
 					return "", err
 				}
 			}
@@ -110,32 +128,35 @@ func (e *editor) run() (string, error) {
 		case KeyDelete:
 			if e.cursor < len(e.runes) {
 				e.runes = append(e.runes[:e.cursor], e.runes[e.cursor+1:]...)
-				if err := e.redraw(); err != nil {
+				if err := e.locked(e.redraw); err != nil {
 					return "", err
 				}
 			}
 
 		case KeyLeft:
 			if e.cursor > 0 {
-				if err := e.moveTo(e.cursor - 1); err != nil {
+				target := e.cursor - 1
+				if err := e.locked(func() error { return e.moveTo(target) }); err != nil {
 					return "", err
 				}
 			}
 
 		case KeyRight:
 			if e.cursor < len(e.runes) {
-				if err := e.moveTo(e.cursor + 1); err != nil {
+				target := e.cursor + 1
+				if err := e.locked(func() error { return e.moveTo(target) }); err != nil {
 					return "", err
 				}
 			}
 
 		case KeyHome:
-			if err := e.moveTo(0); err != nil {
+			if err := e.locked(func() error { return e.moveTo(0) }); err != nil {
 				return "", err
 			}
 
 		case KeyEnd:
-			if err := e.moveTo(len(e.runes)); err != nil {
+			target := len(e.runes)
+			if err := e.locked(func() error { return e.moveTo(target) }); err != nil {
 				return "", err
 			}
 
@@ -145,7 +166,7 @@ func (e *editor) run() (string, error) {
 			}
 			if line, ok := e.hist.Prev(string(e.runes)); ok {
 				e.replace(line)
-				if err := e.redraw(); err != nil {
+				if err := e.locked(e.redraw); err != nil {
 					return "", err
 				}
 			}
@@ -156,7 +177,7 @@ func (e *editor) run() (string, error) {
 			}
 			if line, ok := e.hist.Next(); ok {
 				e.replace(line)
-				if err := e.redraw(); err != nil {
+				if err := e.locked(e.redraw); err != nil {
 					return "", err
 				}
 			}
@@ -164,7 +185,7 @@ func (e *editor) run() (string, error) {
 		case KeyKillToEnd:
 			if e.cursor < len(e.runes) {
 				e.runes = e.runes[:e.cursor]
-				if err := e.redraw(); err != nil {
+				if err := e.locked(e.redraw); err != nil {
 					return "", err
 				}
 			}
@@ -173,14 +194,14 @@ func (e *editor) run() (string, error) {
 			if e.cursor > 0 {
 				e.runes = append([]rune{}, e.runes[e.cursor:]...)
 				e.cursor = 0
-				if err := e.redraw(); err != nil {
+				if err := e.locked(e.redraw); err != nil {
 					return "", err
 				}
 			}
 
 		case KeyKillWord:
 			if e.killWordLeft() {
-				if err := e.redraw(); err != nil {
+				if err := e.locked(e.redraw); err != nil {
 					return "", err
 				}
 			}
@@ -188,7 +209,7 @@ func (e *editor) run() (string, error) {
 		case KeyClear:
 			// Best-effort redraw: rewrite the line in place. We don't
 			// know the prompt, so we can't fully clear-and-repaint.
-			if err := e.redraw(); err != nil {
+			if err := e.locked(e.redraw); err != nil {
 				return "", err
 			}
 
@@ -196,6 +217,19 @@ func (e *editor) run() (string, error) {
 			// Drop silently.
 		}
 	}
+}
+
+// locked runs fn while holding e.lock, if a lock was provided. The
+// scope of the lock is one "frame": the encoder + writer operations
+// for a single keystroke. Foreign writers (broadcasts going through
+// the session's writeString) wait until the frame completes, so
+// neither encoder state nor wire bytes interleave mid-frame.
+func (e *editor) locked(fn func() error) error {
+	if e.lock != nil {
+		e.lock.Lock()
+		defer e.lock.Unlock()
+	}
+	return fn()
 }
 
 // replace swaps the entire buffer for line and parks the cursor at
@@ -269,7 +303,6 @@ func (e *editor) redraw() error {
 		}
 	}
 	e.prevCursor = e.cursor
-	e.prevLen = len(e.runes)
 	return nil
 }
 

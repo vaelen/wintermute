@@ -97,6 +97,7 @@ func startAdminServer(t *testing.T) *testServer {
 		addr:   ln.Addr().String(),
 		authS:  a,
 		worldW: w,
+		admin:  admin,
 	}
 	srv.close = func() {
 		_ = ln.Close()

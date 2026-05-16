@@ -96,6 +96,13 @@ func readEvent(in *bufio.Reader, enc *term.Encoder) (Event, error) {
 // readEscape consumes the bytes following an ESC. Recognized prefixes:
 // ESC [  → CSI sequence; ESC O → SS3-style cursor key. Anything else
 // becomes KeyUnknown so the editor can discard it.
+//
+// Tier-1 limitation: a bare ESC (with no follow-up byte) blocks here
+// indefinitely because bufio.Reader.ReadByte has no deadline. We have
+// no portable way to distinguish "lone ESC" from "ESC + slow CSI"
+// without a session-level read deadline. The editor does not promise
+// any ESC-as-cancel behavior; users who want to cancel an edit should
+// use Ctrl-C.
 func readEscape(in *bufio.Reader) (Event, error) {
 	b, err := in.ReadByte()
 	if err != nil {
@@ -143,8 +150,20 @@ func readCSI(in *bufio.Reader) (Event, error) {
 		}
 		params = append(params, b)
 		// Defensive cap. Real CSI sequences for cursor / function keys
-		// are short; anything longer is almost certainly noise.
+		// are short; anything longer is almost certainly noise. Drain
+		// through the terminator (a byte in 0x40–0x7E) before giving
+		// up so a stray letter doesn't get re-parsed as a printable
+		// rune by the next readEvent call.
 		if len(params) > 32 {
+			for {
+				b, err := in.ReadByte()
+				if err != nil {
+					return Event{}, err
+				}
+				if b >= 0x40 && b <= 0x7E {
+					break
+				}
+			}
 			return Event{Key: KeyUnknown}, nil
 		}
 	}
