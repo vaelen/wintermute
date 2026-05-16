@@ -10,6 +10,7 @@ import (
 
 	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/world"
+	"github.com/vaelen/wintermute/internal/world/engage"
 	"github.com/vaelen/wintermute/internal/world/render"
 )
 
@@ -18,6 +19,15 @@ import (
 // package (and the LLM/sqlite chain) into the world cmd package.
 type NPCReloader interface {
 	Reload(ctx context.Context) error
+}
+
+// EngageBackend bundles the engage dependencies the world cmd handler
+// needs to dispatch engage verbs and open engagements. One instance is
+// shared across all sessions.
+type EngageBackend struct {
+	Registry *engage.Registry
+	Hosts    *engage.HostCache
+	OpenFn   func(host *engage.Host, presence *world.Presence) error
 }
 
 // Handler binds a Presence to a World. Each session creates one Handler
@@ -33,6 +43,11 @@ type Handler struct {
 	// May be nil; affected commands then return OutcomeUnknown so
 	// they stay invisible.
 	Admin *AdminBackend
+
+	// Engage is the engagement integration. May be nil in tests where
+	// engagement isn't exercised. The OpenFn is what actually constructs
+	// the right handler (terminal vs npc) when an engage verb succeeds.
+	Engage *EngageBackend
 
 	// editor, when non-nil, captures every subsequent input line as
 	// script source until a "." terminator closes paste mode. See
@@ -155,6 +170,9 @@ func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
 	case "@help":
 		outcome = h.cmdAtHelp()
 	default:
+		if out := h.tryEngage(line); out != OutcomeUnknown {
+			return out
+		}
 		return OutcomeUnknown
 	}
 	// Admin-only commands return OutcomeUnknown when the caller lacks
@@ -398,6 +416,79 @@ func (h *Handler) adminHelpLines() []string {
 		"",
 	)
 	return out
+}
+
+// tryEngage attempts to match line as an engage command — either the
+// universal "engage [with] <target>" or a host-specific engage verb for
+// an object in the player's room or inventory. Returns OutcomeContinue
+// on a match (regardless of whether the engagement actually opened —
+// errors are reported to the player and the input is considered
+// consumed). Returns OutcomeUnknown if no verb matched.
+func (h *Handler) tryEngage(line string) Outcome {
+	if h.Engage == nil || h.Engage.OpenFn == nil || h.Engage.Hosts == nil {
+		return OutcomeUnknown
+	}
+	loc, err := h.World.LocationOf(h.Presence.PlayerID)
+	if err != nil {
+		return OutcomeUnknown
+	}
+	candidates := h.Engage.Hosts.FilterRoomAndInventory(
+		loc.RoomID, h.Presence.PlayerID,
+		func(id world.ObjectID) (world.Location, bool) {
+			l, err := h.World.LocationOf(id)
+			return l, err == nil
+		})
+
+	if target, ok := engage.MatchUniversalEngageVerb(line); ok {
+		return h.openByTarget(candidates, target)
+	}
+	if host, _, ok := engage.MatchEngageVerb(line, candidates); ok {
+		return h.openMatchedHost(host)
+	}
+	return OutcomeUnknown
+}
+
+// openByTarget is the universal-verb path: resolve target via the
+// world's name matcher, then open the engagement for that object if
+// it's an engageable candidate.
+func (h *Handler) openByTarget(candidates []*engage.Host, target string) Outcome {
+	obj, err := h.World.FindVisible(h.Presence.PlayerID, target)
+	if err != nil {
+		var amb *world.AmbiguousMatchError
+		if errors.As(err, &amb) {
+			_ = h.Presence.Write(didYouMean(amb.Candidates))
+		} else {
+			_ = h.Presence.Write("Engage with what?\r\n")
+		}
+		return OutcomeContinue
+	}
+	for _, host := range candidates {
+		if host.ObjectID == obj.ID {
+			return h.openMatchedHost(host)
+		}
+	}
+	_ = h.Presence.Write("That isn't something you can engage with.\r\n")
+	return OutcomeContinue
+}
+
+// openMatchedHost calls into the OpenFn and renders any error.
+func (h *Handler) openMatchedHost(host *engage.Host) Outcome {
+	if err := h.Engage.OpenFn(host, h.Presence); err != nil {
+		obj, _ := h.World.Object(host.ObjectID)
+		name := "it"
+		if obj.Name != "" {
+			name = obj.Name
+		}
+		switch {
+		case errors.Is(err, engage.ErrHostBusy):
+			_ = h.Presence.Write(name + " is occupied.\r\n")
+		case errors.Is(err, engage.ErrAlreadyEngaged):
+			_ = h.Presence.Write("You're already engaged.\r\n")
+		default:
+			_ = h.Presence.Write("Engagement failed: " + err.Error() + "\r\n")
+		}
+	}
+	return OutcomeContinue
 }
 
 // showRoom renders the player's current room. Called after `look` with no

@@ -113,6 +113,48 @@ func TestLoadHosts_resolvesTerminalKindDefaults(t *testing.T) {
 	}
 }
 
+func TestHostCache_loadGetPutDelete(t *testing.T) {
+	db := newTestDB(t)
+	c := engage.NewHostCache()
+	if err := c.Load(context.Background(), db); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// At least the seed terminal and any seed NPCs should appear.
+	var anyID world.ObjectID
+	for _, h := range engageHosts(t, db) {
+		if h.Kind == engage.KindTerminal {
+			anyID = h.ObjectID
+			break
+		}
+	}
+	if anyID == 0 {
+		t.Fatal("no terminal in seed")
+	}
+	got := c.Get(anyID)
+	if got == nil || got.Kind != engage.KindTerminal {
+		t.Errorf("Get(%d) = %v, want terminal", anyID, got)
+	}
+	// Put: replace with a custom host
+	c.Put(&engage.Host{ObjectID: anyID, Kind: engage.KindCustom, Prompt: "x"})
+	if got := c.Get(anyID); got == nil || got.Kind != engage.KindCustom {
+		t.Errorf("after Put: Get(%d) = %v, want custom", anyID, got)
+	}
+	c.Delete(anyID)
+	if got := c.Get(anyID); got != nil {
+		t.Errorf("after Delete: Get(%d) = %v, want nil", anyID, got)
+	}
+}
+
+// engageHosts is a small shortcut that re-runs LoadHosts for test data.
+func engageHosts(t *testing.T, db *store.DB) []*engage.Host {
+	t.Helper()
+	hosts, err := engage.LoadHosts(context.Background(), db)
+	if err != nil {
+		t.Fatalf("LoadHosts: %v", err)
+	}
+	return hosts
+}
+
 func stringSlicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

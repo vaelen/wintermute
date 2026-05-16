@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
@@ -59,6 +60,78 @@ func LoadHosts(ctx context.Context, db *store.DB) ([]*Host, error) {
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+// HostCache is an in-memory copy of every engage host, indexed by
+// ObjectID. Loaded once at startup; admin Lua's set_engage helper
+// (Task 20) updates the cache atomically alongside the DB write.
+type HostCache struct {
+	mu   sync.RWMutex
+	byID map[world.ObjectID]*Host
+}
+
+// NewHostCache returns an empty cache.
+func NewHostCache() *HostCache {
+	return &HostCache{byID: make(map[world.ObjectID]*Host)}
+}
+
+// Load replaces the cache contents with the result of LoadHosts.
+func (c *HostCache) Load(ctx context.Context, db *store.DB) error {
+	hosts, err := LoadHosts(ctx, db)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.byID = make(map[world.ObjectID]*Host, len(hosts))
+	for _, h := range hosts {
+		c.byID[h.ObjectID] = h
+	}
+	c.mu.Unlock()
+	return nil
+}
+
+// Get returns the host for id, or nil.
+func (c *HostCache) Get(id world.ObjectID) *Host {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.byID[id]
+}
+
+// Put inserts or replaces a host. Used by admin Lua.
+func (c *HostCache) Put(h *Host) {
+	c.mu.Lock()
+	c.byID[h.ObjectID] = h
+	c.mu.Unlock()
+}
+
+// Delete removes a host by ID. Used by admin Lua's clear_engage.
+func (c *HostCache) Delete(id world.ObjectID) {
+	c.mu.Lock()
+	delete(c.byID, id)
+	c.mu.Unlock()
+}
+
+// FilterRoomAndInventory returns hosts located in roomID or held by
+// playerID. The locOf callback resolves each host's current location;
+// hosts whose location lookup returns ok=false are skipped (orphans).
+func (c *HostCache) FilterRoomAndInventory(
+	roomID world.RoomID,
+	playerID world.ObjectID,
+	locOf func(world.ObjectID) (world.Location, bool),
+) []*Host {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var out []*Host
+	for _, h := range c.byID {
+		loc, ok := locOf(h.ObjectID)
+		if !ok {
+			continue
+		}
+		if loc.RoomID == roomID || loc.HolderID == playerID {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 func decodeStrings(s string, dst *[]string) error {
