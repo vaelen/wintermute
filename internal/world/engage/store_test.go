@@ -84,6 +84,35 @@ func TestLoadHosts_resolvesKindDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadHosts_resolvesTerminalKindDefaults(t *testing.T) {
+	db := newTestDB(t)
+	hosts, err := engage.LoadHosts(context.Background(), db)
+	if err != nil {
+		t.Fatalf("LoadHosts: %v", err)
+	}
+	var term *engage.Host
+	for _, h := range hosts {
+		if h.Kind == engage.KindTerminal {
+			term = h
+			break
+		}
+	}
+	if term == nil {
+		t.Fatal("no terminal host found")
+	}
+	wantEngage := []string{"use", "sit at"}
+	if !stringSlicesEqual(term.EngageVerbs, wantEngage) {
+		t.Errorf("terminal EngageVerbs = %v, want %v", term.EngageVerbs, wantEngage)
+	}
+	wantDisengage := []string{"stand up", "step away"}
+	if !stringSlicesEqual(term.DisengageVerbs, wantDisengage) {
+		t.Errorf("terminal DisengageVerbs = %v, want %v", term.DisengageVerbs, wantDisengage)
+	}
+	if term.Prompt != "terminal> " {
+		t.Errorf("terminal Prompt = %q, want %q", term.Prompt, "terminal> ")
+	}
+}
+
 func stringSlicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
