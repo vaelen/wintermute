@@ -68,7 +68,7 @@ type Host struct {
 
 // Participant is a session's seat at an engagement. The Write callback
 // delivers a line to that session only (used by handlers for private
-// output). Log is propagated for structured logging.
+// output).
 type Participant struct {
 	SessionID   string
 	PlayerID    world.ObjectID

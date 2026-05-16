@@ -82,4 +82,9 @@ func TestEngagementHasParticipant(t *testing.T) {
 		t.Errorf("did not expect s2 to be a participant; got %v", eng.Participants)
 	}
 	_ = p2
+
+	eng.Participants = nil
+	if eng.HasParticipant("s1") {
+		t.Error("nil Participants should return false")
+	}
 }
