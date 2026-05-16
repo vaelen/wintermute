@@ -55,3 +55,31 @@ func TestHostHasObjectID(t *testing.T) {
 		t.Errorf("Host.ObjectID = %d, want 42", h.ObjectID)
 	}
 }
+
+type fakeHandler struct {
+	opens      int
+	closes     int
+	lines      []string
+	lastReason CloseReason
+}
+
+func (f *fakeHandler) OnOpen(_ *Participant)                 { f.opens++ }
+func (f *fakeHandler) OnClose(_ *Participant, r CloseReason) { f.closes++; f.lastReason = r }
+func (f *fakeHandler) Handle(_ *Participant, line string)    { f.lines = append(f.lines, line) }
+
+func TestEngagementHasParticipant(t *testing.T) {
+	p1 := &Participant{SessionID: "s1", DisplayName: "alice"}
+	p2 := &Participant{SessionID: "s2", DisplayName: "bob"}
+	eng := &Engagement{
+		Host:         &Host{ObjectID: 1, Kind: KindTerminal},
+		Handler:      &fakeHandler{},
+		Participants: []*Participant{p1},
+	}
+	if !eng.HasParticipant("s1") {
+		t.Error("expected s1 to be a participant")
+	}
+	if eng.HasParticipant("s2") {
+		t.Errorf("did not expect s2 to be a participant; got %v", eng.Participants)
+	}
+	_ = p2
+}

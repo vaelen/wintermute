@@ -65,3 +65,42 @@ type Host struct {
 	Prompt         string // optional override for the in-engagement prompt
 	Policy         Policy
 }
+
+// Participant is a session's seat at an engagement. The Write callback
+// delivers a line to that session only (used by handlers for private
+// output). Log is propagated for structured logging.
+type Participant struct {
+	SessionID   string
+	PlayerID    world.ObjectID
+	DisplayName string
+	Write       func(string) error
+}
+
+// Handler is the per-host behaviour for an engagement. Implementations
+// must be safe for concurrent use across participants when the capacity
+// grows to >1 (M5.7 has capacity 1 only, but the interface is shaped for
+// the future).
+type Handler interface {
+	OnOpen(p *Participant)
+	OnClose(p *Participant, reason CloseReason)
+	Handle(p *Participant, line string)
+}
+
+// Engagement is a live, in-memory interaction. Capacity is 1 in M5.7;
+// the slice shape allows >1 without a type change.
+type Engagement struct {
+	Host         *Host
+	Handler      Handler
+	Participants []*Participant
+}
+
+// HasParticipant reports whether the session is currently in this
+// engagement.
+func (e *Engagement) HasParticipant(sessionID string) bool {
+	for _, p := range e.Participants {
+		if p.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
