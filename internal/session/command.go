@@ -16,9 +16,15 @@ import (
 )
 
 // defaultMetaCommands are world commands that remain available while a
-// session is engaged. Movement commands are NOT whitelisted — attempting
-// to move auto-disengages first (handled by T16).
-var defaultMetaCommands = []string{"look", "l", "who", "help", "?"}
+// session is engaged. Movement commands are included so that wh.Dispatch
+// (which calls cmdMove → closeEngagementIfAny) handles auto-disengage
+// before the move, matching the design in docs/milestones/05.7.
+var defaultMetaCommands = []string{
+	"look", "l", "who", "help", "?",
+	// movement directions — auto-disengage happens inside cmdMove
+	"n", "north", "s", "south", "e", "east", "w", "west",
+	"u", "up", "d", "down", "in", "out", "go",
+}
 
 // commandLoop runs the post-login input loop. The line is first offered to
 // the world command handler (look/move/say/...); anything the world
