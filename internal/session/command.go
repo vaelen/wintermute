@@ -139,10 +139,11 @@ func (h *Handler) attachToWorld(ctx context.Context, s *Session) *worldcmd.Handl
 	s.playerID = playerID
 
 	pres := &world.Presence{
-		PlayerID: playerID,
-		Account:  s.account,
-		Write:    s.writeString,
-		Log:      s.log,
+		PlayerID:  playerID,
+		Account:   s.account,
+		Write:     s.writeString,
+		Log:       s.log,
+		SessionID: s.id,
 	}
 	if _, err := h.World.Attach(pres); err != nil {
 		if err == world.ErrAlreadyAttached {
@@ -158,7 +159,7 @@ func (h *Handler) attachToWorld(ctx context.Context, s *Session) *worldcmd.Handl
 			return nil
 		}
 	}
-	return &worldcmd.Handler{World: h.World, Presence: pres, NPC: h.NPC, Admin: h.Admin}
+	return &worldcmd.Handler{World: h.World, Presence: pres, NPC: h.NPC, Admin: h.Admin, Engage: h.EngageBackend}
 }
 
 func (h *Handler) detachFromWorld(s *Session, reason world.DisconnectReason) {

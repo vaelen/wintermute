@@ -35,6 +35,10 @@ type Handler struct {
 	// for tests; when nil, modal dispatch falls through to the world parser.
 	EngageRegistry *engage.Registry
 
+	// EngageBackend is the per-session worldcmd-level engagement plumbing.
+	// May be nil; the world cmd handler is nil-safe (T9).
+	EngageBackend *worldcmd.EngageBackend
+
 	// Tuning knobs (intentionally exported so tests / config can lower them).
 	TelnetDetectTimeout      time.Duration
 	NegotiationSettleTimeout time.Duration

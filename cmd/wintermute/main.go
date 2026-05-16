@@ -30,6 +30,7 @@ import (
 	"github.com/vaelen/wintermute/internal/world"
 	worldapi "github.com/vaelen/wintermute/internal/world/api"
 	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
+	"github.com/vaelen/wintermute/internal/world/engage"
 )
 
 func main() {
@@ -123,9 +124,68 @@ func run(cfgPath string) error {
 	if motd == "" {
 		motd = defaultMOTD()
 	}
+	// Engagement primitive (M5.7): registry of live engagements, in-memory
+	// host cache, and a handler factory that maps host kind to the right
+	// built-in handler.
+	engageReg := engage.NewRegistry()
+	hostCache := engage.NewHostCache()
+	if err := hostCache.Load(ctx, db); err != nil {
+		return fmt.Errorf("load engage hosts: %w", err)
+	}
+
+	// engageOpen is the OpenFn injected into EngageBackend. It constructs the
+	// right handler for the host kind, looks up the player's display name, and
+	// opens the engagement in the registry. The session-side pointer
+	// (s.engagement) is NOT set here — that requires a session lookup that
+	// arrives in T13. For now, the registry entry is created but the modal
+	// dispatch in commandLoop won't see it until T13 wires OpenForSession.
+	// TODO: T13 should use OpenForSession via session lookup here instead.
+	engageOpen := func(host *engage.Host, presence *world.Presence) error {
+		var handler engage.Handler
+		switch host.Kind {
+		case engage.KindTerminal:
+			handler = engage.NewTerminalHandler(host)
+		case engage.KindNPC:
+			n := npcReg.Get(host.ObjectID)
+			if n == nil {
+				return fmt.Errorf("engage: npc %d not in registry", host.ObjectID)
+			}
+			handler = engage.NewNPCHandler(host, &engage.NPCBinding{
+				Client:      npcChatAdapter{n: n},
+				DisplayName: n.Name,
+				Persona:     n.Persona,
+			})
+		default:
+			return fmt.Errorf("engage: unsupported kind %q", host.Kind)
+		}
+		displayName := playerNameFor(w, presence.PlayerID)
+		p := &engage.Participant{
+			SessionID:   presence.SessionID,
+			PlayerID:    presence.PlayerID,
+			DisplayName: displayName,
+			Write:       presence.Write,
+		}
+		obj, err := w.Object(host.ObjectID)
+		if err != nil {
+			return fmt.Errorf("engage: lookup host object: %w", err)
+		}
+		// TODO: T14 broadcast open to room (obj available here for name lookup).
+		_ = obj
+		_, err = engageReg.Open(host, handler, p)
+		return err
+	}
+
+	engageBackend := &worldcmd.EngageBackend{
+		Registry: engageReg,
+		Hosts:    hostCache,
+		OpenFn:   engageOpen,
+	}
+
 	handler := session.DefaultHandler(authStore, w, npcReg, logger, motd)
 	handler.Admin = adminBackend
 	handler.HistorySize = cfg.Session.HistorySize
+	handler.EngageRegistry = engageReg
+	handler.EngageBackend = engageBackend
 
 	// wg tracks BOTH the accept-loop goroutines and every per-session
 	// goroutine. On shutdown we Wait on it before letting `defer db.Close()`
@@ -308,4 +368,21 @@ func defaultMOTD() string {
 		"│                                               │\r\n" +
 		"│  Type 'help' for a list of commands.          │\r\n" +
 		"└───────────────────────────────────────────────┘\r\n"
+}
+
+// npcChatAdapter wraps an NPC so it satisfies engage.NPCClient.
+type npcChatAdapter struct{ n *npc.NPC }
+
+func (a npcChatAdapter) Chat(ctx context.Context, system, user string) (string, error) {
+	return a.n.EngageChat(ctx, system, user)
+}
+
+// playerNameFor returns the player's display name for engagement rendering.
+// Falls back to "someone" if the object cannot be resolved.
+func playerNameFor(w *world.World, id world.ObjectID) string {
+	obj, err := w.Object(id)
+	if err != nil {
+		return "someone"
+	}
+	return obj.Name
 }
