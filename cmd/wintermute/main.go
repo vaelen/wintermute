@@ -88,11 +88,22 @@ func run(cfgPath string) error {
 	})
 	logger.Info("npc registry loaded")
 
+	// Engagement primitive (M5.7): registry of live engagements, in-memory
+	// host cache, and a handler factory that maps host kind to the right
+	// built-in handler.
+	engageReg := engage.NewRegistry()
+	npcReg.SetEngageLookup(engageReg)
+	hostCache := engage.NewHostCache()
+	if err := hostCache.Load(ctx, db); err != nil {
+		return fmt.Errorf("load engage hosts: %w", err)
+	}
+
 	// Admin scripting layer (M5): world API, Lua VM pool with the
 	// wintermute.* table pre-loaded, tool registry, scripts table access.
 	// Wired into the session handler so admin @-commands can mutate the
 	// world from inside the game.
 	adminAPI := worldapi.New(w, db, authStore, npcReg, logger)
+	adminAPI.Engage = hostCache
 	luaAPI := scriptlua.NewAPI(adminAPI, nil, ctx)
 	luaPool := scriptlua.NewPool(scriptlua.PoolConfig{Size: 4, API: luaAPI})
 	defer luaPool.Close()
@@ -123,15 +134,6 @@ func run(cfgPath string) error {
 	motd := adminAPI.GetMOTD()
 	if motd == "" {
 		motd = defaultMOTD()
-	}
-	// Engagement primitive (M5.7): registry of live engagements, in-memory
-	// host cache, and a handler factory that maps host kind to the right
-	// built-in handler.
-	engageReg := engage.NewRegistry()
-	npcReg.SetEngageLookup(engageReg)
-	hostCache := engage.NewHostCache()
-	if err := hostCache.Load(ctx, db); err != nil {
-		return fmt.Errorf("load engage hosts: %w", err)
 	}
 
 	// engageOpen is the OpenFn injected into EngageBackend. It constructs the

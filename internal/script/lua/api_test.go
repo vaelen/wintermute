@@ -15,6 +15,7 @@ import (
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
 	worldapi "github.com/vaelen/wintermute/internal/world/api"
+	"github.com/vaelen/wintermute/internal/world/engage"
 )
 
 func newTestPool(t *testing.T) (*Pool, *worldapi.API) {
@@ -36,6 +37,34 @@ func newTestPool(t *testing.T) (*Pool, *worldapi.API) {
 	pool := NewPool(PoolConfig{Size: 4, API: api})
 	t.Cleanup(pool.Close)
 	return pool, wapi
+}
+
+// newTestPoolWithEngage is like newTestPool but wires a HostCache into the
+// world API so set_engage and clear_engage work.
+func newTestPoolWithEngage(t *testing.T) (*Pool, *worldapi.API, *engage.HostCache) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "lua-engage.db")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db, err := store.Open(context.Background(), path, logger)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	w, err := world.Load(context.Background(), db, logger)
+	if err != nil {
+		t.Fatalf("world.Load: %v", err)
+	}
+	accts := auth.NewStore(db)
+	wapi := worldapi.New(w, db, accts, nil, logger)
+	hc := engage.NewHostCache()
+	if err := hc.Load(context.Background(), db); err != nil {
+		t.Fatalf("hostCache.Load: %v", err)
+	}
+	wapi.Engage = hc
+	api := NewAPI(wapi, nil, context.Background())
+	pool := NewPool(PoolConfig{Size: 4, API: api})
+	t.Cleanup(pool.Close)
+	return pool, wapi, hc
 }
 
 func runScript(t *testing.T, pool *Pool, src string) error {
@@ -303,4 +332,98 @@ func TestLuaToolSchemaValidationRejectsWrongType(t *testing.T) {
 		map[string]any{"name": 42}); err == nil {
 		t.Errorf("expected error for wrong type")
 	}
+}
+
+func TestLuaSetEngageTerminal(t *testing.T) {
+	pool, wapi, hc := newTestPoolWithEngage(t)
+
+	// Create an object to engage.
+	id, err := wapi.CreateObject(context.Background(), worldapi.ObjectSpec{
+		Slug: "comlink", Name: "Comlink Terminal",
+		Kind:     "item",
+		RoomSlug: "lobby",
+	})
+	if err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+
+	err = runScript(t, pool, `
+		wintermute.object.set_engage("comlink", {
+			kind = "terminal",
+			engage_verbs = {"sit at", "use", "boot up"},
+			disengage_verbs = {"stand up", "log off"},
+			prompt = "comlink> "
+		})
+	`)
+	if err != nil {
+		t.Fatalf("set_engage script: %v", err)
+	}
+
+	h := hc.Get(id)
+	if h == nil {
+		t.Fatal("expected host in cache after Lua set_engage")
+	}
+	if h.Prompt != "comlink> " {
+		t.Errorf("Prompt = %q, want %q", h.Prompt, "comlink> ")
+	}
+	wantVerbs := []string{"sit at", "use", "boot up"}
+	if !luaStringSlicesEqual(h.EngageVerbs, wantVerbs) {
+		t.Errorf("EngageVerbs = %v, want %v", h.EngageVerbs, wantVerbs)
+	}
+}
+
+func TestLuaSetEngageMissingKindErrors(t *testing.T) {
+	pool, _, _ := newTestPoolWithEngage(t)
+	err := runScript(t, pool, `
+		wintermute.object.set_engage("lobby", {engage_verbs = {"use"}})
+	`)
+	if err == nil {
+		t.Fatal("expected error for missing kind")
+	}
+	if !strings.Contains(err.Error(), "missing 'kind'") {
+		t.Errorf("error = %q, want mention of 'kind'", err.Error())
+	}
+}
+
+func TestLuaClearEngage(t *testing.T) {
+	pool, wapi, hc := newTestPoolWithEngage(t)
+
+	id, err := wapi.CreateObject(context.Background(), worldapi.ObjectSpec{
+		Slug: "booth", Name: "Data Booth",
+		Kind:     "item",
+		RoomSlug: "lobby",
+	})
+	if err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+
+	if err := runScript(t, pool, `
+		wintermute.object.set_engage("booth", {kind = "terminal"})
+	`); err != nil {
+		t.Fatalf("set_engage: %v", err)
+	}
+	if hc.Get(id) == nil {
+		t.Fatal("expected host in cache before clear_engage")
+	}
+
+	if err := runScript(t, pool, `
+		wintermute.object.clear_engage("booth")
+	`); err != nil {
+		t.Fatalf("clear_engage: %v", err)
+	}
+	if hc.Get(id) != nil {
+		t.Error("expected host absent from cache after clear_engage")
+	}
+}
+
+func luaStringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
