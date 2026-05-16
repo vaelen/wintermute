@@ -5,13 +5,20 @@ package session
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/vaelen/wintermute/internal/term"
 	"github.com/vaelen/wintermute/internal/world"
 	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
+	"github.com/vaelen/wintermute/internal/world/engage"
 )
+
+// defaultMetaCommands are world commands that remain available while a
+// session is engaged. Movement commands are NOT whitelisted — attempting
+// to move auto-disengages first (handled by T16).
+var defaultMetaCommands = []string{"look", "l", "who", "help", "?"}
 
 // commandLoop runs the post-login input loop. The line is first offered to
 // the world command handler (look/move/say/...); anything the world
@@ -57,6 +64,25 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 		}
 		if !wh.InPasteMode() {
 			s.history.Add(line)
+		}
+
+		// Modal dispatch: if engaged, free input goes to the engagement
+		// handler; the meta-command whitelist falls through to the world
+		// parser; disengage verbs close the engagement.
+		if eng := s.Engagement(); eng != nil {
+			if engage.MatchDisengageVerb(line, eng.Host) {
+				if h.EngageRegistry != nil {
+					engage.CloseForSession(h.EngageRegistry, s, engage.CloseVoluntary)
+				}
+				continue
+			}
+			if !engagementMetaCommand(line, eng) {
+				if p := participantFor(s, eng); p != nil {
+					eng.Handler.Handle(p, line)
+				}
+				continue
+			}
+			// fall through to wh.Dispatch
 		}
 
 		switch wh.Dispatch(ctx, line) {
@@ -140,6 +166,29 @@ func (h *Handler) detachFromWorld(s *Session, reason world.DisconnectReason) {
 		return
 	}
 	h.World.Detach(s.playerID, reason)
+}
+
+// engagementMetaCommand reports whether the line's first token should
+// route through the world parser instead of the engagement handler.
+// Universal meta-commands plus the host's disengage verbs qualify.
+func engagementMetaCommand(line string, eng *engage.Engagement) bool {
+	if engage.MatchDisengageVerb(line, eng.Host) {
+		return true
+	}
+	cmd, _ := splitCmd(line)
+	return slices.Contains(defaultMetaCommands, strings.ToLower(cmd))
+}
+
+// participantFor returns the participant entry for s within eng. Returns
+// nil if s is not in eng.Participants (which shouldn't happen during
+// normal flow, since Open always adds the opening session as a participant).
+func participantFor(s *Session, eng *engage.Engagement) *engage.Participant {
+	for _, p := range eng.Participants {
+		if p.SessionID == s.id {
+			return p
+		}
+	}
+	return nil
 }
 
 func splitCmd(line string) (cmd, rest string) {
