@@ -98,3 +98,19 @@ func (r *Registry) ParticipantEngagement(sessionID string) *Engagement {
 	defer r.mu.RUnlock()
 	return r.byPart[sessionID]
 }
+
+// ParticipantEngagementByPlayer returns the engagement whose participant
+// list contains a participant with the given PlayerID, or nil. M5.7 has
+// capacity 1 per host so the result is unambiguous.
+func (r *Registry) ParticipantEngagementByPlayer(pid world.ObjectID) *Engagement {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, e := range r.byHost {
+		for _, p := range e.Participants {
+			if p.PlayerID == pid {
+				return e
+			}
+		}
+	}
+	return nil
+}

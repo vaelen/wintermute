@@ -96,4 +96,18 @@ func TestRegistryCloseIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestParticipantEngagementByPlayer(t *testing.T) {
+	r := NewRegistry()
+	h := &fakeHandler{}
+	_, _ = r.Open(&Host{ObjectID: 1, Kind: KindTerminal}, h,
+		&Participant{SessionID: "s1", PlayerID: 7})
+
+	if got := r.ParticipantEngagementByPlayer(7); got == nil {
+		t.Error("expected engagement for PlayerID 7")
+	}
+	if got := r.ParticipantEngagementByPlayer(99); got != nil {
+		t.Errorf("got engagement for unknown PlayerID 99: %v", got)
+	}
+}
+
 var _ world.ObjectID = world.ObjectID(0) // keep the import "used"

@@ -509,12 +509,34 @@ func (h *Handler) showRoom() {
 		_ = h.Presence.Write("You float in an undefined void.\r\n")
 		return
 	}
+	var engOf func(world.ObjectID) string
+	if h.Engage != nil && h.Engage.Registry != nil {
+		engOf = func(id world.ObjectID) string {
+			// Participant-side first: is this player engaged?
+			if eng := h.Engage.Registry.ParticipantEngagementByPlayer(id); eng != nil {
+				obj, _ := h.World.Object(eng.Host.ObjectID)
+				hostName := "it"
+				if obj.Name != "" {
+					hostName = obj.Name
+				}
+				return engage.ExpandTemplate(eng.Host.PresentMsg, "", hostName)
+			}
+			// Host-side: is this NPC currently hosting an engagement?
+			if eng := h.Engage.Registry.HostEngagement(id); eng != nil {
+				// Use a simple "busy" hint — the participant's name is
+				// already shown elsewhere on the line.
+				return "occupied"
+			}
+			return ""
+		}
+	}
 	view := render.RoomView{
-		Room:    room,
-		Self:    h.Presence.PlayerID,
-		Players: h.World.PlayersInRoom(loc.RoomID),
-		NPCs:    h.World.NPCsInRoom(loc.RoomID),
-		Items:   h.World.ItemsInRoom(loc.RoomID),
+		Room:         room,
+		Self:         h.Presence.PlayerID,
+		Players:      h.World.PlayersInRoom(loc.RoomID),
+		NPCs:         h.World.NPCsInRoom(loc.RoomID),
+		Items:        h.World.ItemsInRoom(loc.RoomID),
+		EngagementOf: engOf,
 	}
 	_ = h.Presence.Write(render.Room(view))
 }
