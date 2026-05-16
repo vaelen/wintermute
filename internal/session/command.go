@@ -173,6 +173,12 @@ func (h *Handler) detachFromWorld(s *Session, reason world.DisconnectReason) {
 	if h.World == nil || s.playerID == 0 {
 		return
 	}
+	// Close any active engagement first so the OnClose handler runs
+	// before the player is removed from the room — otherwise the
+	// exit broadcast would have no audience.
+	if h.EngageRegistry != nil {
+		engage.CloseForSession(h.EngageRegistry, s, engage.CloseDisconnect)
+	}
 	h.World.Detach(s.playerID, reason)
 }
 
