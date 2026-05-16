@@ -172,7 +172,7 @@ A daily job runs `UPDATE npc_memories SET salience = salience * 0.95;`. Memories
 
 ## Schema changes
 
-`internal/store/migrations/0012_budgets.sql`:
+`internal/store/migrations/0014_budgets.sql`:
 
 ```sql
 -- Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
@@ -192,7 +192,7 @@ CREATE TABLE npc_budgets (
 );
 ```
 
-`internal/store/migrations/0013_goals.sql`:
+`internal/store/migrations/0015_goals.sql`:
 
 ```sql
 -- Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>

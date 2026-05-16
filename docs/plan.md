@@ -160,7 +160,8 @@ github.com/vaelen/go-zmodem
 | 04 | NPC memory                         | Short-term ring buffer, long-term summary+embedding via `sqlite-vec`               | 03         | M      | not started |
 | 05 | Admin scripting                    | gopher-lua, admin world API, tool registry (NPC tool calls wired in M7)            | 02         | L      | not started |
 | 05.5 | Readline line editing            | In-line editing + per-session history on ANSI terminals; simple loop kept for the rest | 01         | S      | not started |
-| 06 | Mail / boards / HTTPS file transfer | In-world mail, message boards, token-gated upload/download                         | 02         | M      | not started |
+| 05.7 | Diegetic engagement primitive    | Player↔object and player↔NPC private engagements; M3 name-tag fallback becomes engagement-aware | 03, 05 | M | not started |
+| 06 | Mail / boards / HTTPS file transfer | In-world mail, message boards, token-gated upload/download — accessed via a terminal engagement (M5.7) | 05.7  | M      | not started |
 | 07 | Semi-autonomous NPC loop           | Event bus, tick goroutines, two-tier routing, budget enforcement, tool execution   | 04, 05     | L      | not started |
 | 08 | Player-tier scripting              | Sandboxed Lua, instruction/memory budgets, ACL-restricted world API                | 05         | M      | not started |
 | 09 | X/Y/ZModem spinoff libraries       | Three MIT-licensed Go modules, engine integration                                  | 06         | L      | not started |
@@ -171,10 +172,10 @@ github.com/vaelen/go-zmodem
 ```
 01 ── 02 ── 03 ── 04 ──┐
  │     │     │         ├── 07
- │     │     └── 05 ───┘
- │     │           └── 08
- │     └── 06 ──┬── 09
- │              └── 10
+ │     │     └── 05 ───┤
+ │     │           │   └── 05.7 ── 06 ──┬── 09
+ │     │           └── 08                └── 10
+ │     │
  └── 05.5 (independent QoL pass; depends only on 01)
 ```
 
@@ -248,6 +249,7 @@ This is a side project, not a sprint. Expected pacing:
 - M3–M4: 1–2 weeks each (LLM plumbing is fiddly).
 - M5: 2–3 weeks (Lua API surface is large).
 - M5.5: a weekend (small package, isolated from the rest of the engine).
+- M5.7: 1–2 weeks (new world-layer primitive plus parser + M3 integration).
 - M6: 1 week.
 - M7: 2–3 weeks (event bus + budgets + tool invocation is the trickiest milestone).
 - M8: 1–2 weeks.
