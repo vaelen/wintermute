@@ -46,9 +46,9 @@ func (r CloseReason) String() string {
 // The zero value is fully restrictive (nothing visible, nothing audible,
 // not joinable) — explicitly opt in to permissive bits.
 type Policy struct {
-	VisibleActivity bool // open/close lines are broadcast to the room
-	AudibleContent  bool // free input also goes to the room as speech
-	Joinable        bool // non-participants may join via `join`
+	VisibleActivity bool `json:"visibleActivity"` // open/close lines are broadcast to the room
+	AudibleContent  bool `json:"audibleContent"`  // free input also goes to the room as speech
+	Joinable        bool `json:"joinable"`        // non-participants may join via `join`
 }
 
 // Host describes an engageable object: its kind, custom verbs/messages,

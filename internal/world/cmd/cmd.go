@@ -461,8 +461,14 @@ func (h *Handler) tryEngage(line string) Outcome {
 	if target, ok := engage.MatchUniversalEngageVerb(line); ok {
 		return h.openByTarget(candidates, target)
 	}
-	if host, _, ok := engage.MatchEngageVerb(line, candidates); ok {
-		return h.openMatchedHost(host)
+	if matchedHost, target, ok := engage.MatchEngageVerb(line, candidates); ok {
+		// If only one candidate uses this verb, use it directly. Otherwise
+		// resolve the target text via FindVisible (M3 tiered matcher) and
+		// pick the candidate whose ObjectID matches.
+		if countCandidatesWithVerbPrefix(candidates, line) == 1 {
+			return h.openMatchedHost(matchedHost)
+		}
+		return h.openByTarget(candidates, target)
 	}
 	return OutcomeUnknown
 }
@@ -602,6 +608,25 @@ func canonicalDirection(s string) string {
 	default:
 		return strings.ToLower(strings.TrimSpace(s))
 	}
+}
+
+// countCandidatesWithVerbPrefix returns how many hosts in candidates
+// have at least one engage verb that prefix-matches line (case-
+// insensitive, with a trailing space). Used to decide whether a host-
+// verb match is unambiguous.
+func countCandidatesWithVerbPrefix(candidates []*engage.Host, line string) int {
+	lower := strings.ToLower(line)
+	n := 0
+	for _, h := range candidates {
+		for _, v := range h.EngageVerbs {
+			vl := strings.ToLower(v)
+			if strings.HasPrefix(lower, vl) && len(lower) > len(vl) && (lower[len(vl)] == ' ' || lower[len(vl)] == '\t') {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 // didYouMean renders a disambiguation prompt for a list of candidate

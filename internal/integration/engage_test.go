@@ -305,6 +305,50 @@ func TestEngageTerminal_movementAutoDisengages(t *testing.T) {
 	bob.send("quit\r\n")
 }
 
+// TestEngageNPC_brushOffForRoomAddressing verifies that:
+//   - carol can engage the seed bartender via host verb ("talk to bartender");
+//   - the enter broadcast is visible to david;
+//   - carol's private dialogue (NPC reply) does not leak to david;
+//   - david addressing the bartender publicly while it is engaged produces
+//     a brush-off broadcast ("raises a finger to david");
+//   - when carol disengages, david sees the exit broadcast.
+func TestEngageNPC_brushOffForRoomAddressing(t *testing.T) {
+	srv := startEngageServer(t)
+	carol := dialClient(t, srv)
+	david := dialClient(t, srv)
+
+	carol.loginNew("carol", "hunter22")
+	david.loginNew("david", "hunter22")
+	carol.drainFor(300 * time.Millisecond)
+	david.drainFor(300 * time.Millisecond)
+
+	// Carol engages the bartender (seed NPC in lobby).
+	carol.send("talk to bartender\r\n")
+	carol.expect("turns to the bartender", 5*time.Second)
+	david.expect("turns to the bartender", 5*time.Second)
+
+	// Carol speaks; bartender (fake LLM) replies privately.
+	carol.send("hello there\r\n")
+	carol.expect(`bartender says,`, 5*time.Second)
+
+	// Give any stray bytes time to travel, then assert no leak to david.
+	david.drainFor(300 * time.Millisecond)
+	if got := david.unread(); strings.Contains(got, `bartender says,`) {
+		t.Errorf("david saw the private NPC reply: %q", got)
+	}
+
+	// David addresses the bartender publicly — brush-off expected.
+	david.send("say hi bartender\r\n")
+	david.expect("raises a finger to david", 5*time.Second)
+
+	// Carol disengages.
+	carol.send("disengage\r\n")
+	david.expect("turns away from", 5*time.Second)
+
+	carol.send("quit\r\n")
+	david.send("quit\r\n")
+}
+
 // TestEngageTerminal_disconnectClosesEngagement verifies that disconnecting
 // a session closes any open engagement without leaving a dangling host lock
 // (i.e. the terminal can be engaged again after the disconnecting client is gone).

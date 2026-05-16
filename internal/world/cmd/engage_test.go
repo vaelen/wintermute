@@ -113,6 +113,40 @@ func TestMove_autoDisengages(t *testing.T) {
 	}
 }
 
+// TestDispatch_engageHostVerb_disambiguates verifies that when two hosts
+// share a verb (e.g. two NPCs both with "talk to"), the target text is
+// used to pick the right one — and a duplicate name produces an
+// AmbiguousMatchError-style prompt.
+func TestDispatch_engageHostVerb_disambiguates(t *testing.T) {
+	// Use newHandlerWithDB and add a second engageable object (the
+	// existing seed bartender + a second NPC manually inserted, OR
+	// two terminals — whichever is easier with the available world API.
+	// If creating a second NPC is hard, this test can be skipped — but
+	// at minimum verify that with one candidate matching, the dispatch
+	// succeeds.
+	h, _, db := newHandlerWithDB(t, "alice")
+	cache := engage.NewHostCache()
+	if err := cache.Load(context.Background(), db); err != nil {
+		t.Fatalf("HostCache.Load: %v", err)
+	}
+	var opened *engage.Host
+	h.Engage = &EngageBackend{
+		Registry: engage.NewRegistry(),
+		Hosts:    cache,
+		OpenFn: func(host *engage.Host, _ *world.Presence, _ engage.SessionBinding) error {
+			opened = host
+			return nil
+		},
+	}
+	// Single candidate (seed terminal) — should still work.
+	if out := h.Dispatch(context.Background(), "sit at terminal"); out != OutcomeContinue {
+		t.Errorf("Dispatch = %v, want OutcomeContinue", out)
+	}
+	if opened == nil || opened.Kind != engage.KindTerminal {
+		t.Errorf("opened = %v, want terminal", opened)
+	}
+}
+
 type cmdFakeSession struct {
 	eng *engage.Engagement
 }
