@@ -27,7 +27,7 @@ type NPCReloader interface {
 type EngageBackend struct {
 	Registry *engage.Registry
 	Hosts    *engage.HostCache
-	OpenFn   func(host *engage.Host, presence *world.Presence) error
+	OpenFn   func(host *engage.Host, presence *world.Presence, sb engage.SessionBinding) error
 }
 
 // Handler binds a Presence to a World. Each session creates one Handler
@@ -48,6 +48,11 @@ type Handler struct {
 	// engagement isn't exercised. The OpenFn is what actually constructs
 	// the right handler (terminal vs npc) when an engage verb succeeds.
 	Engage *EngageBackend
+
+	// SB is the session-side engagement binding. Optional: when nil,
+	// OpenFn (in main.go) falls back to non-session-aware Open. Tests
+	// without engage wiring leave this nil.
+	SB engage.SessionBinding
 
 	// editor, when non-nil, captures every subsequent input line as
 	// script source until a "." terminator closes paste mode. See
@@ -473,7 +478,7 @@ func (h *Handler) openByTarget(candidates []*engage.Host, target string) Outcome
 
 // openMatchedHost calls into the OpenFn and renders any error.
 func (h *Handler) openMatchedHost(host *engage.Host) Outcome {
-	if err := h.Engage.OpenFn(host, h.Presence); err != nil {
+	if err := h.Engage.OpenFn(host, h.Presence, h.SB); err != nil {
 		obj, _ := h.World.Object(host.ObjectID)
 		name := "it"
 		if obj.Name != "" {

@@ -135,12 +135,10 @@ func run(cfgPath string) error {
 
 	// engageOpen is the OpenFn injected into EngageBackend. It constructs the
 	// right handler for the host kind, looks up the player's display name, and
-	// opens the engagement in the registry. The session-side pointer
-	// (s.engagement) is NOT set here — that requires a session lookup that
-	// arrives in T13. For now, the registry entry is created but the modal
-	// dispatch in commandLoop won't see it until T13 wires OpenForSession.
-	// TODO: T13 should use OpenForSession via session lookup here instead.
-	engageOpen := func(host *engage.Host, presence *world.Presence) error {
+	// opens the engagement in the registry. When a SessionBinding is provided
+	// (normal path), OpenForSession is used so the session's engagement pointer
+	// is set and modal dispatch in commandLoop activates immediately.
+	engageOpen := func(host *engage.Host, presence *world.Presence, sb engage.SessionBinding) error {
 		var handler engage.Handler
 		switch host.Kind {
 		case engage.KindTerminal:
@@ -171,7 +169,15 @@ func run(cfgPath string) error {
 		}
 		// TODO: T14 broadcast open to room (obj available here for name lookup).
 		_ = obj
-		_, err = engageReg.Open(host, handler, p)
+		if sb == nil {
+			// No session binding (test path or unsupported caller): fall back
+			// to a registry-only open. Modal dispatch in the session loop
+			// will not engage without a binding, but this keeps tests
+			// compilable.
+			_, err = engageReg.Open(host, handler, p)
+			return err
+		}
+		_, err = engage.OpenForSession(engageReg, sb, host, handler, p)
 		return err
 	}
 

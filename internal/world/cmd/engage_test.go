@@ -21,7 +21,7 @@ func TestDispatch_engageWithUniversal_callsOpenFn(t *testing.T) {
 	h.Engage = &EngageBackend{
 		Registry: engage.NewRegistry(),
 		Hosts:    cache,
-		OpenFn: func(host *engage.Host, _ *world.Presence) error {
+		OpenFn: func(host *engage.Host, _ *world.Presence, _ engage.SessionBinding) error {
 			openedHost = host
 			return nil
 		},
@@ -48,7 +48,7 @@ func TestDispatch_engageHostVerb_callsOpenFn(t *testing.T) {
 	h.Engage = &EngageBackend{
 		Registry: engage.NewRegistry(),
 		Hosts:    cache,
-		OpenFn: func(host *engage.Host, _ *world.Presence) error {
+		OpenFn: func(host *engage.Host, _ *world.Presence, _ engage.SessionBinding) error {
 			openedHost = host
 			return nil
 		},
