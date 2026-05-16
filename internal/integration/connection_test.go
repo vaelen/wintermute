@@ -21,16 +21,21 @@ import (
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/term"
 	"github.com/vaelen/wintermute/internal/world"
+	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
 )
 
 // testServer is a self-contained Wintermute instance bound to an ephemeral
 // port, with the slow detection timeouts trimmed so the suite stays fast.
 type testServer struct {
-	t        *testing.T
-	addr     string
-	close    func()
-	authS    *auth.Store
-	worldW   *world.World
+	t      *testing.T
+	addr   string
+	close  func()
+	authS  *auth.Store
+	worldW *world.World
+	// admin is non-nil only when the server was started via
+	// startAdminServer (M5+); tests that don't need admin scripting
+	// leave it nil.
+	admin *worldcmd.AdminBackend
 }
 
 func startServer(t *testing.T) *testServer {

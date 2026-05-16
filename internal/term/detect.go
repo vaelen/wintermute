@@ -24,6 +24,7 @@ func AutoDetect(h DetectHints) Capabilities {
 	caps := Capabilities{
 		Telnet:   h.Telnet,
 		TermType: h.TermType,
+		ANSI:     h.ANSICapable,
 	}
 
 	if enc, ok := encodingFromTTYPE(h.TermType); ok {

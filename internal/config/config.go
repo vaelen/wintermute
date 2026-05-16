@@ -13,11 +13,12 @@ import (
 // Config is the engine's top-level configuration as loaded from
 // wintermute.toml.
 type Config struct {
-	Server ServerConfig `toml:"server"`
-	DB     DBConfig     `toml:"db"`
-	Log    LogConfig    `toml:"log"`
-	TLS    TLSConfig    `toml:"tls"`
-	LLM    LLMConfig    `toml:"llm"`
+	Server  ServerConfig  `toml:"server"`
+	DB      DBConfig      `toml:"db"`
+	Log     LogConfig     `toml:"log"`
+	TLS     TLSConfig     `toml:"tls"`
+	LLM     LLMConfig     `toml:"llm"`
+	Session SessionConfig `toml:"session"`
 }
 
 // ServerConfig holds the listener ports and externally-visible hostname.
@@ -60,6 +61,13 @@ type LLMConfig struct {
 	Default LLMBackend `toml:"default"`
 }
 
+// SessionConfig holds per-session tuning knobs.
+type SessionConfig struct {
+	// HistorySize is the cap for the in-memory line-editing history ring
+	// buffer. Default 100. Set to 0 to disable in-line history.
+	HistorySize int `toml:"history_size"`
+}
+
 // LLMBackend names a registered backend plus its free-form options.
 type LLMBackend struct {
 	Backend string         `toml:"backend"`
@@ -98,6 +106,9 @@ func Default() *Config {
 					"embedding_model":  "nomic-embed-text",
 				},
 			},
+		},
+		Session: SessionConfig{
+			HistorySize: 100,
 		},
 	}
 }
@@ -149,6 +160,9 @@ func (c *Config) validate() error {
 	case "", "text", "json":
 	default:
 		return fmt.Errorf("log.format must be one of text|json, got %q", c.Log.Format)
+	}
+	if c.Session.HistorySize < 0 {
+		return fmt.Errorf("session.history_size must be >= 0, got %d", c.Session.HistorySize)
 	}
 	return nil
 }

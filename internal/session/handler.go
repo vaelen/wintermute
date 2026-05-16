@@ -33,6 +33,10 @@ type Handler struct {
 	// Tuning knobs (intentionally exported so tests / config can lower them).
 	TelnetDetectTimeout      time.Duration
 	NegotiationSettleTimeout time.Duration
+
+	// HistorySize is the per-session line-edit history capacity. 0
+	// disables in-line history. Defaults to 100 via DefaultHandler.
+	HistorySize int
 }
 
 // DefaultHandler returns a Handler with sensible defaults wired in.
@@ -45,6 +49,7 @@ func DefaultHandler(a *auth.Store, w *world.World, npcReg worldcmd.NPCReloader, 
 		MOTD:                     motd,
 		TelnetDetectTimeout:      200 * time.Millisecond,
 		NegotiationSettleTimeout: 200 * time.Millisecond,
+		HistorySize:              100,
 	}
 }
 
@@ -59,7 +64,7 @@ func DefaultHandler(a *auth.Store, w *world.World, npcReg worldcmd.NPCReloader, 
 // response: tc.Negotiated() reports whether any IAC came back.
 func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	s := newSession(conn, h.Auth, h.World, h.Logger)
+	s := newSession(conn, h.Auth, h.World, h.Logger, h.HistorySize)
 	defer s.finalize()
 
 	br := bufio.NewReader(conn)
@@ -174,6 +179,10 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	if len(closing) > 0 {
 		_, _ = s.writer().Write(closing)
 	}
+	// Snapshot the post-detection capabilities for use by the line
+	// editor. ANSI is decided once, at connection time; later terminal
+	// reconfigures (encoding / width / color) don't touch it.
+	s.caps = chosen
 
 	// Transition into PETSCII: emit Shift Out so the C64 switches to
 	// mixed-case mode before any further text reaches it. Other encodings

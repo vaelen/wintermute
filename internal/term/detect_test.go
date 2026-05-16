@@ -9,13 +9,14 @@ import (
 
 func TestAutoDetectDefaults(t *testing.T) {
 	cases := []struct {
-		name        string
-		hints       DetectHints
-		wantEnc     Encoding
-		wantWidth   int
-		wantColor   bool
-		wantDEC     bool
-		wantTelnet  bool
+		name       string
+		hints      DetectHints
+		wantEnc    Encoding
+		wantWidth  int
+		wantColor  bool
+		wantDEC    bool
+		wantTelnet bool
+		wantANSI   bool
 	}{
 		{
 			name:      "nothing detected → ASCII",
@@ -24,6 +25,7 @@ func TestAutoDetectDefaults(t *testing.T) {
 			wantWidth: 40,
 			wantColor: false,
 			wantDEC:   false,
+			wantANSI:  false,
 		},
 		{
 			name:      "ANSI capable → UTF-8",
@@ -32,6 +34,7 @@ func TestAutoDetectDefaults(t *testing.T) {
 			wantWidth: 80,
 			wantColor: true,
 			wantDEC:   false,
+			wantANSI:  true,
 		},
 		{
 			name:      "TTYPE xterm → UTF-8",
@@ -40,6 +43,7 @@ func TestAutoDetectDefaults(t *testing.T) {
 			wantWidth: 80,
 			wantColor: true,
 			wantDEC:   false,
+			wantANSI:  false,
 		},
 		{
 			name:      "TTYPE c64 → PETSCII",
@@ -48,6 +52,7 @@ func TestAutoDetectDefaults(t *testing.T) {
 			wantWidth: 40,
 			wantColor: true,
 			wantDEC:   false,
+			wantANSI:  false,
 		},
 		{
 			name:      "TTYPE syncterm → CP437",
@@ -56,6 +61,7 @@ func TestAutoDetectDefaults(t *testing.T) {
 			wantWidth: 80,
 			wantColor: true,
 			wantDEC:   false,
+			wantANSI:  false,
 		},
 		{
 			name:       "Telnet + NAWS overrides default size",
@@ -65,6 +71,7 @@ func TestAutoDetectDefaults(t *testing.T) {
 			wantColor:  true,
 			wantDEC:    false,
 			wantTelnet: true,
+			wantANSI:   true,
 		},
 	}
 	for _, c := range cases {
@@ -84,6 +91,9 @@ func TestAutoDetectDefaults(t *testing.T) {
 			}
 			if got.Telnet != c.wantTelnet {
 				t.Errorf("Telnet = %v, want %v", got.Telnet, c.wantTelnet)
+			}
+			if got.ANSI != c.wantANSI {
+				t.Errorf("ANSI = %v, want %v", got.ANSI, c.wantANSI)
 			}
 		})
 	}
