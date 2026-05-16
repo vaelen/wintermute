@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // NPCClient is the minimal LLM interface this handler needs. The
@@ -22,6 +23,15 @@ type NPCBinding struct {
 	Client      NPCClient
 	DisplayName string
 	Persona     string
+
+	// RootCtx is the server-lifetime parent for per-call timeouts. If nil,
+	// falls back to context.Background() — acceptable for unit tests but
+	// production wiring (main.go) MUST set it.
+	RootCtx context.Context
+
+	// Timeout bounds each Chat call. Zero falls back to 120s, matching
+	// internal/npc dispatchTimeout.
+	Timeout time.Duration
 }
 
 // NPCHandler is the built-in handler for kind='npc' hosts. Every input
@@ -41,12 +51,10 @@ func NewNPCHandler(host *Host, npc *NPCBinding, onClose func()) *NPCHandler {
 	return &NPCHandler{host: host, npc: npc, close: onClose}
 }
 
-// OnOpen is a no-op. The room-level enter broadcast is the participant's
-// confirmation; an extra prompt would just crowd the screen.
 func (h *NPCHandler) OnOpen(_ *Participant) {}
 
-// OnClose fires the optional close callback (used for outside-view broadcasts).
-// M4 summarisation will hook in here in a later milestone.
+// OnClose fires the optional close callback. Without it the room sees no
+// exit broadcast; the callback is provided by main.go via a captured closure.
 func (h *NPCHandler) OnClose(_ *Participant, _ CloseReason) {
 	if h.close != nil {
 		h.close()
@@ -71,7 +79,17 @@ func (h *NPCHandler) Handle(p *Participant, line string) {
 		_ = p.Write(name + " stares blankly into space.\r\n")
 		return
 	}
-	reply, err := h.npc.Client.Chat(context.Background(), h.systemPrompt(p), line)
+	root := h.npc.RootCtx
+	if root == nil {
+		root = context.Background()
+	}
+	timeout := h.npc.Timeout
+	if timeout == 0 {
+		timeout = 120 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(root, timeout)
+	defer cancel()
+	reply, err := h.npc.Client.Chat(ctx, h.systemPrompt(p), line)
 	if err != nil {
 		_ = p.Write(h.npc.DisplayName + " seems unable to reply.\r\n")
 		return

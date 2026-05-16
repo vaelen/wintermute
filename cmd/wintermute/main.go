@@ -173,6 +173,7 @@ func run(cfgPath string) error {
 				Client:      npcChatAdapter{n: n},
 				DisplayName: n.Name,
 				Persona:     n.Persona,
+				RootCtx:     ctx,
 			}, closeBroadcast)
 		default:
 			return fmt.Errorf("engage: unsupported kind %q", host.Kind)
@@ -205,16 +206,28 @@ func run(cfgPath string) error {
 		return nil
 	}
 
+	// wg tracks BOTH the accept-loop goroutines and every per-session
+	// goroutine. On shutdown we Wait on it before letting `defer db.Close()`
+	// run, so a session that's mid-write to the DB won't race with the
+	// writer goroutine shutting down ("send on closed channel" panic).
+	// Declared early so the BeforeDeleteObserver below can add to it.
+	var wg sync.WaitGroup
+
 	// Force-close any live engagement whose host object is being deleted.
 	// The hook fires inside w.mu.Lock, so the close is dispatched to a
 	// goroutine to avoid deadlocking against OnClose's BroadcastToRoom
-	// (which needs w.mu.RLock).
+	// (which needs w.mu.RLock). The goroutine is tracked in wg so that
+	// shutdown's wg.Wait() cannot return before the broadcast completes.
 	w.SetBeforeDeleteObserver(func(id world.ObjectID) {
 		eng := engageReg.HostEngagement(id)
 		if eng == nil {
 			return
 		}
-		go engageReg.Close(eng, engage.CloseForced)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			engageReg.Close(eng, engage.CloseForced)
+		}()
 	})
 
 	engageBackend := &worldcmd.EngageBackend{
@@ -228,12 +241,6 @@ func run(cfgPath string) error {
 	handler.HistorySize = cfg.Session.HistorySize
 	handler.EngageRegistry = engageReg
 	handler.EngageBackend = engageBackend
-
-	// wg tracks BOTH the accept-loop goroutines and every per-session
-	// goroutine. On shutdown we Wait on it before letting `defer db.Close()`
-	// run, so a session that's mid-write to the DB won't race with the
-	// writer goroutine shutting down ("send on closed channel" panic).
-	var wg sync.WaitGroup
 	if cfg.Server.TelnetPort > 0 {
 		ln, err := net.Listen("tcp", joinHostPort("0.0.0.0", cfg.Server.TelnetPort))
 		if err != nil {

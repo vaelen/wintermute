@@ -137,6 +137,7 @@ func startEngageServer(t *testing.T) *testServer {
 				Client:      npcEngageChatAdapter{n: n},
 				DisplayName: n.Name,
 				Persona:     n.Persona,
+				RootCtx:     ctx,
 			}, closeBroadcast)
 		default:
 			return fmt.Errorf("engage: unsupported kind %q", host.Kind)
@@ -164,12 +165,20 @@ func startEngageServer(t *testing.T) *testServer {
 		return nil
 	}
 
+	// wg is declared early so the BeforeDeleteObserver goroutines below
+	// can be tracked, ensuring wg.Wait() in srv.close covers them.
+	var wg sync.WaitGroup
+
 	w.SetBeforeDeleteObserver(func(id world.ObjectID) {
 		eng := engageReg.HostEngagement(id)
 		if eng == nil {
 			return
 		}
-		go engageReg.Close(eng, engage.CloseForced)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			engageReg.Close(eng, engage.CloseForced)
+		}()
 	})
 
 	engageBackend := &worldcmd.EngageBackend{
@@ -190,8 +199,6 @@ func startEngageServer(t *testing.T) *testServer {
 		cancel()
 		t.Fatalf("Listen: %v", err)
 	}
-
-	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

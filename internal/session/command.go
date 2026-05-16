@@ -47,8 +47,10 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 	wh.ShowRoom()
 
 	for {
-		if err := s.writeString("> "); err != nil {
-			return
+		if s.Engagement() == nil {
+			if err := s.writeString("> "); err != nil {
+				return
+			}
 		}
 		// Paste mode (@edit) captures every subsequent line as script
 		// source. Falling back to the simple loop keeps arrow keys and

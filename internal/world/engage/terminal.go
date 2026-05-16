@@ -27,13 +27,12 @@ func NewTerminalHandler(host *Host, onClose func()) *TerminalHandler {
 	return &TerminalHandler{host: host, close: onClose}
 }
 
-// OnOpen writes the terminal's prompt to the participant.
 func (h *TerminalHandler) OnOpen(p *Participant) {
 	h.writePrompt(p)
 }
 
-// OnClose fires the optional close callback (used for outside-view broadcasts)
-// and is otherwise a no-op.
+// OnClose fires the optional close callback. Without it the room sees no
+// exit broadcast; the callback is provided by main.go via a captured closure.
 func (h *TerminalHandler) OnClose(_ *Participant, _ CloseReason) {
 	if h.close != nil {
 		h.close()
