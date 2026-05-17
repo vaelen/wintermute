@@ -4,6 +4,8 @@
 package npc
 
 import (
+	"context"
+	"errors"
 	"sync"
 
 	"github.com/vaelen/wintermute/internal/llm"
@@ -36,4 +38,32 @@ type NPC struct {
 	llm     llm.LLM
 	mu      sync.Mutex
 	history []llm.Message
+}
+
+// ErrNoClient is returned by EngageChat when the NPC has no llm client
+// configured (e.g. the backend Open call failed at registry load).
+var ErrNoClient = errors.New("npc: no llm client")
+
+// EngageChat is a single-shot chat call for the engagement primitive.
+// The supplied system prompt overrides the NPC's normal persona (the
+// engage layer composes a private-conversation augmented prompt itself).
+// Holds the per-NPC mutex for the duration of the call so concurrent
+// HandleSay and engagement chats serialise just like M3 expected.
+//
+// Returns the assistant text, or an error. Used by the engage NPC handler.
+func (n *NPC) EngageChat(ctx context.Context, system, user string) (string, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.llm == nil {
+		return "", ErrNoClient
+	}
+	msgs := []llm.Message{
+		{Role: llm.RoleSystem, Content: system},
+		{Role: llm.RoleUser, Content: user},
+	}
+	resp, err := n.llm.Chat(ctx, msgs, nil, llm.ChatOpts{Model: n.Model})
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
 }

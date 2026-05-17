@@ -15,6 +15,7 @@ import (
 	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
+	"github.com/vaelen/wintermute/internal/world/engage"
 )
 
 func newTestAPI(t *testing.T) (*API, *auth.Store, *store.DB) {
@@ -32,6 +33,18 @@ func newTestAPI(t *testing.T) (*API, *auth.Store, *store.DB) {
 	}
 	accts := auth.NewStore(db)
 	return New(w, db, accts, nil, logger), accts, db
+}
+
+// newTestAPIWithEngage returns an API wired with a live HostCache.
+func newTestAPIWithEngage(t *testing.T) (*API, *engage.HostCache) {
+	t.Helper()
+	a, _, db := newTestAPI(t)
+	hc := engage.NewHostCache()
+	if err := hc.Load(context.Background(), db); err != nil {
+		t.Fatalf("hostCache.Load: %v", err)
+	}
+	a.Engage = hc
+	return a, hc
 }
 
 func TestCreateRoom(t *testing.T) {
@@ -207,4 +220,159 @@ func TestMOTD(t *testing.T) {
 	if got := a.GetMOTD(); got != "Welcome to the Sprawl." {
 		t.Errorf("MOTD = %q", got)
 	}
+}
+
+func TestSetEngageTerminal(t *testing.T) {
+	a, hc := newTestAPIWithEngage(t)
+	ctx := context.Background()
+
+	// Create an object to engage.
+	id, err := a.CreateObject(ctx, ObjectSpec{
+		Slug: "comlink", Name: "Comlink Terminal",
+		Kind: world.KindItem, RoomSlug: "lobby",
+	})
+	if err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+
+	opts := SetEngageOpts{
+		Kind:           engage.KindTerminal,
+		EngageVerbs:    []string{"sit at", "use", "boot up"},
+		DisengageVerbs: []string{"stand up", "log off"},
+		Prompt:         "comlink> ",
+	}
+	if err := a.SetEngage(ctx, "comlink", opts); err != nil {
+		t.Fatalf("SetEngage: %v", err)
+	}
+
+	// Verify cache was updated.
+	h := hc.Get(id)
+	if h == nil {
+		t.Fatal("expected host in cache after SetEngage")
+	}
+	if h.Prompt != "comlink> " {
+		t.Errorf("Prompt = %q, want %q", h.Prompt, "comlink> ")
+	}
+	want := []string{"sit at", "use", "boot up"}
+	if !stringSlicesEqual(h.EngageVerbs, want) {
+		t.Errorf("EngageVerbs = %v, want %v", h.EngageVerbs, want)
+	}
+	wantDis := []string{"stand up", "log off"}
+	if !stringSlicesEqual(h.DisengageVerbs, wantDis) {
+		t.Errorf("DisengageVerbs = %v, want %v", h.DisengageVerbs, wantDis)
+	}
+}
+
+func TestSetEngageAppliesKindDefaultsForEmptyVerbs(t *testing.T) {
+	a, hc := newTestAPIWithEngage(t)
+	ctx := context.Background()
+
+	id, err := a.CreateObject(ctx, ObjectSpec{
+		Slug: "terminal", Name: "Terminal",
+		Kind: world.KindItem, RoomSlug: "lobby",
+	})
+	if err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+
+	// No verbs supplied — should fall back to kind-defaults.
+	if err := a.SetEngage(ctx, "terminal", SetEngageOpts{Kind: engage.KindTerminal}); err != nil {
+		t.Fatalf("SetEngage: %v", err)
+	}
+
+	h := hc.Get(id)
+	if h == nil {
+		t.Fatal("expected host in cache")
+	}
+	// KindTerminal defaults: ["use", "sit at"]
+	if len(h.EngageVerbs) == 0 {
+		t.Error("expected kind-default engage verbs, got empty slice")
+	}
+	if h.Prompt == "" {
+		t.Error("expected kind-default prompt, got empty string")
+	}
+}
+
+func TestSetEngageRejectsCustomKind(t *testing.T) {
+	a, _ := newTestAPIWithEngage(t)
+	ctx := context.Background()
+
+	if _, err := a.CreateObject(ctx, ObjectSpec{
+		Slug: "widget", Name: "Widget",
+		Kind: world.KindItem, RoomSlug: "lobby",
+	}); err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+
+	err := a.SetEngage(ctx, "widget", SetEngageOpts{Kind: "custom"})
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if apiErr.Code != CodeInvalidArgument {
+		t.Errorf("code = %q, want invalid_argument", apiErr.Code)
+	}
+}
+
+func TestSetEngageRejectsUnknownObject(t *testing.T) {
+	a, _ := newTestAPIWithEngage(t)
+	err := a.SetEngage(context.Background(), "no-such-object",
+		SetEngageOpts{Kind: engage.KindTerminal})
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if apiErr.Code != CodeNotFound {
+		t.Errorf("code = %q, want not_found", apiErr.Code)
+	}
+}
+
+func TestClearEngage(t *testing.T) {
+	a, hc := newTestAPIWithEngage(t)
+	ctx := context.Background()
+
+	id, err := a.CreateObject(ctx, ObjectSpec{
+		Slug: "booth", Name: "Data Booth",
+		Kind: world.KindItem, RoomSlug: "lobby",
+	})
+	if err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+	if err := a.SetEngage(ctx, "booth", SetEngageOpts{Kind: engage.KindTerminal}); err != nil {
+		t.Fatalf("SetEngage: %v", err)
+	}
+	if hc.Get(id) == nil {
+		t.Fatal("expected host in cache before ClearEngage")
+	}
+	if err := a.ClearEngage(ctx, "booth"); err != nil {
+		t.Fatalf("ClearEngage: %v", err)
+	}
+	if hc.Get(id) != nil {
+		t.Error("expected host absent from cache after ClearEngage")
+	}
+}
+
+func TestSetEngageNilCacheErrors(t *testing.T) {
+	a, _, _ := newTestAPI(t) // no Engage set
+	err := a.SetEngage(context.Background(), "lobby",
+		SetEngageOpts{Kind: engage.KindTerminal})
+	if err == nil {
+		t.Fatal("expected error when Engage cache is nil")
+	}
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Code != CodeInternal {
+		t.Errorf("expected internal error, got %v", err)
+	}
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

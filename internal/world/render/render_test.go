@@ -160,3 +160,47 @@ func TestObjectLongFallsBackToShortThenName(t *testing.T) {
 		t.Errorf("ObjectLong name-fallback = %q", got)
 	}
 }
+
+func TestRoom_engagementAnnotation(t *testing.T) {
+	view := RoomView{
+		Room:    world.Room{Name: "Lobby", Exits: map[string]world.RoomID{}},
+		Self:    1,
+		Players: []world.PresentPlayer{
+			{ObjectID: 7, Name: "alice", Awake: true},
+			{ObjectID: 8, Name: "bob", Awake: true},
+		},
+		EngagementOf: func(id world.ObjectID) string {
+			if id == 7 {
+				return "at the public terminal"
+			}
+			return ""
+		},
+	}
+	out := Room(view)
+	if !strings.Contains(out, "alice (at the public terminal)") {
+		t.Errorf("expected engagement annotation in output, got: %q", out)
+	}
+	if !strings.Contains(out, "bob") || strings.Contains(out, "bob (") {
+		t.Errorf("bob should appear without annotation: %q", out)
+	}
+}
+
+func TestRoom_asleepStillBeatsEngagement(t *testing.T) {
+	// An asleep player can't be engaged, but if both flags somehow get
+	// set, asleep wins (the engagement is a stale registry entry).
+	view := RoomView{
+		Room:    world.Room{Name: "Lobby", Exits: map[string]world.RoomID{}},
+		Self:    1,
+		Players: []world.PresentPlayer{{ObjectID: 7, Name: "alice", Awake: false}},
+		EngagementOf: func(id world.ObjectID) string {
+			return "at terminal"
+		},
+	}
+	out := Room(view)
+	if !strings.Contains(out, "alice (asleep)") {
+		t.Errorf("asleep should appear, got: %q", out)
+	}
+	if strings.Contains(out, "alice (at terminal)") {
+		t.Errorf("engagement annotation leaked onto an asleep player: %q", out)
+	}
+}

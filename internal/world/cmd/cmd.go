@@ -10,6 +10,7 @@ import (
 
 	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/world"
+	"github.com/vaelen/wintermute/internal/world/engage"
 	"github.com/vaelen/wintermute/internal/world/render"
 )
 
@@ -18,6 +19,15 @@ import (
 // package (and the LLM/sqlite chain) into the world cmd package.
 type NPCReloader interface {
 	Reload(ctx context.Context) error
+}
+
+// EngageBackend bundles the engage dependencies the world cmd handler
+// needs to dispatch engage verbs and open engagements. One instance is
+// shared across all sessions.
+type EngageBackend struct {
+	Registry *engage.Registry
+	Hosts    *engage.HostCache
+	OpenFn   func(host *engage.Host, presence *world.Presence, sb engage.SessionBinding) error
 }
 
 // Handler binds a Presence to a World. Each session creates one Handler
@@ -33,6 +43,16 @@ type Handler struct {
 	// May be nil; affected commands then return OutcomeUnknown so
 	// they stay invisible.
 	Admin *AdminBackend
+
+	// Engage is the engagement integration. May be nil in tests where
+	// engagement isn't exercised. The OpenFn is what actually constructs
+	// the right handler (terminal vs npc) when an engage verb succeeds.
+	Engage *EngageBackend
+
+	// SB is the session-side engagement binding. Optional: when nil,
+	// OpenFn (in main.go) falls back to non-session-aware Open. Tests
+	// without engage wiring leave this nil.
+	SB engage.SessionBinding
 
 	// editor, when non-nil, captures every subsequent input line as
 	// script source until a "." terminator closes paste mode. See
@@ -155,6 +175,9 @@ func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
 	case "@help":
 		outcome = h.cmdAtHelp()
 	default:
+		if out := h.tryEngage(line); out != OutcomeUnknown {
+			return out
+		}
 		return OutcomeUnknown
 	}
 	// Admin-only commands return OutcomeUnknown when the caller lacks
@@ -197,6 +220,10 @@ func (h *Handler) cmdMove(ctx context.Context, dir string) Outcome {
 		_ = h.Presence.Write("Go where?\r\n")
 		return OutcomeContinue
 	}
+	// Auto-disengage before moving. Even if the move fails, the player
+	// has stepped away. The handler's OnClose fires the exit broadcast.
+	h.closeEngagementIfAny(engage.CloseMovement)
+
 	if _, err := h.World.Move(ctx, h.Presence, dir); err != nil {
 		if errors.Is(err, world.ErrStalePresence) {
 			return OutcomeDetached
@@ -206,6 +233,16 @@ func (h *Handler) cmdMove(ctx context.Context, dir string) Outcome {
 	}
 	h.showRoom()
 	return OutcomeContinue
+}
+
+// closeEngagementIfAny closes any current engagement for the session
+// owning this handler with the given reason. No-op if there is no
+// active engagement or no SessionBinding configured.
+func (h *Handler) closeEngagementIfAny(reason engage.CloseReason) {
+	if h.Engage == nil || h.Engage.Registry == nil || h.SB == nil {
+		return
+	}
+	engage.CloseForSession(h.Engage.Registry, h.SB, reason)
 }
 
 func (h *Handler) cmdSay(rest string) Outcome {
@@ -400,6 +437,85 @@ func (h *Handler) adminHelpLines() []string {
 	return out
 }
 
+// tryEngage attempts to match line as an engage command — either the
+// universal "engage [with] <target>" or a host-specific engage verb for
+// an object in the player's room or inventory. Returns OutcomeContinue
+// on a match (regardless of whether the engagement actually opened —
+// errors are reported to the player and the input is considered
+// consumed). Returns OutcomeUnknown if no verb matched.
+func (h *Handler) tryEngage(line string) Outcome {
+	if h.Engage == nil || h.Engage.OpenFn == nil || h.Engage.Hosts == nil {
+		return OutcomeUnknown
+	}
+	loc, err := h.World.LocationOf(h.Presence.PlayerID)
+	if err != nil {
+		return OutcomeUnknown
+	}
+	candidates := h.Engage.Hosts.FilterRoomAndInventory(
+		loc.RoomID, h.Presence.PlayerID,
+		func(id world.ObjectID) (world.Location, bool) {
+			l, err := h.World.LocationOf(id)
+			return l, err == nil
+		})
+
+	if target, ok := engage.MatchUniversalEngageVerb(line); ok {
+		return h.openByTarget(candidates, target)
+	}
+	if matchedHost, target, ok := engage.MatchEngageVerb(line, candidates); ok {
+		// If only one candidate uses this verb, use it directly. Otherwise
+		// resolve the target text via FindVisible (M3 tiered matcher) and
+		// pick the candidate whose ObjectID matches.
+		if countCandidatesWithVerbPrefix(candidates, line) == 1 {
+			return h.openMatchedHost(matchedHost)
+		}
+		return h.openByTarget(candidates, target)
+	}
+	return OutcomeUnknown
+}
+
+// openByTarget is the universal-verb path: resolve target via the
+// world's name matcher, then open the engagement for that object if
+// it's an engageable candidate.
+func (h *Handler) openByTarget(candidates []*engage.Host, target string) Outcome {
+	obj, err := h.World.FindVisible(h.Presence.PlayerID, target)
+	if err != nil {
+		var amb *world.AmbiguousMatchError
+		if errors.As(err, &amb) {
+			_ = h.Presence.Write(didYouMean(amb.Candidates))
+		} else {
+			_ = h.Presence.Write("Engage with what?\r\n")
+		}
+		return OutcomeContinue
+	}
+	for _, host := range candidates {
+		if host.ObjectID == obj.ID {
+			return h.openMatchedHost(host)
+		}
+	}
+	_ = h.Presence.Write("That isn't something you can engage with.\r\n")
+	return OutcomeContinue
+}
+
+// openMatchedHost calls into the OpenFn and renders any error.
+func (h *Handler) openMatchedHost(host *engage.Host) Outcome {
+	if err := h.Engage.OpenFn(host, h.Presence, h.SB); err != nil {
+		obj, _ := h.World.Object(host.ObjectID)
+		name := "it"
+		if obj.Name != "" {
+			name = obj.Name
+		}
+		switch {
+		case errors.Is(err, engage.ErrHostBusy):
+			_ = h.Presence.Write(name + " is occupied.\r\n")
+		case errors.Is(err, engage.ErrAlreadyEngaged):
+			_ = h.Presence.Write("You're already engaged.\r\n")
+		default:
+			_ = h.Presence.Write("Engagement failed: " + err.Error() + "\r\n")
+		}
+	}
+	return OutcomeContinue
+}
+
 // showRoom renders the player's current room. Called after `look` with no
 // arg, after `move`, and on initial login.
 func (h *Handler) showRoom() {
@@ -413,12 +529,34 @@ func (h *Handler) showRoom() {
 		_ = h.Presence.Write("You float in an undefined void.\r\n")
 		return
 	}
+	var engOf func(world.ObjectID) string
+	if h.Engage != nil && h.Engage.Registry != nil {
+		engOf = func(id world.ObjectID) string {
+			// Participant-side first: is this player engaged?
+			if eng := h.Engage.Registry.ParticipantEngagementByPlayer(id); eng != nil {
+				obj, _ := h.World.Object(eng.Host.ObjectID)
+				hostName := "it"
+				if obj.Name != "" {
+					hostName = obj.Name
+				}
+				return engage.ExpandTemplate(eng.Host.PresentMsg, "", hostName)
+			}
+			// Host-side: is this NPC currently hosting an engagement?
+			if eng := h.Engage.Registry.HostEngagement(id); eng != nil {
+				// Use a simple "busy" hint — the participant's name is
+				// already shown elsewhere on the line.
+				return "occupied"
+			}
+			return ""
+		}
+	}
 	view := render.RoomView{
-		Room:    room,
-		Self:    h.Presence.PlayerID,
-		Players: h.World.PlayersInRoom(loc.RoomID),
-		NPCs:    h.World.NPCsInRoom(loc.RoomID),
-		Items:   h.World.ItemsInRoom(loc.RoomID),
+		Room:         room,
+		Self:         h.Presence.PlayerID,
+		Players:      h.World.PlayersInRoom(loc.RoomID),
+		NPCs:         h.World.NPCsInRoom(loc.RoomID),
+		Items:        h.World.ItemsInRoom(loc.RoomID),
+		EngagementOf: engOf,
 	}
 	_ = h.Presence.Write(render.Room(view))
 }
@@ -470,6 +608,25 @@ func canonicalDirection(s string) string {
 	default:
 		return strings.ToLower(strings.TrimSpace(s))
 	}
+}
+
+// countCandidatesWithVerbPrefix returns how many hosts in candidates
+// have at least one engage verb that prefix-matches line (case-
+// insensitive, with a trailing space). Used to decide whether a host-
+// verb match is unambiguous.
+func countCandidatesWithVerbPrefix(candidates []*engage.Host, line string) int {
+	lower := strings.ToLower(line)
+	n := 0
+	for _, h := range candidates {
+		for _, v := range h.EngageVerbs {
+			vl := strings.ToLower(v)
+			if strings.HasPrefix(lower, vl) && len(lower) > len(vl) && (lower[len(vl)] == ' ' || lower[len(vl)] == '\t') {
+				n++
+				break
+			}
+		}
+	}
+	return n
 }
 
 // didYouMean renders a disambiguation prompt for a list of candidate

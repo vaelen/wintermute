@@ -30,6 +30,7 @@ import (
 	"github.com/vaelen/wintermute/internal/world"
 	worldapi "github.com/vaelen/wintermute/internal/world/api"
 	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
+	"github.com/vaelen/wintermute/internal/world/engage"
 )
 
 func main() {
@@ -87,11 +88,22 @@ func run(cfgPath string) error {
 	})
 	logger.Info("npc registry loaded")
 
+	// Engagement primitive (M5.7): registry of live engagements, in-memory
+	// host cache, and a handler factory that maps host kind to the right
+	// built-in handler.
+	engageReg := engage.NewRegistry()
+	npcReg.SetEngageLookup(engageReg)
+	hostCache := engage.NewHostCache()
+	if err := hostCache.Load(ctx, db); err != nil {
+		return fmt.Errorf("load engage hosts: %w", err)
+	}
+
 	// Admin scripting layer (M5): world API, Lua VM pool with the
 	// wintermute.* table pre-loaded, tool registry, scripts table access.
 	// Wired into the session handler so admin @-commands can mutate the
 	// world from inside the game.
 	adminAPI := worldapi.New(w, db, authStore, npcReg, logger)
+	adminAPI.Engage = hostCache
 	luaAPI := scriptlua.NewAPI(adminAPI, nil, ctx)
 	luaPool := scriptlua.NewPool(scriptlua.PoolConfig{Size: 4, API: luaAPI})
 	defer luaPool.Close()
@@ -123,15 +135,115 @@ func run(cfgPath string) error {
 	if motd == "" {
 		motd = defaultMOTD()
 	}
-	handler := session.DefaultHandler(authStore, w, npcReg, logger, motd)
-	handler.Admin = adminBackend
-	handler.HistorySize = cfg.Session.HistorySize
+
+	// engageOpen is the OpenFn injected into EngageBackend. It constructs the
+	// right handler for the host kind, looks up the player's display name, and
+	// opens the engagement in the registry. When a SessionBinding is provided
+	// (normal path), OpenForSession is used so the session's engagement pointer
+	// is set and modal dispatch in commandLoop activates immediately.
+	engageOpen := func(host *engage.Host, presence *world.Presence, sb engage.SessionBinding) error {
+		obj, err := w.Object(host.ObjectID)
+		if err != nil {
+			return fmt.Errorf("engage: lookup host object: %w", err)
+		}
+		hostName := obj.Name
+		displayName := playerNameFor(w, presence.PlayerID)
+
+		// closeBroadcast is passed to the handler and fires on every close
+		// reason (voluntary, movement, forced, disconnect).
+		closeBroadcast := func() {
+			msg := engage.ExpandTemplate(host.ExitMsg, displayName, hostName) + "\r\n"
+			loc, locErr := w.LocationOf(host.ObjectID)
+			if locErr != nil {
+				return
+			}
+			w.BroadcastToRoom(loc.RoomID, 0, msg)
+		}
+
+		var handler engage.Handler
+		switch host.Kind {
+		case engage.KindTerminal:
+			handler = engage.NewTerminalHandler(host, closeBroadcast)
+		case engage.KindNPC:
+			n := npcReg.Get(host.ObjectID)
+			if n == nil {
+				return fmt.Errorf("engage: npc %d not in registry", host.ObjectID)
+			}
+			handler = engage.NewNPCHandler(host, &engage.NPCBinding{
+				Client:      npcChatAdapter{n: n},
+				DisplayName: n.Name,
+				Persona:     n.Persona,
+				RootCtx:     ctx,
+			}, closeBroadcast)
+		default:
+			return fmt.Errorf("engage: unsupported kind %q", host.Kind)
+		}
+		p := &engage.Participant{
+			SessionID:   presence.SessionID,
+			PlayerID:    presence.PlayerID,
+			DisplayName: displayName,
+			Write:       presence.Write,
+		}
+		var openErr error
+		if sb == nil {
+			// No session binding (test path or unsupported caller): fall back
+			// to a registry-only open. Modal dispatch in the session loop
+			// will not engage without a binding, but this keeps tests
+			// compilable.
+			_, openErr = engageReg.Open(host, handler, p)
+		} else {
+			_, openErr = engage.OpenForSession(engageReg, sb, host, handler, p)
+		}
+		if openErr != nil {
+			return openErr
+		}
+		// Enter broadcast — sent after a successful open.
+		enter := engage.ExpandTemplate(host.EnterMsg, displayName, hostName) + "\r\n"
+		loc, locErr := w.LocationOf(host.ObjectID)
+		if locErr == nil {
+			w.BroadcastToRoom(loc.RoomID, 0, enter)
+		}
+		return nil
+	}
 
 	// wg tracks BOTH the accept-loop goroutines and every per-session
 	// goroutine. On shutdown we Wait on it before letting `defer db.Close()`
 	// run, so a session that's mid-write to the DB won't race with the
 	// writer goroutine shutting down ("send on closed channel" panic).
+	// Declared early so the BeforeDeleteObserver below can add to it.
 	var wg sync.WaitGroup
+
+	// Force-close any live engagement whose host object is being deleted.
+	// The hook fires inside w.mu.Lock, so the close is dispatched to a
+	// goroutine to avoid deadlocking against OnClose's BroadcastToRoom
+	// (which needs w.mu.RLock). The goroutine is tracked in wg so that
+	// shutdown's wg.Wait() cannot return before the broadcast completes.
+	w.SetBeforeDeleteObserver(func(id world.ObjectID) {
+		// Drop the cache entry alongside the DB row (object_engage cascades
+		// from objects). Mirrors the DB+cache pairing in api.ClearEngage.
+		hostCache.Delete(id)
+		eng := engageReg.HostEngagement(id)
+		if eng == nil {
+			return
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			engageReg.Close(eng, engage.CloseForced)
+		}()
+	})
+
+	engageBackend := &worldcmd.EngageBackend{
+		Registry: engageReg,
+		Hosts:    hostCache,
+		OpenFn:   engageOpen,
+	}
+
+	handler := session.DefaultHandler(authStore, w, npcReg, logger, motd)
+	handler.Admin = adminBackend
+	handler.HistorySize = cfg.Session.HistorySize
+	handler.EngageRegistry = engageReg
+	handler.EngageBackend = engageBackend
 	if cfg.Server.TelnetPort > 0 {
 		ln, err := net.Listen("tcp", joinHostPort("0.0.0.0", cfg.Server.TelnetPort))
 		if err != nil {
@@ -308,4 +420,21 @@ func defaultMOTD() string {
 		"│                                               │\r\n" +
 		"│  Type 'help' for a list of commands.          │\r\n" +
 		"└───────────────────────────────────────────────┘\r\n"
+}
+
+// npcChatAdapter wraps an NPC so it satisfies engage.NPCClient.
+type npcChatAdapter struct{ n *npc.NPC }
+
+func (a npcChatAdapter) Chat(ctx context.Context, system, user string) (string, error) {
+	return a.n.EngageChat(ctx, system, user)
+}
+
+// playerNameFor returns the player's display name for engagement rendering.
+// Falls back to "someone" if the object cannot be resolved.
+func playerNameFor(w *world.World, id world.ObjectID) string {
+	obj, err := w.Object(id)
+	if err != nil {
+		return "someone"
+	}
+	return obj.Name
 }

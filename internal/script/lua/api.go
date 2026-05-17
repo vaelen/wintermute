@@ -68,6 +68,8 @@ func (a *API) Bind(L *lua.LState) {
 	L.SetField(obj, "find", L.NewFunction(a.luaObjectFind))
 	L.SetField(obj, "move", L.NewFunction(a.luaObjectMove))
 	L.SetField(obj, "delete", L.NewFunction(a.luaObjectDelete))
+	L.SetField(obj, "set_engage", L.NewFunction(a.luaObjectSetEngage))
+	L.SetField(obj, "clear_engage", L.NewFunction(a.luaObjectClearEngage))
 	L.SetField(root, "object", obj)
 
 	npc := L.NewTable()
@@ -428,6 +430,59 @@ func (a *API) luaObjectDelete(L *lua.LState) int {
 		return pushError(L, goErrorf("invalid_argument", "object.delete: handle missing slug"))
 	}
 	return pushError(L, a.Backend.DeleteObject(a.Ctx, slug))
+}
+
+// luaObjectSetEngage binds wintermute.object.set_engage(slug, opts).
+// opts is a Lua table with: kind (required), engage_verbs (array),
+// disengage_verbs (array), enter_msg, present_msg, exit_msg, prompt.
+func (a *API) luaObjectSetEngage(L *lua.LState) int {
+	slug := L.CheckString(1)
+	opts := L.CheckTable(2)
+
+	kind := optString(opts, "kind")
+	if kind == "" {
+		return pushError(L, goErrorf("invalid_argument", "object.set_engage: missing 'kind'"))
+	}
+	setOpts := worldapi.SetEngageOpts{
+		Kind:           kind,
+		EngageVerbs:    luaTableStringArray(opts, "engage_verbs"),
+		DisengageVerbs: luaTableStringArray(opts, "disengage_verbs"),
+		EnterMsg:       optString(opts, "enter_msg"),
+		PresentMsg:     optString(opts, "present_msg"),
+		ExitMsg:        optString(opts, "exit_msg"),
+		Prompt:         optString(opts, "prompt"),
+	}
+	if err := a.Backend.SetEngage(a.Ctx, slug, setOpts); err != nil {
+		return pushError(L, err)
+	}
+	L.Push(lua.LBool(true))
+	return 1
+}
+
+// luaObjectClearEngage binds wintermute.object.clear_engage(slug).
+func (a *API) luaObjectClearEngage(L *lua.LState) int {
+	slug := L.CheckString(1)
+	if err := a.Backend.ClearEngage(a.Ctx, slug); err != nil {
+		return pushError(L, err)
+	}
+	L.Push(lua.LBool(true))
+	return 1
+}
+
+// luaTableStringArray reads an array field from a Lua table as []string.
+func luaTableStringArray(t *lua.LTable, key string) []string {
+	v := t.RawGetString(key)
+	tbl, ok := v.(*lua.LTable)
+	if !ok {
+		return nil
+	}
+	var out []string
+	tbl.ForEach(func(_, vv lua.LValue) {
+		if s, ok := vv.(lua.LString); ok {
+			out = append(out, string(s))
+		}
+	})
+	return out
 }
 
 // ---------------------------------------------------------------------------

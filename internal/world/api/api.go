@@ -11,6 +11,7 @@ import (
 	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
+	"github.com/vaelen/wintermute/internal/world/engage"
 )
 
 // NPCReloader is the minimal interface this package needs from the NPC
@@ -30,6 +31,8 @@ type API struct {
 	Accts   *auth.Store
 	NPCs    NPCReloader
 	Logger  *slog.Logger
+	// Engage is optional: nil disables set_engage/clear_engage.
+	Engage  *engage.HostCache
 }
 
 // New builds an API. Any of npcs, accts, or logger may be nil; the

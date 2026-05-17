@@ -20,6 +20,14 @@ import (
 
 func newHandler(t *testing.T, username string) (*Handler, *recordingWriter) {
 	t.Helper()
+	h, rw, _ := newHandlerWithDB(t, username)
+	return h, rw
+}
+
+// newHandlerWithDB is like newHandler but also returns the underlying
+// *store.DB so tests that need to load the HostCache can do so.
+func newHandlerWithDB(t *testing.T, username string) (*Handler, *recordingWriter, *store.DB) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "world.db")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	db, err := store.Open(context.Background(), path, logger)
@@ -50,7 +58,7 @@ func newHandler(t *testing.T, username string) (*Handler, *recordingWriter) {
 		t.Fatalf("Attach: %v", err)
 	}
 	rw.Drain() // discard wake-up message
-	return &Handler{World: w, Presence: pres}, rw
+	return &Handler{World: w, Presence: pres}, rw, db
 }
 
 type recordingWriter struct {

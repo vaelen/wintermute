@@ -18,6 +18,7 @@ import (
 	"github.com/vaelen/wintermute/internal/npc/memory"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
+	"github.com/vaelen/wintermute/internal/world/engage"
 )
 
 const (
@@ -36,6 +37,14 @@ const (
 // flight reply. Sized generously enough to absorb a cold model load on
 // the embed side followed by a cold model load on the chat side.
 const dispatchTimeout = 120 * time.Second
+
+// EngageLookup is the minimal interface HandleSay needs to detect when
+// an NPC is currently in a private engagement (and with whom). The
+// engage package's *Registry satisfies it. Kept as an interface so npc
+// doesn't depend on a concrete engage type beyond what it actually uses.
+type EngageLookup interface {
+	HostEngagement(id world.ObjectID) *engage.Engagement
+}
 
 // Registry holds every NPC in the world keyed by id. The world layer (or
 // the session command loop) calls HandleSay after every `say`; the registry
@@ -66,6 +75,20 @@ type Registry struct {
 	// memCancel cancels the per-NPC Worker goroutines started in
 	// rebuild. Reset on every rebuild.
 	memCancel context.CancelFunc
+
+	// engage is wired after Load via SetEngageLookup so HandleSay can
+	// detect whether an NPC is currently in a private engagement. Nil
+	// means no lookup is available (tests that don't need the feature).
+	engage EngageLookup
+}
+
+// SetEngageLookup wires the engagement registry so HandleSay can detect
+// when an NPC is currently engaged and brush off external addressing
+// instead of dispatching an LLM reply. Pass nil to clear.
+func (r *Registry) SetEngageLookup(e EngageLookup) {
+	r.mu.Lock()
+	r.engage = e
+	r.mu.Unlock()
 }
 
 // Load builds a Registry by reading every npc_config row, opening the
@@ -296,6 +319,20 @@ func (r *Registry) HandleSay(roomID world.RoomID, speakerID world.ObjectID, spea
 	otherEntities := otherEntityCount(speakerID, players, len(allNPCs))
 
 	for _, n := range npcs {
+		// Engagement-aware brush-off: if the NPC is currently engaged
+		// with a participant other than the speaker, emit a one-line
+		// brush-off broadcast and skip dispatch. The engaged conversation
+		// is unaffected.
+		if r.engage != nil {
+			if eng := r.engage.HostEngagement(n.ObjectID); eng != nil {
+				if !engagedWithSpeaker(eng, speakerID) {
+					msg := fmt.Sprintf("%s raises a finger to %s — \"one moment.\"\r\n",
+						n.Name, speakerName)
+					r.world.BroadcastToRoom(roomID, 0, msg)
+				}
+				continue
+			}
+		}
 		if !addressed(n, text, otherEntities) {
 			continue
 		}
@@ -659,5 +696,18 @@ func optString(m map[string]any, key string) string {
 	}
 	s, _ := v.(string)
 	return s
+}
+
+// engagedWithSpeaker reports whether the engagement's participants
+// include the speaker. Used by HandleSay to suppress the brush-off when
+// the engaged participant is the one talking (they shouldn't be
+// addressing themselves through M3 anyway, but be defensive).
+func engagedWithSpeaker(eng *engage.Engagement, speakerID world.ObjectID) bool {
+	for _, p := range eng.Participants {
+		if p.PlayerID == speakerID {
+			return true
+		}
+	}
+	return false
 }
 

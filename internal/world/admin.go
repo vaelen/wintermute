@@ -605,6 +605,12 @@ func (w *World) DeleteObject(ctx context.Context, id ObjectID) error {
 	if obj.Kind == KindDoor {
 		return fmt.Errorf("world: use DeleteDoor for door objects")
 	}
+	// Notify the engage layer before mutating. The observer must not
+	// call back into world mutations — it should spawn a goroutine
+	// for any blocking work.
+	if w.beforeDelete != nil {
+		w.beforeDelete(id)
+	}
 	loc := w.locations[id]
 	if err := w.db.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `DELETE FROM objects WHERE id = ?`, id)

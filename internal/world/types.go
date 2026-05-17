@@ -93,6 +93,12 @@ type Presence struct {
 	Write    func(string) error
 	Log      *slog.Logger
 
+	// SessionID is the stable per-connection identifier set by the
+	// session layer at attach time. Engagements key by this; the
+	// session-cleanup path uses it to find and force-close engagements
+	// on disconnect.
+	SessionID string
+
 	// detached is set when the world unregisters this presence (clean
 	// logout or force-detach to make room for a new login). Mutations
 	// refuse to operate on a detached presence; the session command loop

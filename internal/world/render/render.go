@@ -18,6 +18,13 @@ type RoomView struct {
 	Players []world.PresentPlayer
 	NPCs    []world.Object
 	Items   []world.Object
+
+	// EngagementOf, if non-nil, returns a short annotation string for
+	// the given object (player or NPC), or "" if it's not engaged.
+	// Examples: "at the public terminal", "talking with bartender".
+	// When non-nil, the annotation is appended to that entity's name in
+	// the "Also here:" line.
+	EngagementOf func(id world.ObjectID) string
 }
 
 // Room formats the canonical room view: name, description, sorted exit
@@ -39,7 +46,7 @@ func Room(v RoomView) string {
 	} else {
 		b.WriteString("Exits: none\r\n")
 	}
-	if line := formatPresences(v.Players, v.NPCs, v.Self); line != "" {
+	if line := formatPresences(v.Players, v.NPCs, v.Self, v.EngagementOf); line != "" {
 		b.WriteString("Also here: ")
 		b.WriteString(line)
 		b.WriteString("\r\n")
@@ -120,20 +127,30 @@ func formatExits(exits map[string]world.RoomID) string {
 	return strings.Join(keys, ", ")
 }
 
-func formatPresences(players []world.PresentPlayer, npcs []world.Object, self world.ObjectID) string {
+func formatPresences(players []world.PresentPlayer, npcs []world.Object, self world.ObjectID, engOf func(world.ObjectID) string) string {
 	var parts []string
 	for _, p := range players {
 		if p.ObjectID == self {
 			continue
 		}
-		if p.Awake {
-			parts = append(parts, p.Name)
-		} else {
-			parts = append(parts, p.Name+" (asleep)")
+		entry := p.Name
+		if !p.Awake {
+			entry += " (asleep)"
+		} else if engOf != nil {
+			if ann := engOf(p.ObjectID); ann != "" {
+				entry += " (" + ann + ")"
+			}
 		}
+		parts = append(parts, entry)
 	}
 	for _, n := range npcs {
-		parts = append(parts, n.Name)
+		entry := n.Name
+		if engOf != nil {
+			if ann := engOf(n.ID); ann != "" {
+				entry += " (" + ann + ")"
+			}
+		}
+		parts = append(parts, entry)
 	}
 	return strings.Join(parts, ", ")
 }

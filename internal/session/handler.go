@@ -18,6 +18,7 @@ import (
 	"github.com/vaelen/wintermute/internal/term"
 	"github.com/vaelen/wintermute/internal/world"
 	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
+	"github.com/vaelen/wintermute/internal/world/engage"
 )
 
 // Handler holds the dependencies a connection handler needs. One Handler
@@ -29,6 +30,14 @@ type Handler struct {
 	Admin  *worldcmd.AdminBackend
 	Logger *slog.Logger
 	MOTD   string
+
+	// EngageRegistry is the process-wide engagement registry. nil-safe
+	// for tests; when nil, modal dispatch falls through to the world parser.
+	EngageRegistry *engage.Registry
+
+	// EngageBackend is the per-session worldcmd-level engagement plumbing.
+	// May be nil; the world cmd handler is nil-safe (T9).
+	EngageBackend *worldcmd.EngageBackend
 
 	// Tuning knobs (intentionally exported so tests / config can lower them).
 	TelnetDetectTimeout      time.Duration

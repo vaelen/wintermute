@@ -497,6 +497,20 @@ func (w *World) Drop(ctx context.Context, p *Presence, target string) (Object, e
 	return dropped, nil
 }
 
+// BroadcastToRoom sends msg to every presence currently in roomID, optionally
+// excluding one player (pass 0 to exclude nobody). Used by the engage layer
+// for outside-view (enter/exit) lines. msg should already include the line
+// terminator the caller wants (typically "\r\n").
+func (w *World) BroadcastToRoom(roomID RoomID, exclude ObjectID, msg string) {
+	if msg == "" {
+		return
+	}
+	w.mu.RLock()
+	pending := w.collectBroadcastLocked(roomID, exclude, msg)
+	w.mu.RUnlock()
+	flush(pending)
+}
+
 // collectBroadcastLocked snapshots the per-presence Write callbacks that
 // should receive msg in room (excluding `except`). Caller must hold w.mu
 // (read or write); the returned slice is safe to invoke after the lock
