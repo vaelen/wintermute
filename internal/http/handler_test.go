@@ -217,3 +217,27 @@ func TestDownload_RefusesUploadToken(t *testing.T) {
 		t.Errorf("status = %d, want 400", r.StatusCode)
 	}
 }
+
+// TestDownload_WrongKindDoesNotBurnToken — PR review fix: presenting an
+// upload token to /download/ must return 400 without marking the token
+// used. The client should then be able to POST the same token to /upload/.
+func TestDownload_WrongKindDoesNotBurnToken(t *testing.T) {
+	e := setup(t)
+	tok, _ := e.files.IssueUpload(context.Background(), e.alice.ID, "x", time.Minute)
+	r, _ := netHTTP.Get(e.srv.URL + "/download/" + tok.Value)
+	_ = r.Body.Close()
+	if r.StatusCode != 400 {
+		t.Fatalf("wrong-kind status = %d, want 400", r.StatusCode)
+	}
+	// Retry against the correct endpoint — must still succeed.
+	resp, err := netHTTP.Post(e.srv.URL+"/upload/"+tok.Value,
+		"application/octet-stream", strings.NewReader("body"))
+	if err != nil {
+		t.Fatalf("retry POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("retry status = %d, body = %s", resp.StatusCode, b)
+	}
+}

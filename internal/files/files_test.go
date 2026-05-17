@@ -160,7 +160,7 @@ func TestIssueUpload_PersistsToken(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	tok, _ := e.svc.IssueUpload(ctx, e.alice.ID, "notes", time.Minute)
-	got, err := e.svc.RedeemToken(ctx, tok.Value)
+	got, err := e.svc.RedeemToken(ctx, tok.Value, KindUpload)
 	if err != nil {
 		t.Fatalf("RedeemToken: %v", err)
 	}
@@ -173,10 +173,10 @@ func TestRedeem_OneShot(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	tok, _ := e.svc.IssueUpload(ctx, e.alice.ID, "notes", time.Minute)
-	if _, err := e.svc.RedeemToken(ctx, tok.Value); err != nil {
+	if _, err := e.svc.RedeemToken(ctx, tok.Value, KindUpload); err != nil {
 		t.Fatalf("first redeem: %v", err)
 	}
-	if _, err := e.svc.RedeemToken(ctx, tok.Value); !errors.Is(err, ErrTokenUsed) {
+	if _, err := e.svc.RedeemToken(ctx, tok.Value, KindUpload); !errors.Is(err, ErrTokenUsed) {
 		t.Errorf("second redeem err = %v, want ErrTokenUsed", err)
 	}
 }
@@ -185,15 +185,32 @@ func TestRedeem_Expired(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	tok, _ := e.svc.IssueUpload(ctx, e.alice.ID, "notes", -time.Second)
-	if _, err := e.svc.RedeemToken(ctx, tok.Value); !errors.Is(err, ErrTokenExpired) {
+	if _, err := e.svc.RedeemToken(ctx, tok.Value, KindUpload); !errors.Is(err, ErrTokenExpired) {
 		t.Errorf("err = %v, want ErrTokenExpired", err)
 	}
 }
 
 func TestRedeem_Missing(t *testing.T) {
 	e := setup(t)
-	if _, err := e.svc.RedeemToken(context.Background(), strings.Repeat("0", 32)); !errors.Is(err, ErrTokenNotFound) {
+	if _, err := e.svc.RedeemToken(context.Background(), strings.Repeat("0", 32), KindUpload); !errors.Is(err, ErrTokenNotFound) {
 		t.Errorf("err = %v, want ErrTokenNotFound", err)
+	}
+}
+
+// TestRedeem_WrongKindDoesNotBurn covers the PR review fix: presenting
+// an upload token to the download flow (or vice versa) must NOT mark
+// the row used. The caller should be able to retry against the correct
+// endpoint.
+func TestRedeem_WrongKindDoesNotBurn(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	tok, _ := e.svc.IssueUpload(ctx, e.alice.ID, "notes", time.Minute)
+	if _, err := e.svc.RedeemToken(ctx, tok.Value, KindDownload); !errors.Is(err, ErrTokenWrongKind) {
+		t.Fatalf("wrong-kind redeem err = %v, want ErrTokenWrongKind", err)
+	}
+	// The token must still be redeemable with the correct kind.
+	if _, err := e.svc.RedeemToken(ctx, tok.Value, KindUpload); err != nil {
+		t.Errorf("retry with correct kind failed: %v", err)
 	}
 }
 
@@ -258,10 +275,10 @@ func TestJanitor_RemovesExpiredTokens(t *testing.T) {
 	if err := e.svc.Janitor(ctx, time.Minute); err != nil {
 		t.Fatalf("Janitor: %v", err)
 	}
-	if _, err := e.svc.RedeemToken(ctx, t1.Value); !errors.Is(err, ErrTokenNotFound) {
+	if _, err := e.svc.RedeemToken(ctx, t1.Value, KindUpload); !errors.Is(err, ErrTokenNotFound) {
 		t.Errorf("expired token still present: %v", err)
 	}
-	if _, err := e.svc.RedeemToken(ctx, t2.Value); err != nil {
+	if _, err := e.svc.RedeemToken(ctx, t2.Value, KindUpload); err != nil {
 		t.Errorf("live token should still redeem: %v", err)
 	}
 }

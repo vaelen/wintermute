@@ -189,7 +189,7 @@ func run(cfgPath string) error {
 		switch host.Kind {
 		case engage.KindTerminal:
 			th := engage.NewTerminalHandler(host, closeBroadcast)
-			th.SetDeps(buildTerminalDeps(w, authStore, mailSvc, boardsSvc, filesSvc, cfg))
+			th.SetDeps(buildTerminalDeps(ctx, w, authStore, mailSvc, boardsSvc, filesSvc, cfg))
 			handler = th
 		case engage.KindNPC:
 			n := npcReg.Get(host.ObjectID)
@@ -539,8 +539,11 @@ func playerNameFor(w *world.World, id world.ObjectID) string {
 
 // buildTerminalDeps constructs the TerminalDeps wired into every newly
 // opened terminal engagement. The AccountFor closure looks up the
-// player's body object in the world and resolves its account row.
+// player's body object in the world and resolves its account row. The
+// rootCtx is the engine ctx so handler-initiated DB ops cancel cleanly
+// on shutdown (mirrors NPCBinding.RootCtx).
 func buildTerminalDeps(
+	rootCtx context.Context,
 	w *world.World,
 	authStore *auth.Store,
 	mailSvc *mail.Service,
@@ -556,10 +559,11 @@ func buildTerminalDeps(
 		if obj.AccountID == nil {
 			return nil, fmt.Errorf("object %d has no account", id)
 		}
-		return authStore.GetByID(context.Background(), *obj.AccountID)
+		return authStore.GetByID(rootCtx, *obj.AccountID)
 	}
 	base := fmt.Sprintf("https://%s", joinHostPort(cfg.Server.PublicHost, cfg.Server.HTTPPort))
 	return &engage.TerminalDeps{
+		RootCtx:     rootCtx,
 		Mail:        mailSvc,
 		Boards:      boardsSvc,
 		Files:       filesSvc,

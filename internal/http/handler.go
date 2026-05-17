@@ -74,13 +74,9 @@ func uploadHandler(fs *files.Service, opts HandlerOptions) netHTTP.Handler {
 			netHTTP.Error(w, "bad token path", netHTTP.StatusBadRequest)
 			return
 		}
-		tok, err := fs.RedeemToken(r.Context(), token)
+		tok, err := fs.RedeemToken(r.Context(), token, files.KindUpload)
 		if err != nil {
 			writeTokenError(w, err)
-			return
-		}
-		if tok.Kind != files.KindUpload {
-			netHTTP.Error(w, "token is not for upload", netHTTP.StatusBadRequest)
 			return
 		}
 
@@ -143,13 +139,13 @@ func downloadHandler(fs *files.Service, opts HandlerOptions) netHTTP.Handler {
 			netHTTP.Error(w, "bad token path", netHTTP.StatusBadRequest)
 			return
 		}
-		tok, err := fs.RedeemToken(r.Context(), token)
+		tok, err := fs.RedeemToken(r.Context(), token, files.KindDownload)
 		if err != nil {
 			writeTokenError(w, err)
 			return
 		}
-		if tok.Kind != files.KindDownload || tok.FileID == nil {
-			netHTTP.Error(w, "token is not for download", netHTTP.StatusBadRequest)
+		if tok.FileID == nil {
+			netHTTP.Error(w, "download token missing file binding", netHTTP.StatusInternalServerError)
 			return
 		}
 		file, err := fs.GetFileByID(r.Context(), *tok.FileID)
@@ -177,6 +173,8 @@ func writeTokenError(w netHTTP.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, files.ErrTokenNotFound):
 		netHTTP.Error(w, "token not found", netHTTP.StatusNotFound)
+	case errors.Is(err, files.ErrTokenWrongKind):
+		netHTTP.Error(w, "token is for a different operation", netHTTP.StatusBadRequest)
 	case errors.Is(err, files.ErrTokenUsed), errors.Is(err, files.ErrTokenExpired):
 		netHTTP.Error(w, "token is no longer valid", netHTTP.StatusGone)
 	default:

@@ -22,12 +22,13 @@ import (
 
 // Sentinel errors.
 var (
-	ErrNotFound      = errors.New("files: not found")
-	ErrSlugTaken     = errors.New("files: slug taken")
-	ErrTokenNotFound = errors.New("files: token not found")
-	ErrTokenUsed     = errors.New("files: token already used")
-	ErrTokenExpired  = errors.New("files: token expired")
-	ErrBlobMissing   = errors.New("files: blob missing on disk")
+	ErrNotFound       = errors.New("files: not found")
+	ErrSlugTaken      = errors.New("files: slug taken")
+	ErrTokenNotFound  = errors.New("files: token not found")
+	ErrTokenUsed      = errors.New("files: token already used")
+	ErrTokenExpired   = errors.New("files: token expired")
+	ErrTokenWrongKind = errors.New("files: token is for a different operation")
+	ErrBlobMissing    = errors.New("files: blob missing on disk")
 )
 
 // File is one row of the files table.
@@ -278,9 +279,11 @@ func (s *Service) issueToken(ctx context.Context, accountID int64, kind TokenKin
 	return Token{Value: val, Kind: kind, AccountID: accountID, FileID: fileID, Slug: slug, ExpiresAt: expires}, nil
 }
 
-// RedeemToken looks up, validates, and marks-used the token. It is
-// atomic — a second call returns ErrTokenUsed.
-func (s *Service) RedeemToken(ctx context.Context, value string) (Token, error) {
+// RedeemToken looks up, validates, and marks-used the token. expectedKind
+// is checked inside the same transaction as the mark-used update, so a
+// token presented to the wrong endpoint returns ErrTokenWrongKind without
+// being burned and remains redeemable at the correct endpoint.
+func (s *Service) RedeemToken(ctx context.Context, value string, expectedKind TokenKind) (Token, error) {
 	var (
 		got       Token
 		expiresAt int64
@@ -299,6 +302,9 @@ func (s *Service) RedeemToken(ctx context.Context, value string) (Token, error) 
 				return ErrTokenNotFound
 			}
 			return err
+		}
+		if TokenKind(kind) != expectedKind {
+			return ErrTokenWrongKind
 		}
 		if usedAt.Valid {
 			return ErrTokenUsed

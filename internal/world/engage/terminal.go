@@ -5,10 +5,10 @@ package engage
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/vaelen/wintermute/internal/auth"
@@ -29,6 +29,14 @@ var terminalCommands = []string{
 // Any nil field falls back to the "not yet implemented" stub for the
 // corresponding commands.
 type TerminalDeps struct {
+	// RootCtx is the engine's root context. Every handler-initiated DB
+	// call uses ctx derived from this so that shutdown cancellation
+	// propagates and writes don't outlive `db.Close()`. Required when
+	// Mail/Boards/Files are non-nil. The handler does NOT derive a
+	// per-request timeout from this; callers that need one should add
+	// their own. Mirrors NPCBinding.RootCtx for the same reason.
+	RootCtx context.Context
+
 	// Mail is the mail service backing the `mail` family of commands.
 	Mail *mail.Service
 	// Boards backs the `bb*` family.
@@ -36,8 +44,8 @@ type TerminalDeps struct {
 	// Files + UploadURL back `upload` and `download`. UploadURL builds
 	// the public URL a player should paste into curl for a given token,
 	// e.g. https://host:port/upload/<token>.
-	Files     *files.Service
-	UploadURL func(token string) string
+	Files       *files.Service
+	UploadURL   func(token string) string
 	DownloadURL func(token string) string
 
 	// AccountFor maps a player's body ObjectID to its auth.Account.
@@ -46,11 +54,15 @@ type TerminalDeps struct {
 }
 
 // TerminalHandler is the built-in handler for kind='terminal' hosts.
-// Capacity-1 in M5.7; one in-flight paste compose per handler suffices.
+// Capacity is 1 in M5.7 — one participant per handler — but the
+// engage.Handler interface contract still requires concurrent safety,
+// so the per-participant paste-mode state is guarded by mu.
 type TerminalHandler struct {
-	host    *Host
-	close   func()
-	deps    *TerminalDeps
+	host  *Host
+	close func()
+	deps  *TerminalDeps
+
+	mu      sync.Mutex // guards compose
 	compose *composeState
 }
 
@@ -73,6 +85,57 @@ func (h *TerminalHandler) SetDeps(d *TerminalDeps) {
 	h.deps = d
 }
 
+// ctx returns the engine root context for handler-initiated DB calls,
+// or context.Background() as a last-resort fallback (test paths that
+// construct a TerminalHandler without deps). Mirrors NPCBinding.RootCtx
+// — see the M5.7 review (commit 10f6594) for the precedent: writes
+// keyed off context.Background() are invisible to wg.Wait + the 2s
+// shutdown backstop and can outlive db.Close().
+func (h *TerminalHandler) ctx() context.Context {
+	if h.deps != nil && h.deps.RootCtx != nil {
+		return h.deps.RootCtx
+	}
+	return context.Background()
+}
+
+// activeCompose returns the in-flight compose state under the handler's
+// mutex. Returns nil if no compose is in progress.
+func (h *TerminalHandler) activeCompose() *composeState {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.compose
+}
+
+// setCompose assigns the compose state under the lock. Passing nil
+// clears it.
+func (h *TerminalHandler) setCompose(c *composeState) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.compose = c
+}
+
+// takeCompose atomically removes and returns the current compose state.
+func (h *TerminalHandler) takeCompose() *composeState {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c := h.compose
+	h.compose = nil
+	return c
+}
+
+// appendComposeLine appends one body line to the current compose state.
+// Returns false if no compose is in progress (defensive — Handle's caller
+// already gated on activeCompose).
+func (h *TerminalHandler) appendComposeLine(line string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.compose == nil {
+		return false
+	}
+	h.compose.body = append(h.compose.body, line)
+	return true
+}
+
 func (h *TerminalHandler) OnOpen(p *Participant) {
 	h.writePrompt(p)
 }
@@ -87,7 +150,7 @@ func (h *TerminalHandler) OnClose(_ *Participant, _ CloseReason) {
 // Handle dispatches a single line of terminal input.
 func (h *TerminalHandler) Handle(p *Participant, line string) {
 	// Paste-mode: every line goes to the in-flight compose until "."
-	if h.compose != nil {
+	if h.activeCompose() != nil {
 		h.handleComposeLine(p, line)
 		return
 	}
@@ -131,7 +194,7 @@ func (h *TerminalHandler) handleMail(p *Participant, args string) {
 		_ = p.Write("mail: not yet implemented (M6).\r\n")
 		return
 	}
-	ctx := context.Background()
+	ctx := h.ctx()
 	acc, err := h.deps.AccountFor(p.PlayerID)
 	if err != nil || acc == nil {
 		_ = p.Write("mail: cannot resolve account.\r\n")
@@ -262,7 +325,7 @@ func (h *TerminalHandler) handleBoards(p *Participant, cmd, args string) {
 		_ = p.Write(cmd + ": not yet implemented (M6).\r\n")
 		return
 	}
-	ctx := context.Background()
+	ctx := h.ctx()
 	acc, err := h.deps.AccountFor(p.PlayerID)
 	if err != nil || acc == nil {
 		_ = p.Write(cmd + ": cannot resolve account.\r\n")
@@ -431,7 +494,7 @@ func (h *TerminalHandler) handleUpload(p *Participant, args string) {
 		_ = p.Write("upload: not yet implemented (M6).\r\n")
 		return
 	}
-	ctx := context.Background()
+	ctx := h.ctx()
 	acc, err := h.deps.AccountFor(p.PlayerID)
 	if err != nil || acc == nil {
 		_ = p.Write("upload: cannot resolve account.\r\n")
@@ -461,7 +524,7 @@ func (h *TerminalHandler) handleDownload(p *Participant, args string) {
 		_ = p.Write("download: not yet implemented (M6).\r\n")
 		return
 	}
-	ctx := context.Background()
+	ctx := h.ctx()
 	acc, err := h.deps.AccountFor(p.PlayerID)
 	if err != nil || acc == nil {
 		_ = p.Write("download: cannot resolve account.\r\n")
@@ -489,71 +552,76 @@ func (h *TerminalHandler) handleDownload(p *Participant, args string) {
 // -- paste-mode compose -------------------------------------------------
 
 func (h *TerminalHandler) beginCompose(p *Participant, c *composeState) {
-	h.compose = c
+	h.setCompose(c)
 	_ = p.Write("Enter your message. End with a single line containing only `.` (or `/abort` to cancel).\r\n")
 }
 
 func (h *TerminalHandler) handleComposeLine(p *Participant, line string) {
 	switch strings.TrimSpace(line) {
 	case ".":
-		c := h.compose
-		h.compose = nil
+		c := h.takeCompose()
+		if c == nil {
+			return
+		}
 		h.commitCompose(p, c)
 	case "/abort":
-		h.compose = nil
+		h.setCompose(nil)
 		_ = p.Write("Compose aborted.\r\n")
 		h.writePrompt(p)
 	default:
-		h.compose.body = append(h.compose.body, line)
+		_ = h.appendComposeLine(line)
 		// no prompt — paste mode is silent until "."
 	}
 }
 
 func (h *TerminalHandler) commitCompose(p *Participant, c *composeState) {
-	ctx := context.Background()
+	defer h.writePrompt(p)
+
+	// Resolve the account once. A nil/err result here would otherwise
+	// panic inside Mail.Send (it dereferences from.ID/from.Username
+	// with no nil guard); mirror the early-bail pattern used by the
+	// command dispatchers above.
+	acc, err := h.deps.AccountFor(p.PlayerID)
+	if err != nil || acc == nil {
+		_ = p.Write("compose: cannot resolve account; message discarded.\r\n")
+		return
+	}
+
+	ctx := h.ctx()
 	body := strings.Join(c.body, "\n")
 	switch c.kind {
 	case "mail-send":
-		acc, _ := h.deps.AccountFor(p.PlayerID)
-		_, err := h.deps.Mail.Send(ctx, acc, c.args[0], c.subject, body, "")
-		if err != nil {
+		if _, err := h.deps.Mail.Send(ctx, acc, c.args[0], c.subject, body, ""); err != nil {
 			_ = p.Write(fmt.Sprintf("mail send: %v\r\n", err))
 		} else {
 			_ = p.Write("Message sent.\r\n")
 		}
 	case "mail-reply":
-		acc, _ := h.deps.AccountFor(p.PlayerID)
-		_, err := h.deps.Mail.Send(ctx, acc, c.args[0], c.subject, body, c.args[1])
-		if err != nil {
+		if _, err := h.deps.Mail.Send(ctx, acc, c.args[0], c.subject, body, c.args[1]); err != nil {
 			_ = p.Write(fmt.Sprintf("mail reply: %v\r\n", err))
 		} else {
 			_ = p.Write("Reply sent.\r\n")
 		}
 	case "bb-post":
-		acc, _ := h.deps.AccountFor(p.PlayerID)
-		_, err := h.deps.Boards.Post(ctx, c.args[0], acc, c.subject, body)
-		if err != nil {
+		if _, err := h.deps.Boards.Post(ctx, c.args[0], acc, c.subject, body); err != nil {
 			_ = p.Write(fmt.Sprintf("bbpost: %v\r\n", err))
 		} else {
 			_ = p.Write("Posted.\r\n")
 		}
 	case "bb-reply":
-		acc, _ := h.deps.AccountFor(p.PlayerID)
 		parentID, _ := strconv.ParseInt(c.args[1], 10, 64)
-		_, err := h.deps.Boards.Reply(ctx, c.args[0], acc, parentID, c.subject, body)
-		if err != nil {
+		if _, err := h.deps.Boards.Reply(ctx, c.args[0], acc, parentID, c.subject, body); err != nil {
 			_ = p.Write(fmt.Sprintf("bbreply: %v\r\n", err))
 		} else {
 			_ = p.Write("Reply posted.\r\n")
 		}
 	}
-	h.writePrompt(p)
 }
 
 // -- helpers ------------------------------------------------------------
 
 func (h *TerminalHandler) writePrompt(p *Participant) {
-	if h.compose != nil {
+	if h.activeCompose() != nil {
 		_ = p.Write(".> ")
 		return
 	}
@@ -642,6 +710,3 @@ func pluralReply(n int) string {
 	return "ies"
 }
 
-// errAccountResolve is reserved for tests that exercise the AccountFor
-// failure path; not used by production code.
-var errAccountResolve = errors.New("terminal: account resolve failed")
