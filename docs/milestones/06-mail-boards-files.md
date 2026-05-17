@@ -2,7 +2,7 @@
 
 ## Goal
 
-Players can send private mail, read and post to shared message boards, and upload/download files via short-lived HTTPS URLs. All metadata is in SQLite; file blobs are content-addressed on disk. BBS-era protocols (X/Y/Z/Kermit) are deferred to M9–M10; this milestone ships the modern path so the features are usable while M9 is being built.
+Players can send private mail, read and post to shared message boards, and upload/download files via short-lived HTTPS URLs. All metadata is in SQLite; file blobs are content-addressed on disk. BBS-era protocols (X/Y/ZModem) are deferred to M9; this milestone ships the modern path so the features are usable while M9 is being built.
 
 All player-facing mail/board/file commands are reached **inside a terminal engagement** (M5.7) rather than at the world prompt — sitting down at a terminal opens a private command interface, and the commands below run there. Other players in the room see that the engaged player is at the terminal but not the content. The terminal command-table dispatch is set up in M5.7; M6 fleshes out the handlers and the backing services.
 
@@ -378,7 +378,7 @@ CREATE INDEX idx_file_tokens_expires ON file_tokens(expires_at);
 7. Implement `internal/files`: blob store on disk, dedup, mime detection, ACL checks, token issuance.
 8. Implement `internal/http` listener with the two routes.
 9. Replace M5.7's terminal-handler stubs (`mail`, `bb`, `bbreply`, `bbthread`, `upload`, `download`, …) with real handlers that call into `internal/mail`, `internal/boards`, `internal/files`. (If M5.7 did not stub `bbreply`/`bbthread`, add them to the engagement command table.)
-10. Implement the asynchronous "upload complete" notification: when the HTTP handler finalizes the file, it writes a `[terminal] Upload received…` line to the owner's session via the session writer; persistence for disconnected players uses the existing post-MOTD delivery (same path as unread-mail count).
+10. Implement the asynchronous "upload complete" notification: when the HTTP handler finalizes the file, log the event and fire the `OnUpload` callback hook. (Live-session push and persistence-for-disconnected-players are scoped out of M6 itself — the persistence mechanism is added in M6.2 by delivering a system mail to the file owner.)
 11. Implement a periodic janitor goroutine: deletes expired tokens, deletes orphaned blobs (files with no `files` row referencing the hash), runs every N minutes (configurable).
 12. Add `@cleanup-files` admin command that runs the janitor immediately.
 13. Expose to admin Lua: `wintermute.ftn.network.list/get`, `wintermute.board.create/delete` (accepting `network` slug + `area_tag`), `wintermute.mail.broadcast`, `wintermute.file.list`. Adding/removing networks is a config-file operation, not an admin-Lua one — the schema lookups exist but no mutating Lua APIs are exposed in M6.
@@ -416,13 +416,13 @@ CREATE INDEX idx_file_tokens_expires ON file_tokens(expires_at);
 7. An unrecognized `^a` kludge line on an ingressed message round-trips: it appears verbatim in `kludges` and is not lost. (Synthesised test, since FTN ingress isn't in M6 — the test feeds a hand-crafted message body through the parser/serializer.)
 8. Uploading the same file twice (different slugs) creates two `files` rows but one blob on disk.
 9. A download URL refuses a second use; an expired URL refuses the first use.
-10. Uploads that finish after the player has disconnected are persisted and visible on next login.
-11. The HTTP listener uses TLS in production (autocert) and a self-signed cert in dev.
+10. Uploads complete cleanly; the `OnUpload` callback fires with the right metadata. (Owner-visible notification is M6.2's job.)
+11. The HTTP listener runs on `cfg.Server.HTTPPort`. (Production TLS is M10's job; M6 ships plain HTTP for dev.)
 12. All new files carry the MIT header.
 
 ## Risks & open questions
 
-- **TLS for HTTP**: the in-world telnet TLS port and the file HTTP TLS port can share the same cert or use separate certs. Lean toward shared autocert for both, since both want a real DNS name.
+- **TLS for HTTP**: deferred to M10. The intent is that the telnet TLS port and the file HTTPS port share a single provider (autocert in prod, self-signed in dev). M6 ships plain HTTP so the feature is reachable in development; production deployments wait on M10 or front the engine with a reverse proxy.
 - **Public URL construction**: the printed URL needs the server's externally reachable hostname. Make this a required config field (`server.public_host`). Refuse to start `internal/http` listener if unset and the file-transfer feature is enabled.
 - **Upload size limits**: enforce a per-upload size cap (default 100 MB) at the HTTP layer; reject early via `Content-Length` then enforce with a `LimitReader`.
 - **Slug collisions on upload**: the player names a slug at upload time. If it's taken, refuse and tell the player. Don't auto-rename.

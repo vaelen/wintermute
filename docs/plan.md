@@ -112,7 +112,7 @@ wintermute/
 ├── docs/
 │   ├── design.md
 │   ├── plan.md             (this file)
-│   └── milestones/01..10
+│   └── milestones/01..11
 ├── LICENSE
 ├── README.md
 ├── Makefile
@@ -148,24 +148,29 @@ github.com/vaelen/go-zmodem
 | HTTP | `net/http` (stdlib) |
 | Password hashing | `golang.org/x/crypto/argon2` |
 | Lint | `golangci-lint` |
-| Test fixtures | `lrzsz` (for ZModem CI), `gkermit` (optional, M10) |
+| Test fixtures | `lrzsz` (for ZModem CI) |
 
 ## Milestones
 
-| #  | Milestone                          | Summary                                                                            | Depends on | Effort | Status |
-|----|------------------------------------|------------------------------------------------------------------------------------|------------|--------|--------|
-| 01 | Connection layer                   | Telnet (opt-in) + TLS + raw-TCP; capability detection across six encodings; accounts, login | —          | L      | not started |
-| 02 | World layer                        | Rooms, exits, objects, movement, basic commands                                    | 01         | M      | not started |
-| 03 | Reactive NPCs                      | Pluggable `LLM` interface, Ollama backend, addressed-only NPC responses            | 02         | M      | not started |
-| 04 | NPC memory                         | Short-term ring buffer, long-term summary+embedding via `sqlite-vec`               | 03         | M      | not started |
-| 05 | Admin scripting                    | gopher-lua, admin world API, tool registry (NPC tool calls wired in M7)            | 02         | L      | not started |
-| 05.5 | Readline line editing            | In-line editing + per-session history on ANSI terminals; simple loop kept for the rest | 01         | S      | not started |
-| 05.7 | Diegetic engagement primitive    | Player↔object and player↔NPC private engagements; M3 name-tag fallback becomes engagement-aware | 03, 05 | M | not started |
-| 06 | Mail / boards / HTTPS file transfer | In-world mail, message boards, token-gated upload/download — accessed via a terminal engagement (M5.7) | 05.7  | M      | not started |
-| 07 | Semi-autonomous NPC loop           | Event bus, tick goroutines, two-tier routing, budget enforcement, tool execution   | 04, 05     | L      | not started |
-| 08 | Player-tier scripting              | Sandboxed Lua, instruction/memory budgets, ACL-restricted world API                | 05         | M      | not started |
-| 09 | X/Y/ZModem spinoff libraries       | Three MIT-licensed Go modules, engine integration                                  | 06         | L      | not started |
-| 10 | Kermit                             | `gkermit` subprocess wrapper                                                       | 06         | S      | not started |
+| #    | Milestone                            | Summary                                                                                                                | Depends on        | Effort | Status      |
+|------|--------------------------------------|------------------------------------------------------------------------------------------------------------------------|-------------------|--------|-------------|
+| 01   | Connection layer                     | Telnet (opt-in) + TLS + raw-TCP; capability detection across six encodings; accounts, login                            | —                 | L      | not started |
+| 02   | World layer                          | Rooms, exits, objects, movement, basic commands                                                                        | 01                | M      | not started |
+| 03   | Reactive NPCs                        | Pluggable `LLM` interface, Ollama backend, addressed-only NPC responses                                                | 02                | M      | not started |
+| 04   | NPC memory                           | Short-term ring buffer, long-term summary+embedding via `sqlite-vec`                                                   | 03                | M      | not started |
+| 05   | Admin scripting                      | gopher-lua, admin world API, tool registry (NPC tool calls wired in M7)                                                | 02                | L      | not started |
+| 05.5 | Readline line editing                | In-line editing + per-session history on ANSI terminals; simple loop kept for the rest                                 | 01                | S      | not started |
+| 05.7 | Diegetic engagement primitive        | Player↔object and player↔NPC private engagements; M3 name-tag fallback becomes engagement-aware                        | 03, 05            | M      | not started |
+| 06   | Mail / boards / HTTPS file transfer  | In-world mail, message boards, token-gated upload/download — accessed via a terminal engagement (M5.7)                 | 05.7              | M      | not started |
+| 06.1 | Admin Lua: mail / boards / networks  | `wintermute.mail.*`, `wintermute.board.*`, `wintermute.ftn.network.*` admin bindings; no new in-game admin commands    | 06                | S      | not started |
+| 06.2 | Admin Lua: files + Dropbox + mail-on-upload | File-area concept + default `dropbox`; admin Lua for files; upload-complete delivered as system mail; `@cleanup-files` | 06, 06.1          | S      | not started |
+| 06.3 | Menu-driven engagement interface     | Reusable line-drawing menu handler (mail/boards/files entries opt-in per object); ASCII fallback for non-UTF-8         | 05.7, 06, 06.2    | M      | not started |
+| 06.4 | Menu-driven admin interface          | Admin entry in the M6.3 menu, gated by admin level + per-object opt-in; users/mail/boards/files/objects/rooms/networks | 06.1, 06.2, 06.3  | M      | not started |
+| 07   | Semi-autonomous NPC loop             | Event bus, tick goroutines, two-tier routing, budget enforcement, tool execution                                       | 04, 05            | L      | not started |
+| 08   | Player-tier scripting                | Sandboxed Lua, instruction/memory budgets, ACL-restricted world API                                                    | 05                | M      | not started |
+| 09   | X/Y/ZModem spinoff libraries         | Three MIT-licensed Go modules, engine integration                                                                      | 06                | L      | not started |
+| 10   | TLS configuration                    | Shared `self-signed` / `files` / `autocert` provider for the telnet TLS port and the HTTPS file-transfer port          | 01, 06            | S      | not started |
+| 11   | End-to-end integration testing       | Living scenario suite; each milestone appends its scenario wishlist as it ships                                        | (all)             | M      | not started |
 
 ### Sequencing
 
@@ -173,16 +178,23 @@ github.com/vaelen/go-zmodem
 01 ── 02 ── 03 ── 04 ──┐
  │     │     │         ├── 07
  │     │     └── 05 ───┤
- │     │           │   └── 05.7 ── 06 ──┬── 09
- │     │           └── 08                └── 10
+ │     │           │   └── 05.7 ── 06 ── 06.1 ── 06.2 ── 06.3 ── 06.4
+ │     │           │                                      │
+ │     │           │                                      └── 09
+ │     │           └── 08
  │     │
+ │     └── 10 (depends on 01 + 06; can land any time after 06)
+ │
  └── 05.5 (independent QoL pass; depends only on 01)
+
+11 is a living document tracking every other milestone's end-to-end scenarios.
 ```
 
 Natural milestones along the way:
 - **After M5**: a complete, playable MUSH with reactive NPCs that have memory and an admin scripting layer. This is the first "show someone the game" moment.
+- **After M6.4**: full BBS-style menus + admin console reachable from in-game, with mail/boards/files all manageable without leaving the world.
 - **After M8**: feature-complete MUSH with autonomous NPCs and player-authored content.
-- **After M10**: BBS-authentic protocols fully in place.
+- **After M9 + M10**: BBS-authentic protocols and production-grade TLS in place.
 
 ## Cross-cutting concerns
 
@@ -251,12 +263,16 @@ This is a side project, not a sprint. Expected pacing:
 - M5.5: a weekend (small package, isolated from the rest of the engine).
 - M5.7: 1–2 weeks (new world-layer primitive plus parser + M3 integration).
 - M6: 1 week.
+- M6.1 + M6.2: a weekend each (admin Lua wraps existing services).
+- M6.3: 1–2 weeks (the menu renderer + state machine is the bulk).
+- M6.4: 1 week (each admin subsection is small once the M6.3 framework exists).
 - M7: 2–3 weeks (event bus + budgets + tool invocation is the trickiest milestone).
 - M8: 1–2 weeks.
 - M9: 1 week per protocol, run as three separate open-source releases.
-- M10: a long afternoon.
+- M10: a long weekend (autocert is the bulk; self-signed already works).
+- M11: continuous; pick a 1-week sweep after each major milestone to drain its scenario backlog.
 
-Total: roughly 3–5 months of focused weekends to reach M8, more realistically 6–9 months calendar time.
+Total: roughly 4–6 months of focused weekends to reach M8, more realistically 7–10 months calendar time.
 
 ## How to use these plans
 
