@@ -21,6 +21,7 @@ import (
 
 	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/config"
+	ftnnetworks "github.com/vaelen/wintermute/internal/ftn/networks"
 	_ "github.com/vaelen/wintermute/internal/llm/ollama"
 	wnettls "github.com/vaelen/wintermute/internal/net/tls"
 	"github.com/vaelen/wintermute/internal/npc"
@@ -65,6 +66,10 @@ func run(cfgPath string) error {
 		return err
 	}
 	defer db.Close()
+
+	if err := ftnnetworks.Bootstrap(ctx, db, cfg.FTN.Network, logger); err != nil {
+		return fmt.Errorf("bootstrap ftn networks: %w", err)
+	}
 
 	authStore := auth.NewStore(db)
 
