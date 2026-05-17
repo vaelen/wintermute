@@ -144,7 +144,10 @@ func TestUpload_TooLarge(t *testing.T) {
 	tok, _ := e.files.IssueUpload(context.Background(), e.alice.ID, "big", time.Minute)
 	big := bytes.Repeat([]byte("X"), (1<<20)+1)
 	req, _ := netHTTP.NewRequest("POST", e.srv.URL+"/upload/"+tok.Value, bytes.NewReader(big))
-	resp, _ := netHTTP.DefaultClient.Do(req)
+	resp, err := netHTTP.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 413 {
 		t.Errorf("status = %d, want 413", resp.StatusCode)
