@@ -45,7 +45,7 @@ Each library can be tagged/released independently when complete.
 
 ## Out of scope
 
-- Kermit (M10).
+- Kermit. (Dropped from the roadmap.)
 - Compression and 32-bit CRC enhancements to ZModem (defer; the standard subset is enough for compatibility with `lrzsz`).
 - A pluggable framing layer shared across all three libraries. The protocols differ enough that shared abstractions cost more than they save.
 

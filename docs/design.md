@@ -14,7 +14,7 @@ In-world features modeled after BBSes — private mail, shared message boards, f
 - Persistent, multi-user, text-based virtual world.
 - LLM-powered NPCs with per-NPC persona, long-term memory, and tool use.
 - Tiered scripting: admins author full-power scripts; players script their owned spaces in a sandboxed subset.
-- Authentic BBS-era protocol support (telnet, TLS, character set negotiation, X/Y/ZModem, Kermit) *and* modern HTTPS paths for the same operations.
+- Authentic BBS-era protocol support (telnet, TLS, character set negotiation, X/Y/ZModem) *and* modern HTTPS paths for the same operations.
 - Single-binary distribution, embedded storage, minimal operational footprint.
 - Pluggable LLM backends — local (Ollama) and hosted APIs (Anthropic, OpenAI, etc.) interchangeable per-NPC.
 
@@ -265,7 +265,7 @@ Each library:
 - Ships with a CLI demo and reference fixtures.
 - Targets compatibility with `lrzsz` on the other end.
 
-Kermit is **not** spun off — its spec is large and varied, and demand for a pure-Go Kermit is low. The engine wraps Columbia's `G-Kermit` as a subprocess piped through the player's session.
+Kermit support has been dropped from the roadmap — the spec is large and varied, demand for a pure-Go Kermit is low, and the X/Y/Z trio plus the HTTPS path already cover the file-transfer surface.
 
 ## Library stack (summary)
 
@@ -285,7 +285,6 @@ Kermit is **not** spun off — its spec is large and varied, and demand for a pu
 | XModem | own (this project) | Standalone library |
 | YModem | own (this project) | Standalone library |
 | ZModem | own (this project) | Standalone library |
-| Kermit | `G-Kermit` (subprocess) | Spec too large to port |
 
 ## Build order
 
@@ -296,13 +295,14 @@ The maximalist target is a multi-year project. The following ordering keeps the 
 3. **Reactive NPCs** — addressed-only response. Single LLM provider (start with Ollama for cost reasons). No long-term memory.
 4. **NPC memory** — short-term ring buffer, long-term summarization + vector retrieval.
 5. **Admin scripting** — full-power Lua, world API, tool registration for NPCs.
-6. **In-world mail, boards, HTTPS file transfer.**
+6. **In-world mail, boards, HTTPS file transfer**, then the admin Lua surface, default file area, and a menu-driven engagement UI for both players and admins (sub-milestones 6.1 through 6.4).
 7. **Semi-autonomous NPC loop** — event bus, tick scheduler, two-tier model routing, budget enforcement.
 8. **Player-tier scripting** — sandboxed Lua, ACL-restricted world API.
 9. **XModem / YModem / ZModem spinoff libraries**, integrated into the file-transfer flow.
-10. **Kermit** via `G-Kermit` wrapper, if still wanted at this point.
+10. **TLS configuration** — shared `self-signed` / `files` / `autocert` provider for the telnet TLS port and the HTTPS file-transfer port.
+11. **End-to-end integration testing** — a living scenario suite covering every prior milestone.
 
-Steps 1–5 alone constitute a complete, playable MUSH with conversational NPCs. The remaining steps add the features that distinguish Wintermute from a generic LLM-MUD: autonomy, player creativity, and BBS-authentic file transfer.
+Steps 1–5 alone constitute a complete, playable MUSH with conversational NPCs. Steps 6–6.4 round out BBS features (mail, boards, files) with menu-driven UIs and admin tooling. The remaining steps add the features that distinguish Wintermute from a generic LLM-MUD: autonomy, player creativity, BBS-authentic file transfer, and production-grade TLS.
 
 ## Open questions
 

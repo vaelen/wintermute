@@ -37,3 +37,30 @@ model            = "llama3.2:3b"
 gate_model       = "llama3.2:1b"
 summarizer_model = "llama3.2:1b"
 embedding_model  = "nomic-embed-text"
+
+# FidoNet Technology Network (FTN) membership (milestone 6+). Each
+# [[ftn.network]] block is one network this server is a node on. If you
+# don't declare any, a `local` network is auto-created at startup
+# (domain `local`, address 255:255/255.0); local-only mail and boards
+# live there. Set `default = true` on one network to make it the
+# default for new boards. Mail between two accounts on this instance
+# always uses the `local` network regardless of default.
+#
+# [[ftn.network]]
+# slug    = "local"
+# name    = "Local"
+# domain  = "local"
+# addr    = "255:255/255.0"
+# default = true
+#
+# [[ftn.network]]
+# slug    = "fidonet"
+# name    = "FidoNet"
+# domain  = "fidonet"
+# addr    = "1:234/5.0"
+#
+# [[ftn.network]]
+# slug    = "fsxnet"
+# name    = "fsxNet"
+# domain  = "fsxnet"
+# addr    = "21:1/100.0"

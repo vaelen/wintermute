@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -20,8 +21,14 @@ import (
 	"time"
 
 	"github.com/vaelen/wintermute/internal/auth"
+	"github.com/vaelen/wintermute/internal/boards"
 	"github.com/vaelen/wintermute/internal/config"
+	"github.com/vaelen/wintermute/internal/files"
+	"github.com/vaelen/wintermute/internal/ftn/msgid"
+	ftnnetworks "github.com/vaelen/wintermute/internal/ftn/networks"
+	wintermutehttp "github.com/vaelen/wintermute/internal/http"
 	_ "github.com/vaelen/wintermute/internal/llm/ollama"
+	"github.com/vaelen/wintermute/internal/mail"
 	wnettls "github.com/vaelen/wintermute/internal/net/tls"
 	"github.com/vaelen/wintermute/internal/npc"
 	scriptlua "github.com/vaelen/wintermute/internal/script/lua"
@@ -65,6 +72,24 @@ func run(cfgPath string) error {
 		return err
 	}
 	defer db.Close()
+
+	if err := ftnnetworks.Bootstrap(ctx, db, cfg.FTN.Network, logger); err != nil {
+		return fmt.Errorf("bootstrap ftn networks: %w", err)
+	}
+
+	// M6: mail, boards, files services + MSGID issuer share a single
+	// instance across the process.
+	msgidIssuer := msgid.NewIssuer(db)
+	mailSvc := mail.NewService(db, msgidIssuer, "Wintermute/0.6.0-dev")
+	boardsSvc := boards.NewService(db, msgidIssuer, boards.ServiceOptions{
+		PID:        "Wintermute/0.6.0-dev",
+		ServerName: "Wintermute",
+		Tearline:   "--- Wintermute/0.6.0-dev",
+	})
+	filesSvc, err := files.NewService(db, cfg.Files.Root)
+	if err != nil {
+		return fmt.Errorf("files store: %w", err)
+	}
 
 	authStore := auth.NewStore(db)
 
@@ -163,7 +188,9 @@ func run(cfgPath string) error {
 		var handler engage.Handler
 		switch host.Kind {
 		case engage.KindTerminal:
-			handler = engage.NewTerminalHandler(host, closeBroadcast)
+			th := engage.NewTerminalHandler(host, closeBroadcast)
+			th.SetDeps(buildTerminalDeps(ctx, w, authStore, mailSvc, boardsSvc, filesSvc, cfg))
+			handler = th
 		case engage.KindNPC:
 			n := npcReg.Get(host.ObjectID)
 			if n == nil {
@@ -244,6 +271,17 @@ func run(cfgPath string) error {
 	handler.HistorySize = cfg.Session.HistorySize
 	handler.EngageRegistry = engageReg
 	handler.EngageBackend = engageBackend
+	handler.PostMOTD = func(ctx context.Context, acc *auth.Account) string {
+		n, err := mailSvc.UnreadCount(ctx, acc.ID)
+		if err != nil || n == 0 {
+			return ""
+		}
+		s := "s"
+		if n == 1 {
+			s = ""
+		}
+		return fmt.Sprintf("You have %d new message%s. Sit at a terminal and type `mail` to read.\r\n", n, s)
+	}
 	if cfg.Server.TelnetPort > 0 {
 		ln, err := net.Listen("tcp", joinHostPort("0.0.0.0", cfg.Server.TelnetPort))
 		if err != nil {
@@ -271,6 +309,66 @@ func run(cfgPath string) error {
 		}()
 		go func() { <-ctx.Done(); _ = tlsLn.Close() }()
 	}
+
+	// M6: file-transfer HTTPS listener on cfg.Server.HTTPPort.
+	if cfg.Server.HTTPPort > 0 {
+		fileHandler := wintermutehttp.NewHandler(filesSvc, wintermutehttp.HandlerOptions{
+			MaxUploadBytes: cfg.Files.MaxUploadBytes,
+			OnUpload: func(ev wintermutehttp.UploadEvent) {
+				logger.Info("file uploaded",
+					"account_id", ev.AccountID, "file_id", ev.FileID,
+					"slug", ev.Slug, "size", ev.Size, "mime", ev.MIME)
+				// TODO: deliver "[terminal] Upload received…" to the
+				// owner's session if they are still connected, and
+				// persist for next login otherwise.
+			},
+			Logger: logger,
+		})
+		httpAddr := joinHostPort("0.0.0.0", cfg.Server.HTTPPort)
+		// Share the TLS config used by the telnet TLS port: same autocert,
+		// same self-signed cert. The underlying net listener is reused
+		// only if TLSPort is configured; otherwise we serve plain HTTP
+		// (dev-only).
+		fileServer := &http.Server{
+			Addr:    httpAddr,
+			Handler: fileHandler,
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			logger.Info("listening", "kind", "http", "addr", httpAddr)
+			if err := fileServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("http server", "err", err)
+			}
+		}()
+		go func() { <-ctx.Done(); _ = fileServer.Shutdown(context.Background()) }()
+	}
+
+	// M6: files janitor — prune expired tokens and orphan blobs.
+	janitorInterval := time.Duration(cfg.Files.JanitorIntervalSeconds) * time.Second
+	if janitorInterval == 0 {
+		janitorInterval = 5 * time.Minute
+	}
+	blobGrace := time.Duration(cfg.Files.JanitorBlobGraceSeconds) * time.Second
+	if blobGrace == 0 {
+		blobGrace = 10 * time.Minute
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tick := time.NewTicker(janitorInterval)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				if err := filesSvc.Janitor(ctx, blobGrace); err != nil {
+					logger.Warn("files janitor", "err", err)
+				}
+			}
+		}
+	}()
 
 	<-ctx.Done()
 	logger.Info("shutdown requested")
@@ -437,4 +535,40 @@ func playerNameFor(w *world.World, id world.ObjectID) string {
 		return "someone"
 	}
 	return obj.Name
+}
+
+// buildTerminalDeps constructs the TerminalDeps wired into every newly
+// opened terminal engagement. The AccountFor closure looks up the
+// player's body object in the world and resolves its account row. The
+// rootCtx is the engine ctx so handler-initiated DB ops cancel cleanly
+// on shutdown (mirrors NPCBinding.RootCtx).
+func buildTerminalDeps(
+	rootCtx context.Context,
+	w *world.World,
+	authStore *auth.Store,
+	mailSvc *mail.Service,
+	boardsSvc *boards.Service,
+	filesSvc *files.Service,
+	cfg *config.Config,
+) *engage.TerminalDeps {
+	accountFor := func(id world.ObjectID) (*auth.Account, error) {
+		obj, err := w.Object(id)
+		if err != nil {
+			return nil, err
+		}
+		if obj.AccountID == nil {
+			return nil, fmt.Errorf("object %d has no account", id)
+		}
+		return authStore.GetByID(rootCtx, *obj.AccountID)
+	}
+	base := fmt.Sprintf("https://%s", joinHostPort(cfg.Server.PublicHost, cfg.Server.HTTPPort))
+	return &engage.TerminalDeps{
+		RootCtx:     rootCtx,
+		Mail:        mailSvc,
+		Boards:      boardsSvc,
+		Files:       filesSvc,
+		UploadURL:   func(token string) string { return base + "/upload/" + token },
+		DownloadURL: func(token string) string { return base + "/download/" + token },
+		AccountFor:  accountFor,
+	}
 }

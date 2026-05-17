@@ -8,6 +8,8 @@ import (
 	"os"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/vaelen/wintermute/internal/ftn/addr"
 )
 
 // Config is the engine's top-level configuration as loaded from
@@ -19,6 +21,38 @@ type Config struct {
 	TLS     TLSConfig     `toml:"tls"`
 	LLM     LLMConfig     `toml:"llm"`
 	Session SessionConfig `toml:"session"`
+	FTN     FTNConfig     `toml:"ftn"`
+	Files   FilesConfig   `toml:"files"`
+}
+
+// FilesConfig configures the on-disk blob store used by uploads.
+type FilesConfig struct {
+	// Root is the blob store directory. Default "./blobs".
+	Root string `toml:"root"`
+	// MaxUploadBytes caps per-upload size. 0 means 100 MB.
+	MaxUploadBytes int64 `toml:"max_upload_bytes"`
+	// JanitorIntervalSeconds is how often the janitor sweep runs. 0 ⇒ 300.
+	JanitorIntervalSeconds int `toml:"janitor_interval_seconds"`
+	// JanitorBlobGraceSeconds is the mtime grace period before a
+	// referenceless blob is reaped. 0 ⇒ 600 (10 minutes).
+	JanitorBlobGraceSeconds int `toml:"janitor_blob_grace_seconds"`
+}
+
+// FTNConfig holds the operator-declared FidoNet Technology Network nodes
+// this server is a member of. Each entry becomes (or updates) a row in
+// the ftn_networks table at startup. An entry for the `local` network is
+// auto-created at startup if no networks are declared.
+type FTNConfig struct {
+	Network []FTNNetwork `toml:"network"`
+}
+
+// FTNNetwork is one [[ftn.network]] block.
+type FTNNetwork struct {
+	Slug    string `toml:"slug"`
+	Name    string `toml:"name"`
+	Domain  string `toml:"domain"`
+	Addr    string `toml:"addr"` // our 5D address in the network, e.g. "1:234/5.0"
+	Default bool   `toml:"default"`
 }
 
 // ServerConfig holds the listener ports and externally-visible hostname.
@@ -110,6 +144,9 @@ func Default() *Config {
 		Session: SessionConfig{
 			HistorySize: 100,
 		},
+		Files: FilesConfig{
+			Root: "./blobs",
+		},
 	}
 }
 
@@ -163,6 +200,44 @@ func (c *Config) validate() error {
 	}
 	if c.Session.HistorySize < 0 {
 		return fmt.Errorf("session.history_size must be >= 0, got %d", c.Session.HistorySize)
+	}
+	if err := c.FTN.validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (f *FTNConfig) validate() error {
+	slugs := map[string]bool{}
+	domains := map[string]bool{}
+	defaults := 0
+	for i, n := range f.Network {
+		if n.Slug == "" {
+			return fmt.Errorf("ftn.network[%d]: slug required", i)
+		}
+		if n.Name == "" {
+			return fmt.Errorf("ftn.network[%d] (%s): name required", i, n.Slug)
+		}
+		if n.Domain == "" {
+			return fmt.Errorf("ftn.network[%d] (%s): domain required", i, n.Slug)
+		}
+		if _, err := addr.Parse(n.Addr); err != nil {
+			return fmt.Errorf("ftn.network[%d] (%s): addr %q: %w", i, n.Slug, n.Addr, err)
+		}
+		if slugs[n.Slug] {
+			return fmt.Errorf("ftn.network: duplicate slug %q", n.Slug)
+		}
+		if domains[n.Domain] {
+			return fmt.Errorf("ftn.network: duplicate domain %q", n.Domain)
+		}
+		slugs[n.Slug] = true
+		domains[n.Domain] = true
+		if n.Default {
+			defaults++
+		}
+	}
+	if defaults > 1 {
+		return fmt.Errorf("ftn.network: at most one network may have default = true (found %d)", defaults)
 	}
 	return nil
 }
