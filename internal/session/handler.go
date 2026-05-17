@@ -46,6 +46,12 @@ type Handler struct {
 	// HistorySize is the per-session line-edit history capacity. 0
 	// disables in-line history. Defaults to 100 via DefaultHandler.
 	HistorySize int
+
+	// PostMOTD, if set, is invoked once per session after the MOTD is
+	// written and before the command loop begins. Its return value is
+	// written to the session verbatim. Used in M6 to print the
+	// unread-mail count.
+	PostMOTD func(ctx context.Context, acc *auth.Account) string
 }
 
 // DefaultHandler returns a Handler with sensible defaults wired in.
@@ -226,6 +232,13 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	// --- MOTD -------------------------------------------------------------
 	if h.MOTD != "" {
 		_ = s.writeString(h.MOTD + "\r\n")
+	}
+
+	// --- Post-MOTD hook (M6: unread-mail count) ---------------------------
+	if h.PostMOTD != nil && s.account != nil {
+		if msg := h.PostMOTD(ctx, s.account); msg != "" {
+			_ = s.writeString(msg)
+		}
 	}
 
 	// --- Placeholder command loop ----------------------------------------

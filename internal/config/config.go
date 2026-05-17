@@ -22,6 +22,20 @@ type Config struct {
 	LLM     LLMConfig     `toml:"llm"`
 	Session SessionConfig `toml:"session"`
 	FTN     FTNConfig     `toml:"ftn"`
+	Files   FilesConfig   `toml:"files"`
+}
+
+// FilesConfig configures the on-disk blob store used by uploads.
+type FilesConfig struct {
+	// Root is the blob store directory. Default "./blobs".
+	Root string `toml:"root"`
+	// MaxUploadBytes caps per-upload size. 0 means 100 MB.
+	MaxUploadBytes int64 `toml:"max_upload_bytes"`
+	// JanitorIntervalSeconds is how often the janitor sweep runs. 0 ⇒ 300.
+	JanitorIntervalSeconds int `toml:"janitor_interval_seconds"`
+	// JanitorBlobGraceSeconds is the mtime grace period before a
+	// referenceless blob is reaped. 0 ⇒ 600 (10 minutes).
+	JanitorBlobGraceSeconds int `toml:"janitor_blob_grace_seconds"`
 }
 
 // FTNConfig holds the operator-declared FidoNet Technology Network nodes
@@ -129,6 +143,9 @@ func Default() *Config {
 		},
 		Session: SessionConfig{
 			HistorySize: 100,
+		},
+		Files: FilesConfig{
+			Root: "./blobs",
 		},
 	}
 }
