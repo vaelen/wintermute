@@ -13,7 +13,9 @@ import (
 )
 
 // SetEngageOpts mirrors the engage.Host configurable fields for use by
-// SetEngage. Kind must be "terminal" or "npc"; "custom" is reserved.
+// SetEngage. Kind must be "terminal", "menu_terminal", or "npc"; "custom"
+// is reserved. Menu is only meaningful when Kind == KindMenuTerminal and
+// is validated against the closed feature set in engage.ValidateMenu.
 type SetEngageOpts struct {
 	Kind           string
 	EngageVerbs    []string
@@ -23,6 +25,7 @@ type SetEngageOpts struct {
 	ExitMsg        string
 	Prompt         string
 	Policy         engage.Policy
+	Menu           []engage.MenuEntry
 }
 
 // SetEngage marks an object as engageable. opts.Kind must be "terminal"
@@ -32,9 +35,18 @@ func (a *API) SetEngage(ctx context.Context, slug string, opts SetEngageOpts) er
 	if a.Engage == nil {
 		return errorf(CodeInternal, "engage cache not configured")
 	}
-	if opts.Kind != engage.KindTerminal && opts.Kind != engage.KindNPC {
+	if opts.Kind != engage.KindTerminal &&
+		opts.Kind != engage.KindNPC &&
+		opts.Kind != engage.KindMenuTerminal {
 		return errorf(CodeInvalidArgument,
-			"kind must be 'terminal' or 'npc' (custom is not yet supported)")
+			"kind must be 'terminal', 'menu_terminal', or 'npc' (custom is not yet supported)")
+	}
+	if opts.Kind != engage.KindMenuTerminal && len(opts.Menu) > 0 {
+		return errorf(CodeInvalidArgument,
+			"menu is only valid when kind = 'menu_terminal'")
+	}
+	if err := engage.ValidateMenu(opts.Menu); err != nil {
+		return errorf(CodeInvalidArgument, "%s", err.Error())
 	}
 	obj, err := a.World.ObjectBySlug(slug)
 	if err != nil {
@@ -43,7 +55,10 @@ func (a *API) SetEngage(ctx context.Context, slug string, opts SetEngageOpts) er
 
 	ev, _ := json.Marshal(opts.EngageVerbs)
 	dv, _ := json.Marshal(opts.DisengageVerbs)
-	policy, _ := json.Marshal(opts.Policy)
+	policy, perr := engage.EncodePolicyJSON(opts.Policy, opts.Menu)
+	if perr != nil {
+		return fmt.Errorf("api: set_engage: encode policy: %w", perr)
+	}
 
 	if err := a.DB.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
@@ -63,7 +78,7 @@ func (a *API) SetEngage(ctx context.Context, slug string, opts SetEngageOpts) er
 			int64(obj.ID), opts.Kind, string(ev), string(dv),
 			nullString(opts.EnterMsg), nullString(opts.PresentMsg),
 			nullString(opts.ExitMsg), nullString(opts.Prompt),
-			string(policy),
+			policy,
 		)
 		return err
 	}); err != nil {
@@ -80,6 +95,7 @@ func (a *API) SetEngage(ctx context.Context, slug string, opts SetEngageOpts) er
 		ExitMsg:        opts.ExitMsg,
 		Prompt:         opts.Prompt,
 		Policy:         opts.Policy,
+		Menu:           append([]engage.MenuEntry(nil), opts.Menu...),
 	}
 	engage.ApplyKindDefaults(h)
 	a.Engage.Put(h)

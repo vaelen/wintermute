@@ -64,6 +64,7 @@ type Host struct {
 	ExitMsg        string
 	Prompt         string // optional override for the in-engagement prompt
 	Policy         Policy
+	Menu           []MenuEntry // M6.3: populated when Kind == KindMenuTerminal
 }
 
 // Participant is a session's seat at an engagement. The Write callback

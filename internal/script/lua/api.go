@@ -11,6 +11,7 @@ import (
 
 	"github.com/vaelen/wintermute/internal/world"
 	worldapi "github.com/vaelen/wintermute/internal/world/api"
+	"github.com/vaelen/wintermute/internal/world/engage"
 )
 
 // API binds an admin-tier set of operations onto a Lua state as the
@@ -485,6 +486,7 @@ func (a *API) luaObjectSetEngage(L *lua.LState) int {
 		PresentMsg:     optString(opts, "present_msg"),
 		ExitMsg:        optString(opts, "exit_msg"),
 		Prompt:         optString(opts, "prompt"),
+		Menu:           luaMenuEntries(opts, "menu"),
 	}
 	if err := a.Backend.SetEngage(a.Ctx, slug, setOpts); err != nil {
 		return pushError(L, err)
@@ -501,6 +503,34 @@ func (a *API) luaObjectClearEngage(L *lua.LState) int {
 	}
 	L.Push(lua.LBool(true))
 	return 1
+}
+
+// luaMenuEntries reads an array-of-tables field from a Lua opts table
+// and converts it to []engage.MenuEntry. Each row must be a table with
+// string fields `feature` and (for files) `area`. Unknown / malformed
+// rows are skipped here; api.SetEngage performs full validation.
+func luaMenuEntries(t *lua.LTable, key string) []engage.MenuEntry {
+	v := t.RawGetString(key)
+	tbl, ok := v.(*lua.LTable)
+	if !ok {
+		return nil
+	}
+	var out []engage.MenuEntry
+	tbl.ForEach(func(_, vv lua.LValue) {
+		row, ok := vv.(*lua.LTable)
+		if !ok {
+			return
+		}
+		feature := optString(row, "feature")
+		if feature == "" {
+			return
+		}
+		out = append(out, engage.MenuEntry{
+			Feature: feature,
+			Area:    optString(row, "area"),
+		})
+	})
+	return out
 }
 
 // luaTableStringArray reads an array field from a Lua table as []string.

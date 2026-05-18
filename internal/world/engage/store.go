@@ -51,11 +51,12 @@ func LoadHosts(ctx context.Context, db *store.DB) ([]*Host, error) {
 		h.PresentMsg = pm
 		h.ExitMsg = xm
 		h.Prompt = pr
-		if policy != "" && policy != "{}" {
-			if err := json.Unmarshal([]byte(policy), &h.Policy); err != nil {
-				return nil, fmt.Errorf("engage: bad policy for %d: %w", id, err)
-			}
+		p, menu, derr := decodePolicyJSON(policy)
+		if derr != nil {
+			return nil, fmt.Errorf("engage: bad policy for %d: %w", id, derr)
 		}
+		h.Policy = p
+		h.Menu = menu
 		ApplyKindDefaults(h)
 		out = append(out, h)
 	}
@@ -157,6 +158,15 @@ var kindDefaults = map[string]Host{
 		PresentMsg:     "at {{host}}",
 		ExitMsg:        "{{player}} steps away from {{host}}.",
 		Prompt:         "terminal> ",
+	},
+	KindMenuTerminal: {
+		EngageVerbs:    []string{"use", "sit at"},
+		DisengageVerbs: []string{"stand up", "step away"},
+		EnterMsg:       "{{player}} sits down at {{host}}.",
+		PresentMsg:     "at {{host}}",
+		ExitMsg:        "{{player}} steps away from {{host}}.",
+		// Prompt intentionally empty: the menu draws its own footer
+		// ("Select: ") inside the rendered frame.
 	},
 }
 

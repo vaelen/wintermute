@@ -38,6 +38,7 @@ import (
 	worldapi "github.com/vaelen/wintermute/internal/world/api"
 	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
 	"github.com/vaelen/wintermute/internal/world/engage"
+	"github.com/vaelen/wintermute/internal/world/engage/menu"
 )
 
 func main() {
@@ -194,6 +195,19 @@ func run(cfgPath string) error {
 			th := engage.NewTerminalHandler(host, closeBroadcast)
 			th.SetDeps(buildTerminalDeps(ctx, w, authStore, mailSvc, boardsSvc, filesSvc, cfg))
 			handler = th
+		case engage.KindMenuTerminal:
+			mh := menu.NewHandler(host, closeBroadcast)
+			mh.SetDeps(buildTerminalDeps(ctx, w, authStore, mailSvc, boardsSvc, filesSvc, cfg))
+			mh.SetDisengage(func() {
+				if sb != nil {
+					engage.CloseForSession(engageReg, sb, engage.CloseVoluntary)
+					return
+				}
+				if eng := engageReg.HostEngagement(host.ObjectID); eng != nil {
+					engageReg.Close(eng, engage.CloseVoluntary)
+				}
+			})
+			handler = mh
 		case engage.KindNPC:
 			n := npcReg.Get(host.ObjectID)
 			if n == nil {

@@ -352,6 +352,92 @@ func TestClearEngage(t *testing.T) {
 	}
 }
 
+func TestSetEngageMenuTerminal_persistsMenuEntries(t *testing.T) {
+	a, hc := newTestAPIWithEngage(t)
+	ctx := context.Background()
+
+	id, err := a.CreateObject(ctx, ObjectSpec{
+		Slug: "lobby-kiosk", Name: "Lobby Kiosk",
+		Kind: world.KindItem, RoomSlug: "lobby",
+	})
+	if err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+	menu := []engage.MenuEntry{
+		{Feature: engage.FeatureMail},
+		{Feature: engage.FeatureBoards},
+		{Feature: engage.FeatureFiles, Area: "dropbox"},
+	}
+	if err := a.SetEngage(ctx, "lobby-kiosk", SetEngageOpts{
+		Kind: engage.KindMenuTerminal,
+		Menu: menu,
+	}); err != nil {
+		t.Fatalf("SetEngage: %v", err)
+	}
+	h := hc.Get(id)
+	if h == nil {
+		t.Fatal("expected host in cache")
+	}
+	if h.Kind != engage.KindMenuTerminal {
+		t.Errorf("Kind = %q, want %q", h.Kind, engage.KindMenuTerminal)
+	}
+	if len(h.Menu) != len(menu) {
+		t.Fatalf("Menu = %+v, want %+v", h.Menu, menu)
+	}
+	for i := range menu {
+		if h.Menu[i] != menu[i] {
+			t.Errorf("Menu[%d] = %+v, want %+v", i, h.Menu[i], menu[i])
+		}
+	}
+
+	// Reload from DB and verify Menu round-trips through storage.
+	hosts, err := engage.LoadHosts(ctx, a.DB)
+	if err != nil {
+		t.Fatalf("LoadHosts: %v", err)
+	}
+	var reloaded *engage.Host
+	for _, hh := range hosts {
+		if hh.ObjectID == id {
+			reloaded = hh
+			break
+		}
+	}
+	if reloaded == nil {
+		t.Fatal("host not present after reload")
+	}
+	if len(reloaded.Menu) != len(menu) {
+		t.Fatalf("reloaded Menu = %+v, want %+v", reloaded.Menu, menu)
+	}
+	for i := range menu {
+		if reloaded.Menu[i] != menu[i] {
+			t.Errorf("reloaded Menu[%d] = %+v, want %+v", i, reloaded.Menu[i], menu[i])
+		}
+	}
+}
+
+func TestSetEngageMenuTerminal_rejectsInvalidMenu(t *testing.T) {
+	a, _ := newTestAPIWithEngage(t)
+	ctx := context.Background()
+	if _, err := a.CreateObject(ctx, ObjectSpec{
+		Slug: "kiosk", Name: "Kiosk",
+		Kind: world.KindItem, RoomSlug: "lobby",
+	}); err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+	// files without area must error.
+	err := a.SetEngage(ctx, "kiosk", SetEngageOpts{
+		Kind: engage.KindMenuTerminal,
+		Menu: []engage.MenuEntry{{Feature: engage.FeatureFiles}},
+	})
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if apiErr.Code != CodeInvalidArgument {
+		t.Errorf("code = %q, want invalid_argument", apiErr.Code)
+	}
+}
+
 func TestSetEngageNilCacheErrors(t *testing.T) {
 	a, _, _ := newTestAPI(t) // no Engage set
 	err := a.SetEngage(context.Background(), "lobby",
