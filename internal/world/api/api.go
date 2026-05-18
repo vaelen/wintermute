@@ -10,6 +10,7 @@ import (
 
 	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/boards"
+	"github.com/vaelen/wintermute/internal/files"
 	"github.com/vaelen/wintermute/internal/mail"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
@@ -39,6 +40,8 @@ type API struct {
 	Mail *mail.Service
 	// Boards is optional: nil disables wintermute.board.* bindings.
 	Boards *boards.Service
+	// Files is optional: nil disables wintermute.file.* bindings.
+	Files *files.Service
 }
 
 // New builds an API. Any of npcs, accts, or logger may be nil; the

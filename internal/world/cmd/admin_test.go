@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/vaelen/wintermute/internal/auth"
+	"github.com/vaelen/wintermute/internal/files"
 	scriptlua "github.com/vaelen/wintermute/internal/script/lua"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
@@ -172,5 +173,48 @@ func TestAtToolsAndInvoke(t *testing.T) {
 	}
 	if out := rw.Drain(); !strings.Contains(out, "Hello, Alice.") {
 		t.Errorf("missing greet result: %q", out)
+	}
+}
+
+// TestAtCleanupFilesReportsCounts covers acceptance criterion 4: after
+// expiring tokens get reaped, @cleanup-files reports the counts.
+func TestAtCleanupFilesReportsCounts(t *testing.T) {
+	h, rw, _ := newAdminHandler(t)
+	ctx := context.Background()
+
+	// Wire a files service into the admin API for this test.
+	filesSvc, err := files.NewService(h.Admin.API.DB, t.TempDir())
+	if err != nil {
+		t.Fatalf("files.NewService: %v", err)
+	}
+	h.Admin.API.Files = filesSvc
+
+	// Issue an upload token that's already expired so the janitor reaps it.
+	if _, err := filesSvc.IssueUpload(ctx, h.Presence.Account.ID, "stale", -1); err != nil {
+		t.Fatalf("IssueUpload: %v", err)
+	}
+
+	if got := h.Dispatch(ctx, "@cleanup-files"); got != OutcomeContinue {
+		t.Fatalf("Dispatch @cleanup-files = %v", got)
+	}
+	out := rw.Drain()
+	if !strings.Contains(out, "reaped 1 expired token(s)") {
+		t.Errorf("missing token reap report in: %q", out)
+	}
+	if !strings.Contains(out, "0 orphan blob(s)") {
+		t.Errorf("missing orphan-blob report in: %q", out)
+	}
+}
+
+// TestAtCleanupFilesNonAdminHidden ensures the command is invisible to
+// non-admins.
+func TestAtCleanupFilesNonAdminHidden(t *testing.T) {
+	h, rw, _ := newAdminHandler(t)
+	h.Presence.Account.AccessLevel = auth.AccessPlayer
+	if got := h.Dispatch(context.Background(), "@cleanup-files"); got != OutcomeUnknown {
+		t.Errorf("non-admin should see OutcomeUnknown; got %v", got)
+	}
+	if out := rw.Drain(); out != "" {
+		t.Errorf("non-admin path should produce no output; got %q", out)
 	}
 }

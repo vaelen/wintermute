@@ -168,7 +168,7 @@ func TestDownload_HappyPath(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	hash, size, mime, _ := e.files.PutBlob(ctx, strings.NewReader("downloadable"))
-	fid, _ := e.files.NewFile(ctx, "dl", e.alice.ID, hash, size, mime, "")
+	fid, _ := e.files.NewFile(ctx, "dl", e.alice.ID, hash, size, mime, "", "")
 	tok, _ := e.files.IssueDownload(ctx, e.alice.ID, fid, time.Minute)
 
 	resp, err := netHTTP.Get(e.srv.URL + "/download/" + tok.Value)
@@ -193,7 +193,7 @@ func TestDownload_RefusesSecondUse(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	hash, size, mime, _ := e.files.PutBlob(ctx, strings.NewReader("x"))
-	fid, _ := e.files.NewFile(ctx, "dl", e.alice.ID, hash, size, mime, "")
+	fid, _ := e.files.NewFile(ctx, "dl", e.alice.ID, hash, size, mime, "", "")
 	tok, _ := e.files.IssueDownload(ctx, e.alice.ID, fid, time.Minute)
 
 	r1, _ := netHTTP.Get(e.srv.URL + "/download/" + tok.Value)

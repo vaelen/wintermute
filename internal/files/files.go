@@ -29,7 +29,16 @@ var (
 	ErrTokenExpired   = errors.New("files: token expired")
 	ErrTokenWrongKind = errors.New("files: token is for a different operation")
 	ErrBlobMissing    = errors.New("files: blob missing on disk")
+	ErrAreaNotFound   = errors.New("files: area not found")
+	ErrAreaInUse      = errors.New("files: area in use")
+	ErrAreaTaken      = errors.New("files: area slug taken")
+	ErrEmptySlug      = errors.New("files: slug is required")
+	ErrEmptyName      = errors.New("files: name is required")
 )
+
+// DefaultArea is the slug of the seeded fallback file area. Every fresh
+// install ships with this row in file_areas.
+const DefaultArea = "dropbox"
 
 // File is one row of the files table.
 type File struct {
@@ -41,6 +50,20 @@ type File struct {
 	OwnerID     int64
 	CreatedAt   time.Time
 	Description string
+	Area        string
+}
+
+// Area is one row of the file_areas table. ACL bands mirror boards: a
+// caller's access level (LevelPlayer=1 / LevelBuilder=2 / LevelAdmin=3
+// in the boards package) must be ≥ the corresponding min-level to
+// read / write / admin the area.
+type Area struct {
+	Slug          string
+	Name          string
+	Description   string
+	ReadMinLevel  int
+	WriteMinLevel int
+	AdminMinLevel int
 }
 
 // TokenKind narrows the token's purpose.
@@ -159,14 +182,28 @@ func (s *Service) blobPath(hash string) string {
 }
 
 // NewFile inserts a row in the files table. The blob with the given
-// hash must already exist on disk (typically via PutBlob).
-func (s *Service) NewFile(ctx context.Context, slug string, ownerID int64, hash string, size int64, mime, description string) (int64, error) {
+// hash must already exist on disk (typically via PutBlob). An empty
+// area defaults to DefaultArea ("dropbox"); callers that pass a
+// non-empty area get an ErrAreaNotFound when no such file_areas row
+// exists.
+func (s *Service) NewFile(ctx context.Context, slug string, ownerID int64, hash string, size int64, mime, description, area string) (int64, error) {
+	if area == "" {
+		area = DefaultArea
+	}
 	var id int64
 	err := s.db.Write(ctx, func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM file_areas WHERE slug = ?`, area).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrAreaNotFound
+		}
 		res, err := tx.ExecContext(ctx, `
-			INSERT INTO files(slug, hash, size, mime, owner_id, created_at, description)
-			VALUES (?, ?, ?, ?, ?, strftime('%s','now'), ?)
-		`, slug, hash, size, mime, ownerID, description)
+			INSERT INTO files(slug, hash, size, mime, owner_id, created_at, description, area)
+			VALUES (?, ?, ?, ?, ?, strftime('%s','now'), ?, ?)
+		`, slug, hash, size, mime, ownerID, description, area)
 		if err != nil {
 			return err
 		}
@@ -174,6 +211,9 @@ func (s *Service) NewFile(ctx context.Context, slug string, ownerID int64, hash 
 		return err
 	})
 	if err != nil {
+		if errors.Is(err, ErrAreaNotFound) {
+			return 0, err
+		}
 		if isUniqueConstraint(err) {
 			return 0, ErrSlugTaken
 		}
@@ -185,7 +225,7 @@ func (s *Service) NewFile(ctx context.Context, slug string, ownerID int64, hash 
 // GetFile returns a File row by slug.
 func (s *Service) GetFile(ctx context.Context, slug string) (File, error) {
 	row := s.db.Read().QueryRowContext(ctx, `
-		SELECT id, slug, hash, size, mime, owner_id, created_at, description
+		SELECT id, slug, hash, size, mime, owner_id, created_at, description, area
 		FROM files WHERE slug = ?
 	`, slug)
 	return scanFile(row)
@@ -194,18 +234,52 @@ func (s *Service) GetFile(ctx context.Context, slug string) (File, error) {
 // GetFileByID returns a File row by id.
 func (s *Service) GetFileByID(ctx context.Context, id int64) (File, error) {
 	row := s.db.Read().QueryRowContext(ctx, `
-		SELECT id, slug, hash, size, mime, owner_id, created_at, description
+		SELECT id, slug, hash, size, mime, owner_id, created_at, description, area
 		FROM files WHERE id = ?
 	`, id)
 	return scanFile(row)
 }
 
+// ListFilter narrows ListFiles. Each field is independently optional;
+// an empty value means "no filter on this dimension". OwnerID 0 is
+// treated as "no owner filter".
+type ListFilter struct {
+	OwnerID int64
+	Area    string
+}
+
 // ListByOwner returns every file owned by ownerID, newest first.
 func (s *Service) ListByOwner(ctx context.Context, ownerID int64) ([]File, error) {
-	rows, err := s.db.Read().QueryContext(ctx, `
-		SELECT id, slug, hash, size, mime, owner_id, created_at, description
-		FROM files WHERE owner_id = ? ORDER BY created_at DESC, id DESC
-	`, ownerID)
+	return s.ListFiles(ctx, ListFilter{OwnerID: ownerID})
+}
+
+// ListFiles returns files matching the filter, newest first. With a
+// zero ListFilter, every row is returned.
+func (s *Service) ListFiles(ctx context.Context, filter ListFilter) ([]File, error) {
+	q := `SELECT id, slug, hash, size, mime, owner_id, created_at, description, area
+		FROM files`
+	var (
+		clauses []string
+		args    []any
+	)
+	if filter.OwnerID > 0 {
+		clauses = append(clauses, "owner_id = ?")
+		args = append(args, filter.OwnerID)
+	}
+	if filter.Area != "" {
+		clauses = append(clauses, "area = ?")
+		args = append(args, filter.Area)
+	}
+	for i, c := range clauses {
+		if i == 0 {
+			q += " WHERE "
+		} else {
+			q += " AND "
+		}
+		q += c
+	}
+	q += " ORDER BY created_at DESC, id DESC"
+	rows, err := s.db.Read().QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -332,22 +406,34 @@ func (s *Service) RedeemToken(ctx context.Context, value string, expectedKind To
 	return got, nil
 }
 
+// JanitorStats reports what a Janitor sweep reaped.
+type JanitorStats struct {
+	TokensReaped int64
+	BlobsReaped  int64
+}
+
 // Janitor deletes expired tokens and orphan blobs whose mtime is older
 // than `grace` (so a freshly-uploaded blob racing a NewFile insert isn't
-// reaped before the row lands).
-func (s *Service) Janitor(ctx context.Context, grace time.Duration) error {
+// reaped before the row lands). Returns the count of rows / files
+// removed.
+func (s *Service) Janitor(ctx context.Context, grace time.Duration) (JanitorStats, error) {
+	var stats JanitorStats
 	if err := s.db.Write(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
+		res, err := tx.ExecContext(ctx,
 			`DELETE FROM file_tokens WHERE expires_at <= ?`,
 			time.Now().Unix())
-		return err
+		if err != nil {
+			return err
+		}
+		stats.TokensReaped, _ = res.RowsAffected()
+		return nil
 	}); err != nil {
-		return fmt.Errorf("files: janitor tokens: %w", err)
+		return stats, fmt.Errorf("files: janitor tokens: %w", err)
 	}
 	// Orphan blobs: stat each blob, delete if no file row references its
 	// hash and its mtime is older than grace. Walk the two-level layout.
 	cutoff := time.Now().Add(-grace)
-	return filepath.Walk(s.root, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(s.root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return err
 		}
@@ -364,10 +450,146 @@ func (s *Service) Janitor(ctx context.Context, grace time.Duration) error {
 			return err
 		}
 		if n == 0 {
-			_ = os.Remove(path)
+			if err := os.Remove(path); err == nil {
+				stats.BlobsReaped++
+			}
 		}
 		return nil
 	})
+	return stats, err
+}
+
+// GetArea returns the named area, or ErrAreaNotFound if absent.
+func (s *Service) GetArea(ctx context.Context, slug string) (Area, error) {
+	row := s.db.Read().QueryRowContext(ctx, `
+		SELECT slug, name, description, read_min_level, write_min_level, admin_min_level
+		FROM file_areas WHERE slug = ?
+	`, slug)
+	var a Area
+	err := row.Scan(&a.Slug, &a.Name, &a.Description,
+		&a.ReadMinLevel, &a.WriteMinLevel, &a.AdminMinLevel)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Area{}, ErrAreaNotFound
+	}
+	if err != nil {
+		return Area{}, err
+	}
+	return a, nil
+}
+
+// ListAreas returns every area, ordered by slug.
+func (s *Service) ListAreas(ctx context.Context) ([]Area, error) {
+	rows, err := s.db.Read().QueryContext(ctx, `
+		SELECT slug, name, description, read_min_level, write_min_level, admin_min_level
+		FROM file_areas ORDER BY slug
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Area
+	for rows.Next() {
+		var a Area
+		if err := rows.Scan(&a.Slug, &a.Name, &a.Description,
+			&a.ReadMinLevel, &a.WriteMinLevel, &a.AdminMinLevel); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// CreateArea inserts a new file area row. Required: Slug, Name. Zero
+// min-levels default to "everyone may read/write, admin-only manage"
+// — the same bands used by the seeded dropbox row.
+func (s *Service) CreateArea(ctx context.Context, a Area) error {
+	if a.Slug == "" {
+		return ErrEmptySlug
+	}
+	if a.Name == "" {
+		return ErrEmptyName
+	}
+	if a.ReadMinLevel == 0 {
+		a.ReadMinLevel = 1
+	}
+	if a.WriteMinLevel == 0 {
+		a.WriteMinLevel = 1
+	}
+	if a.AdminMinLevel == 0 {
+		a.AdminMinLevel = 3
+	}
+	err := s.db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO file_areas(slug, name, description,
+				read_min_level, write_min_level, admin_min_level)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, a.Slug, a.Name, a.Description,
+			a.ReadMinLevel, a.WriteMinLevel, a.AdminMinLevel)
+		return err
+	})
+	if err != nil {
+		if isUniqueConstraint(err) {
+			return ErrAreaTaken
+		}
+		return fmt.Errorf("files: create area: %w", err)
+	}
+	return nil
+}
+
+// DeleteArea removes a file area. Returns ErrAreaInUse if any files
+// reference it, ErrAreaNotFound if no such row exists.
+func (s *Service) DeleteArea(ctx context.Context, slug string) error {
+	var affected int64
+	err := s.db.Write(ctx, func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM files WHERE area = ?`, slug).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			return ErrAreaInUse
+		}
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM file_areas WHERE slug = ?`, slug)
+		if err != nil {
+			return err
+		}
+		affected, _ = res.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrAreaInUse) {
+			return err
+		}
+		return fmt.Errorf("files: delete area: %w", err)
+	}
+	if affected == 0 {
+		return ErrAreaNotFound
+	}
+	return nil
+}
+
+// SetACLs replaces the per-file ACL row for (fileID, accountID). If
+// perms is 0, the row is removed entirely.
+func (s *Service) SetACLs(ctx context.Context, fileID, accountID int64, perms int) error {
+	err := s.db.Write(ctx, func(tx *sql.Tx) error {
+		if perms == 0 {
+			_, err := tx.ExecContext(ctx,
+				`DELETE FROM file_acls WHERE file_id = ? AND account_id = ?`,
+				fileID, accountID)
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO file_acls(file_id, account_id, perms)
+			VALUES (?, ?, ?)
+			ON CONFLICT(file_id, account_id) DO UPDATE SET perms = excluded.perms
+		`, fileID, accountID, perms)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("files: set acls: %w", err)
+	}
+	return nil
 }
 
 type scanner interface {
@@ -379,7 +601,7 @@ func scanFile(s scanner) (File, error) {
 		f       File
 		created int64
 	)
-	err := s.Scan(&f.ID, &f.Slug, &f.Hash, &f.Size, &f.MIME, &f.OwnerID, &created, &f.Description)
+	err := s.Scan(&f.ID, &f.Slug, &f.Hash, &f.Size, &f.MIME, &f.OwnerID, &created, &f.Description, &f.Area)
 	if errors.Is(err, sql.ErrNoRows) {
 		return File{}, ErrNotFound
 	}
@@ -398,6 +620,11 @@ func randomTokenValue() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// isUniqueConstraint reports whether err looks like a SQLite
+// UNIQUE-constraint violation. Matched on text because
+// modernc.org/sqlite returns its own concrete error type with no
+// public constants — see the "Error matching" convention in CLAUDE.md
+// for why substring matching is justified here.
 func isUniqueConstraint(err error) bool {
 	return err != nil && (containsAny(err.Error(),
 		"UNIQUE constraint", "constraint failed: UNIQUE"))

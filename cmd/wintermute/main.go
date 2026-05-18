@@ -131,6 +131,7 @@ func run(cfgPath string) error {
 	adminAPI.Engage = hostCache
 	adminAPI.Mail = mailSvc
 	adminAPI.Boards = boardsSvc
+	adminAPI.Files = filesSvc
 	luaAPI := scriptlua.NewAPI(adminAPI, nil, ctx)
 	luaPool := scriptlua.NewPool(scriptlua.PoolConfig{Size: 4, API: luaAPI})
 	defer luaPool.Close()
@@ -316,15 +317,8 @@ func run(cfgPath string) error {
 	if cfg.Server.HTTPPort > 0 {
 		fileHandler := wintermutehttp.NewHandler(filesSvc, wintermutehttp.HandlerOptions{
 			MaxUploadBytes: cfg.Files.MaxUploadBytes,
-			OnUpload: func(ev wintermutehttp.UploadEvent) {
-				logger.Info("file uploaded",
-					"account_id", ev.AccountID, "file_id", ev.FileID,
-					"slug", ev.Slug, "size", ev.Size, "mime", ev.MIME)
-				// TODO: deliver "[terminal] Upload received…" to the
-				// owner's session if they are still connected, and
-				// persist for next login otherwise.
-			},
-			Logger: logger,
+			OnUpload:       uploadMailNotifier(logger, authStore, mailSvc),
+			Logger:         logger,
 		})
 		httpAddr := joinHostPort("0.0.0.0", cfg.Server.HTTPPort)
 		// Share the TLS config used by the telnet TLS port: same autocert,
@@ -365,7 +359,7 @@ func run(cfgPath string) error {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
-				if err := filesSvc.Janitor(ctx, blobGrace); err != nil {
+				if _, err := filesSvc.Janitor(ctx, blobGrace); err != nil {
 					logger.Warn("files janitor", "err", err)
 				}
 			}
@@ -573,4 +567,57 @@ func buildTerminalDeps(
 		DownloadURL: func(token string) string { return base + "/download/" + token },
 		AccountFor:  accountFor,
 	}
+}
+
+// uploadMailNotifier returns the OnUpload callback wired into the M6
+// HTTP handler. Delivery runs on context.Background rather than the
+// process lifecycle ctx so that an upload finishing during the
+// http.Server.Shutdown drain window — when the lifecycle ctx is already
+// cancelled — still sends its mail (the DB writer is kept alive by
+// `wg` until after the HTTP server exits).
+func uploadMailNotifier(
+	logger *slog.Logger,
+	authStore *auth.Store,
+	mailSvc *mail.Service,
+) func(wintermutehttp.UploadEvent) {
+	return func(ev wintermutehttp.UploadEvent) {
+		logger.Info("file uploaded",
+			"account_id", ev.AccountID, "file_id", ev.FileID,
+			"slug", ev.Slug, "size", ev.Size, "mime", ev.MIME)
+		ctx := context.Background()
+		owner, err := authStore.GetByID(ctx, ev.AccountID)
+		if err != nil {
+			logger.Warn("upload mail: resolve owner",
+				"account_id", ev.AccountID, "err", err)
+			return
+		}
+		subject := "Upload complete: " + ev.Slug
+		body := fmt.Sprintf(
+			"Your upload completed.\n\n"+
+				"  slug: %s\n"+
+				"  size: %s (%d bytes)\n"+
+				"  mime: %s\n\n"+
+				"From a terminal in-world, type `download %s` to retrieve it.\n",
+			ev.Slug, humanBytes(ev.Size), ev.Size, ev.MIME, ev.Slug)
+		if _, err := mailSvc.SendFromSystem(ctx, owner.Username, subject, body); err != nil {
+			logger.Warn("upload mail: send",
+				"username", owner.Username, "slug", ev.Slug, "err", err)
+		}
+	}
+}
+
+// humanBytes renders n bytes as a short human-readable size (e.g.
+// "12 B", "1.4 KB", "3.2 MB"). Used in upload-complete mail bodies.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	suffix := "KMGTPE"[exp]
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), suffix)
 }

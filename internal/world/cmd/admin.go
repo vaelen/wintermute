@@ -435,6 +435,31 @@ func (h *Handler) cmdBoot(ctx context.Context, rest string) Outcome {
 }
 
 // ---------------------------------------------------------------------------
+// @cleanup-files
+//
+// Output format ("reaped N expired token(s), M orphan blob(s)") is the
+// stable contract callers (and tests) match on; do not reword without
+// updating the test in admin_test.go.
+
+func (h *Handler) cmdCleanupFiles(ctx context.Context) Outcome {
+	if outcome, ok := h.requireAdmin(false); !ok {
+		return outcome
+	}
+	be := h.adminBackend()
+	if be == nil {
+		return OutcomeUnknown
+	}
+	stats, err := be.API.CleanupFiles(ctx, 0)
+	if err != nil {
+		_ = h.Presence.Write(formatAdminError(err))
+		return OutcomeContinue
+	}
+	_ = h.Presence.Write(fmt.Sprintf("reaped %d expired token(s), %d orphan blob(s)\r\n",
+		stats.TokensReaped, stats.BlobsReaped))
+	return OutcomeContinue
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 
 // stripQuotes removes a surrounding pair of double quotes, if present.
