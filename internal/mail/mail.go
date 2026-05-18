@@ -49,18 +49,31 @@ type Mail struct {
 	ReadAt       sql.NullTime
 }
 
+// DefaultSystemName is the From: handle stamped on rows inserted by
+// SendFromSystem when the operator hasn't configured a different value.
+const DefaultSystemName = "<system>"
+
 // Service is the mail subsystem.
 type Service struct {
-	db     *store.DB
-	issuer *msgid.Issuer
-	pid    string
+	db         *store.DB
+	issuer     *msgid.Issuer
+	pid        string
+	systemName string
 }
 
 // NewService constructs a Service. pid is the FSC-0046 PID kludge value
 // stamped on every locally-originated message (e.g. "Wintermute/1.2.3").
-func NewService(db *store.DB, issuer *msgid.Issuer, pid string) *Service {
-	return &Service{db: db, issuer: issuer, pid: pid}
+// systemName is the From: handle stamped on rows inserted by
+// SendFromSystem; an empty value falls back to DefaultSystemName.
+func NewService(db *store.DB, issuer *msgid.Issuer, pid, systemName string) *Service {
+	if systemName == "" {
+		systemName = DefaultSystemName
+	}
+	return &Service{db: db, issuer: issuer, pid: pid, systemName: systemName}
 }
+
+// SystemName returns the From: handle used for system-originated mail.
+func (s *Service) SystemName() string { return s.systemName }
 
 // Send delivers a message from `from` (a local account) to a local
 // account named `toName`. Uses the `local` ftn network. If replyTo is
@@ -130,6 +143,71 @@ func (s *Service) Send(ctx context.Context, from *auth.Account, toName, subject,
 			local.ID, from.ID, toID,
 			from.Username, toName, origAddr, origAddr,
 			m.String(), replyToCol, origAddr,
+			0, "UTF-8 4", s.pid, tzMinutes,
+			subject, body,
+		)
+		if err != nil {
+			return err
+		}
+		newID, err = res.LastInsertId()
+		return err
+	})
+	if err != nil {
+		return 0, fmt.Errorf("mail: insert: %w", err)
+	}
+	return newID, nil
+}
+
+// SendFromSystem delivers a message to a local account from the
+// configured system handle (DefaultSystemName unless overridden on
+// NewService). The stored row has from_id = NULL and from_name set to
+// the system handle; MSGID is stamped on the `local` network's origaddr
+// so each broadcast row is distinct per FTS-0009.
+func (s *Service) SendFromSystem(ctx context.Context, toName, subject, body string) (int64, error) {
+	if subject == "" {
+		return 0, ErrEmptySubject
+	}
+	if body == "" {
+		return 0, ErrEmptyBody
+	}
+
+	var toID int64
+	err := s.db.Read().QueryRowContext(ctx,
+		`SELECT id FROM accounts WHERE username = ?`, toName).Scan(&toID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("%w: %q", ErrRecipientNotFound, toName)
+	} else if err != nil {
+		return 0, fmt.Errorf("mail: resolve recipient: %w", err)
+	}
+
+	local, err := ftnnetworks.Get(ctx, s.db, "local")
+	if err != nil {
+		return 0, fmt.Errorf("mail: get local network: %w", err)
+	}
+	origAddr := local.OrigAddr()
+
+	m, err := s.issuer.Issue(ctx, origAddr)
+	if err != nil {
+		return 0, fmt.Errorf("mail: issue MSGID: %w", err)
+	}
+
+	_, tzOffset := time.Now().Zone()
+	tzMinutes := tzOffset / 60
+
+	var newID int64
+	err = s.db.Write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			INSERT INTO mail (
+				network_id, from_id, to_id,
+				from_name, to_name, from_addr, to_addr,
+				msgid, reply_to_msgid, origin_addr,
+				attributes, charset, pid, tz_offset,
+				subject, body, sent_at
+			) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
+		`,
+			local.ID, toID,
+			s.systemName, toName, origAddr, origAddr,
+			m.String(), origAddr,
 			0, "UTF-8 4", s.pid, tzMinutes,
 			subject, body,
 		)

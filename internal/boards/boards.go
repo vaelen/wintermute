@@ -21,6 +21,7 @@ var (
 	ErrNotFound       = errors.New("boards: not found")
 	ErrUnknownNetwork = errors.New("boards: unknown network")
 	ErrForbidden      = errors.New("boards: forbidden")
+	ErrHasPosts       = errors.New("boards: has posts")
 )
 
 // Min-AccessLevel bands stored in *_perms columns.
@@ -173,7 +174,7 @@ func (s *Service) DeleteBoard(ctx context.Context, slug string) error {
 			return err
 		}
 		if n > 0 {
-			return fmt.Errorf("boards: %q has %d posts; refuse to delete", slug, n)
+			return fmt.Errorf("boards: %q has %d posts: %w", slug, n, ErrHasPosts)
 		}
 		res, err := tx.ExecContext(ctx, `DELETE FROM boards WHERE slug = ?`, slug)
 		if err != nil {
