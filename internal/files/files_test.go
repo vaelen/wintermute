@@ -108,10 +108,10 @@ func TestNewFile_RejectsDuplicateSlug(t *testing.T) {
 	ctx := context.Background()
 	data := []byte("a")
 	hash, size, mime, _ := e.svc.PutBlob(ctx, bytes.NewReader(data))
-	if _, err := e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, ""); err != nil {
+	if _, err := e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, "", ""); err != nil {
 		t.Fatalf("NewFile first: %v", err)
 	}
-	if _, err := e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, ""); !errors.Is(err, ErrSlugTaken) {
+	if _, err := e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, "", ""); !errors.Is(err, ErrSlugTaken) {
 		t.Errorf("err = %v, want ErrSlugTaken", err)
 	}
 }
@@ -121,8 +121,8 @@ func TestNewFile_TwoSlugsOneBlob(t *testing.T) {
 	ctx := context.Background()
 	data := []byte("shared content")
 	hash, size, mime, _ := e.svc.PutBlob(ctx, bytes.NewReader(data))
-	_, _ = e.svc.NewFile(ctx, "first", e.alice.ID, hash, size, mime, "")
-	_, _ = e.svc.NewFile(ctx, "second", e.alice.ID, hash, size, mime, "")
+	_, _ = e.svc.NewFile(ctx, "first", e.alice.ID, hash, size, mime, "", "")
+	_, _ = e.svc.NewFile(ctx, "second", e.alice.ID, hash, size, mime, "", "")
 
 	files, err := e.svc.ListByOwner(ctx, e.alice.ID)
 	if err != nil {
@@ -226,7 +226,7 @@ func TestIssueDownload_OK(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	hash, size, mime, _ := e.svc.PutBlob(ctx, bytes.NewReader([]byte("x")))
-	fileID, _ := e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, "")
+	fileID, _ := e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, "", "")
 	tok, err := e.svc.IssueDownload(ctx, e.alice.ID, fileID, time.Minute)
 	if err != nil {
 		t.Fatalf("IssueDownload: %v", err)
@@ -243,7 +243,7 @@ func TestGetFileBySlug(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	hash, size, mime, _ := e.svc.PutBlob(ctx, bytes.NewReader([]byte("x")))
-	_, _ = e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, "memo")
+	_, _ = e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, "memo", "")
 	f, err := e.svc.GetFile(ctx, "notes")
 	if err != nil {
 		t.Fatalf("GetFile: %v", err)
@@ -257,7 +257,7 @@ func TestDeleteFile_RemovesRow(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	hash, size, mime, _ := e.svc.PutBlob(ctx, bytes.NewReader([]byte("x")))
-	id, _ := e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, "")
+	id, _ := e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, "", "")
 	if err := e.svc.DeleteFile(ctx, id); err != nil {
 		t.Fatalf("DeleteFile: %v", err)
 	}
@@ -272,13 +272,124 @@ func TestJanitor_RemovesExpiredTokens(t *testing.T) {
 	t1, _ := e.svc.IssueUpload(ctx, e.alice.ID, "a", -time.Second)
 	t2, _ := e.svc.IssueUpload(ctx, e.alice.ID, "b", time.Minute)
 
-	if err := e.svc.Janitor(ctx, time.Minute); err != nil {
+	stats, err := e.svc.Janitor(ctx, time.Minute)
+	if err != nil {
 		t.Fatalf("Janitor: %v", err)
+	}
+	if stats.TokensReaped != 1 {
+		t.Errorf("TokensReaped = %d, want 1", stats.TokensReaped)
 	}
 	if _, err := e.svc.RedeemToken(ctx, t1.Value, KindUpload); !errors.Is(err, ErrTokenNotFound) {
 		t.Errorf("expired token still present: %v", err)
 	}
 	if _, err := e.svc.RedeemToken(ctx, t2.Value, KindUpload); err != nil {
 		t.Errorf("live token should still redeem: %v", err)
+	}
+}
+
+func TestSeededDropboxArea(t *testing.T) {
+	e := setup(t)
+	areas, err := e.svc.ListAreas(context.Background())
+	if err != nil {
+		t.Fatalf("ListAreas: %v", err)
+	}
+	if len(areas) != 1 {
+		t.Fatalf("len(areas) = %d, want 1 (just dropbox)", len(areas))
+	}
+	if areas[0].Slug != "dropbox" {
+		t.Errorf("seed area slug = %q, want dropbox", areas[0].Slug)
+	}
+	if areas[0].Name != "Dropbox" {
+		t.Errorf("seed area name = %q, want Dropbox", areas[0].Name)
+	}
+}
+
+func TestNewFile_DefaultsToDropboxArea(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	hash, size, mime, _ := e.svc.PutBlob(ctx, bytes.NewReader([]byte("hi")))
+	if _, err := e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, "", ""); err != nil {
+		t.Fatalf("NewFile: %v", err)
+	}
+	f, err := e.svc.GetFile(ctx, "notes")
+	if err != nil {
+		t.Fatalf("GetFile: %v", err)
+	}
+	if f.Area != "dropbox" {
+		t.Errorf("Area = %q, want dropbox", f.Area)
+	}
+}
+
+func TestNewFile_UnknownAreaRejected(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	hash, size, mime, _ := e.svc.PutBlob(ctx, bytes.NewReader([]byte("hi")))
+	if _, err := e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, "", "ghost"); !errors.Is(err, ErrAreaNotFound) {
+		t.Errorf("err = %v, want ErrAreaNotFound", err)
+	}
+}
+
+func TestCreateArea_AndListFilesByArea(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	if err := e.svc.CreateArea(ctx, Area{Slug: "warez", Name: "Warez"}); err != nil {
+		t.Fatalf("CreateArea: %v", err)
+	}
+	hash, size, mime, _ := e.svc.PutBlob(ctx, bytes.NewReader([]byte("a")))
+	if _, err := e.svc.NewFile(ctx, "a", e.alice.ID, hash, size, mime, "", "warez"); err != nil {
+		t.Fatalf("NewFile a: %v", err)
+	}
+	h2, s2, m2, _ := e.svc.PutBlob(ctx, bytes.NewReader([]byte("b")))
+	if _, err := e.svc.NewFile(ctx, "b", e.alice.ID, h2, s2, m2, "", ""); err != nil {
+		t.Fatalf("NewFile b: %v", err)
+	}
+
+	warez, err := e.svc.ListFiles(ctx, ListFilter{Area: "warez"})
+	if err != nil {
+		t.Fatalf("ListFiles warez: %v", err)
+	}
+	if len(warez) != 1 || warez[0].Slug != "a" {
+		t.Errorf("warez = %+v, want [a]", warez)
+	}
+	dbox, _ := e.svc.ListFiles(ctx, ListFilter{Area: "dropbox"})
+	if len(dbox) != 1 || dbox[0].Slug != "b" {
+		t.Errorf("dropbox = %+v, want [b]", dbox)
+	}
+}
+
+func TestDeleteArea_RefusedWhenInUse(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	hash, size, mime, _ := e.svc.PutBlob(ctx, bytes.NewReader([]byte("a")))
+	if _, err := e.svc.NewFile(ctx, "notes", e.alice.ID, hash, size, mime, "", ""); err != nil {
+		t.Fatalf("NewFile: %v", err)
+	}
+	if err := e.svc.DeleteArea(ctx, "dropbox"); !errors.Is(err, ErrAreaInUse) {
+		t.Errorf("DeleteArea: %v, want ErrAreaInUse", err)
+	}
+}
+
+func TestDeleteArea_OKWhenEmpty(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	if err := e.svc.CreateArea(ctx, Area{Slug: "ephemeral", Name: "Ephemeral"}); err != nil {
+		t.Fatalf("CreateArea: %v", err)
+	}
+	if err := e.svc.DeleteArea(ctx, "ephemeral"); err != nil {
+		t.Errorf("DeleteArea: %v", err)
+	}
+}
+
+func TestDeleteArea_Unknown(t *testing.T) {
+	e := setup(t)
+	if err := e.svc.DeleteArea(context.Background(), "nope"); !errors.Is(err, ErrAreaNotFound) {
+		t.Errorf("err = %v, want ErrAreaNotFound", err)
+	}
+}
+
+func TestCreateArea_DuplicateSlug(t *testing.T) {
+	e := setup(t)
+	if err := e.svc.CreateArea(context.Background(), Area{Slug: "dropbox", Name: "Dup"}); !errors.Is(err, ErrAreaTaken) {
+		t.Errorf("err = %v, want ErrAreaTaken", err)
 	}
 }

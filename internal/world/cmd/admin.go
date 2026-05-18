@@ -435,6 +435,31 @@ func (h *Handler) cmdBoot(ctx context.Context, rest string) Outcome {
 }
 
 // ---------------------------------------------------------------------------
+// @cleanup-files
+//
+// Runs the files janitor synchronously, gated to admins. Prints the
+// reaped counts in the canonical form "reaped N expired token(s), M
+// orphan blob(s)".
+
+func (h *Handler) cmdCleanupFiles(ctx context.Context) Outcome {
+	if outcome, ok := h.requireAdmin(false); !ok {
+		return outcome
+	}
+	be := h.adminBackend()
+	if be == nil {
+		return OutcomeUnknown
+	}
+	stats, err := be.API.CleanupFiles(ctx, 0)
+	if err != nil {
+		_ = h.Presence.Write(formatAdminError(err))
+		return OutcomeContinue
+	}
+	_ = h.Presence.Write(fmt.Sprintf("reaped %d expired token(s), %d orphan blob(s)\r\n",
+		stats.TokensReaped, stats.BlobsReaped))
+	return OutcomeContinue
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 
 // stripQuotes removes a surrounding pair of double quotes, if present.

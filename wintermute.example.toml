@@ -27,6 +27,19 @@ mode = "self-signed"
 # cache_dir = "/var/lib/wintermute/acme-cache"
 # hostnames = ["mud.example.com"]
 
+# File-transfer blob store (milestone 6+). The first install seeds a
+# single area named `dropbox` (slug `dropbox`, everyone-may-read /
+# everyone-may-write, admin-only manage) so uploads have somewhere to
+# land. Admin Lua can create additional areas via
+# `wintermute.file.area.create(...)` and audit reaped tokens / orphan
+# blobs with the `@cleanup-files` in-game command.
+#
+# [files]
+# root                       = "./blobs"
+# max_upload_bytes           = 104857600       # 100 MiB; 0 means default
+# janitor_interval_seconds   = 300
+# janitor_blob_grace_seconds = 600
+
 # Parsed but unused until milestone 3.
 [llm.default]
 backend = "ollama"

@@ -110,6 +110,17 @@ func (a *API) Bind(L *lua.LState) {
 	L.SetField(mail, "unread_count", L.NewFunction(a.luaMailUnreadCount))
 	L.SetField(root, "mail", mail)
 
+	file := L.NewTable()
+	fileArea := L.NewTable()
+	L.SetField(fileArea, "create", L.NewFunction(a.luaFileAreaCreate))
+	L.SetField(fileArea, "delete", L.NewFunction(a.luaFileAreaDelete))
+	L.SetField(fileArea, "list", L.NewFunction(a.luaFileAreaList))
+	L.SetField(file, "area", fileArea)
+	L.SetField(file, "list", L.NewFunction(a.luaFileList))
+	L.SetField(file, "delete", L.NewFunction(a.luaFileDelete))
+	L.SetField(file, "set_acls", L.NewFunction(a.luaFileSetACLs))
+	L.SetField(root, "file", file)
+
 	ftn := L.NewTable()
 	ftnNetwork := L.NewTable()
 	L.SetField(ftnNetwork, "list", L.NewFunction(a.luaFTNNetworkList))

@@ -170,6 +170,8 @@ func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
 		outcome = h.cmdReloadScripts(ctx)
 	case "@boot":
 		outcome = h.cmdBoot(ctx, rest)
+	case "@cleanup-files":
+		outcome = h.cmdCleanupFiles(ctx)
 	case "@edit":
 		outcome = h.cmdEdit(ctx, rest)
 	case "@help":
@@ -429,6 +431,9 @@ func (h *Handler) adminHelpLines() []string {
 		"",
 		"Sessions (admin):",
 		"  @boot <username> [message]              — force-disconnect a user",
+		"",
+		"Files (admin):",
+		"  @cleanup-files                          — reap expired tokens and orphan blobs",
 		"",
 		"Help:",
 		"  @help                                   — same as help, listed for discoverability",
