@@ -80,7 +80,7 @@ func run(cfgPath string) error {
 	// M6: mail, boards, files services + MSGID issuer share a single
 	// instance across the process.
 	msgidIssuer := msgid.NewIssuer(db)
-	mailSvc := mail.NewService(db, msgidIssuer, "Wintermute/0.6.0-dev")
+	mailSvc := mail.NewService(db, msgidIssuer, "Wintermute/0.6.0-dev", "")
 	boardsSvc := boards.NewService(db, msgidIssuer, boards.ServiceOptions{
 		PID:        "Wintermute/0.6.0-dev",
 		ServerName: "Wintermute",
@@ -129,6 +129,8 @@ func run(cfgPath string) error {
 	// world from inside the game.
 	adminAPI := worldapi.New(w, db, authStore, npcReg, logger)
 	adminAPI.Engage = hostCache
+	adminAPI.Mail = mailSvc
+	adminAPI.Boards = boardsSvc
 	luaAPI := scriptlua.NewAPI(adminAPI, nil, ctx)
 	luaPool := scriptlua.NewPool(scriptlua.PoolConfig{Size: 4, API: luaAPI})
 	defer luaPool.Close()

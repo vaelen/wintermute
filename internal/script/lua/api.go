@@ -95,6 +95,29 @@ func (a *API) Bind(L *lua.LState) {
 	L.SetField(tool, "list", L.NewFunction(a.luaToolList))
 	L.SetField(root, "tool", tool)
 
+	board := L.NewTable()
+	L.SetField(board, "create", L.NewFunction(a.luaBoardCreate))
+	L.SetField(board, "delete", L.NewFunction(a.luaBoardDelete))
+	L.SetField(board, "get", L.NewFunction(a.luaBoardGet))
+	L.SetField(board, "list", L.NewFunction(a.luaBoardList))
+	L.SetField(board, "set_acls", L.NewFunction(a.luaBoardSetACLs))
+	L.SetField(root, "board", board)
+
+	mail := L.NewTable()
+	L.SetField(mail, "send_from_system", L.NewFunction(a.luaMailSendFromSystem))
+	L.SetField(mail, "broadcast", L.NewFunction(a.luaMailBroadcast))
+	L.SetField(mail, "delete_for_user", L.NewFunction(a.luaMailDeleteForUser))
+	L.SetField(mail, "unread_count", L.NewFunction(a.luaMailUnreadCount))
+	L.SetField(root, "mail", mail)
+
+	ftn := L.NewTable()
+	ftnNetwork := L.NewTable()
+	L.SetField(ftnNetwork, "list", L.NewFunction(a.luaFTNNetworkList))
+	L.SetField(ftnNetwork, "get", L.NewFunction(a.luaFTNNetworkGet))
+	L.SetField(ftnNetwork, "set_default", L.NewFunction(a.luaFTNNetworkSetDefault))
+	L.SetField(ftn, "network", ftnNetwork)
+	L.SetField(root, "ftn", ftn)
+
 	L.SetGlobal("wintermute", root)
 }
 

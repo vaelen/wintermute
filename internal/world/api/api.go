@@ -9,6 +9,8 @@ import (
 	"log/slog"
 
 	"github.com/vaelen/wintermute/internal/auth"
+	"github.com/vaelen/wintermute/internal/boards"
+	"github.com/vaelen/wintermute/internal/mail"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
 	"github.com/vaelen/wintermute/internal/world/engage"
@@ -32,7 +34,11 @@ type API struct {
 	NPCs    NPCReloader
 	Logger  *slog.Logger
 	// Engage is optional: nil disables set_engage/clear_engage.
-	Engage  *engage.HostCache
+	Engage *engage.HostCache
+	// Mail is optional: nil disables wintermute.mail.* bindings.
+	Mail *mail.Service
+	// Boards is optional: nil disables wintermute.board.* bindings.
+	Boards *boards.Service
 }
 
 // New builds an API. Any of npcs, accts, or logger may be nil; the
