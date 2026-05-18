@@ -437,9 +437,9 @@ func (h *Handler) cmdBoot(ctx context.Context, rest string) Outcome {
 // ---------------------------------------------------------------------------
 // @cleanup-files
 //
-// Runs the files janitor synchronously, gated to admins. Prints the
-// reaped counts in the canonical form "reaped N expired token(s), M
-// orphan blob(s)".
+// Output format ("reaped N expired token(s), M orphan blob(s)") is the
+// stable contract callers (and tests) match on; do not reword without
+// updating the test in admin_test.go.
 
 func (h *Handler) cmdCleanupFiles(ctx context.Context) Outcome {
 	if outcome, ok := h.requireAdmin(false); !ok {

@@ -317,7 +317,7 @@ func run(cfgPath string) error {
 	if cfg.Server.HTTPPort > 0 {
 		fileHandler := wintermutehttp.NewHandler(filesSvc, wintermutehttp.HandlerOptions{
 			MaxUploadBytes: cfg.Files.MaxUploadBytes,
-			OnUpload:       uploadMailNotifier(ctx, logger, authStore, mailSvc),
+			OnUpload:       uploadMailNotifier(logger, authStore, mailSvc),
 			Logger:         logger,
 		})
 		httpAddr := joinHostPort("0.0.0.0", cfg.Server.HTTPPort)
@@ -570,13 +570,12 @@ func buildTerminalDeps(
 }
 
 // uploadMailNotifier returns the OnUpload callback wired into the M6
-// HTTP handler. Every successful upload is logged and a system mail is
-// delivered to the file's owner — that covers the M6 acceptance
-// requirement that uploads completing while the player is offline are
-// visible at next login. Resolution failures (owner missing, mail
-// failure) are logged but do not propagate.
+// HTTP handler. Delivery runs on context.Background rather than the
+// process lifecycle ctx so that an upload finishing during the
+// http.Server.Shutdown drain window — when the lifecycle ctx is already
+// cancelled — still sends its mail (the DB writer is kept alive by
+// `wg` until after the HTTP server exits).
 func uploadMailNotifier(
-	ctx context.Context,
 	logger *slog.Logger,
 	authStore *auth.Store,
 	mailSvc *mail.Service,
@@ -585,6 +584,7 @@ func uploadMailNotifier(
 		logger.Info("file uploaded",
 			"account_id", ev.AccountID, "file_id", ev.FileID,
 			"slug", ev.Slug, "size", ev.Size, "mime", ev.MIME)
+		ctx := context.Background()
 		owner, err := authStore.GetByID(ctx, ev.AccountID)
 		if err != nil {
 			logger.Warn("upload mail: resolve owner",

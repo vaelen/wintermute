@@ -32,6 +32,8 @@ var (
 	ErrAreaNotFound   = errors.New("files: area not found")
 	ErrAreaInUse      = errors.New("files: area in use")
 	ErrAreaTaken      = errors.New("files: area slug taken")
+	ErrEmptySlug      = errors.New("files: slug is required")
+	ErrEmptyName      = errors.New("files: name is required")
 )
 
 // DefaultArea is the slug of the seeded fallback file area. Every fresh
@@ -502,10 +504,10 @@ func (s *Service) ListAreas(ctx context.Context) ([]Area, error) {
 // — the same bands used by the seeded dropbox row.
 func (s *Service) CreateArea(ctx context.Context, a Area) error {
 	if a.Slug == "" {
-		return fmt.Errorf("files: area slug is required")
+		return ErrEmptySlug
 	}
 	if a.Name == "" {
-		return fmt.Errorf("files: area name is required")
+		return ErrEmptyName
 	}
 	if a.ReadMinLevel == 0 {
 		a.ReadMinLevel = 1
@@ -618,6 +620,11 @@ func randomTokenValue() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// isUniqueConstraint reports whether err looks like a SQLite
+// UNIQUE-constraint violation. Matched on text because
+// modernc.org/sqlite returns its own concrete error type with no
+// public constants — see the "Error matching" convention in CLAUDE.md
+// for why substring matching is justified here.
 func isUniqueConstraint(err error) bool {
 	return err != nil && (containsAny(err.Error(),
 		"UNIQUE constraint", "constraint failed: UNIQUE"))

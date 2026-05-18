@@ -168,6 +168,10 @@ func translateFilesErr(kind, slug string, err error) error {
 		return notFound(kind, slug)
 	case errors.Is(err, files.ErrSlugTaken):
 		return duplicateSlug(slug)
+	case errors.Is(err, files.ErrEmptySlug):
+		return errorf(CodeInvalidArgument, "slug is required")
+	case errors.Is(err, files.ErrEmptyName):
+		return errorf(CodeInvalidArgument, "name is required")
 	}
 	var apiErr *Error
 	if errors.As(err, &apiErr) {

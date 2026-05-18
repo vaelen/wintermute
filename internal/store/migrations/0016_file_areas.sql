@@ -1,7 +1,11 @@
 -- Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
 -- SPDX-License-Identifier: MIT
 
-ALTER TABLE files ADD COLUMN area TEXT NOT NULL DEFAULT 'dropbox';
+-- Create the areas table and seed `dropbox` before adding the column
+-- on `files`: the ADD COLUMN's FK is checked by `PRAGMA
+-- foreign_key_check` at the end of the migration (see store.applyAll),
+-- and every existing files row gets DEFAULT 'dropbox' which must
+-- already exist in file_areas.
 
 CREATE TABLE file_areas (
     slug             TEXT PRIMARY KEY,
@@ -14,5 +18,8 @@ CREATE TABLE file_areas (
 
 INSERT INTO file_areas(slug, name, description)
     VALUES ('dropbox', 'Dropbox', 'Files shared by anyone, visible to anyone.');
+
+ALTER TABLE files ADD COLUMN area TEXT NOT NULL DEFAULT 'dropbox'
+    REFERENCES file_areas(slug) ON DELETE RESTRICT;
 
 CREATE INDEX idx_files_area ON files(area);

@@ -57,7 +57,7 @@ func TestUploadDeliversSystemMail(t *testing.T) {
 
 	handler := wintermutehttp.NewHandler(filesSvc, wintermutehttp.HandlerOptions{
 		MaxUploadBytes: 1 << 20,
-		OnUpload:       uploadMailNotifier(ctx, logger, authStore, mailSvc),
+		OnUpload:       uploadMailNotifier(logger, authStore, mailSvc),
 		Logger:         logger,
 	})
 	srv := httptest.NewServer(handler)
