@@ -63,6 +63,7 @@ The `internal/llm` package defines an `LLM` interface and a factory registry. **
 - **Tests**: unit tests beside code. Scenario tests in `internal/integration`. The test-only `internal/llm/fake` backend (build tag `test`) provides deterministic LLM responses; use it for anything that exercises NPC logic. Tests that hit a real Ollama use build tag `ollama` and skip if `OLLAMA_URL` is unset.
 - **No comments** explaining what code already says. Only comment when the *why* is non-obvious (a hidden constraint, a workaround, a surprise).
 - **No backwards-compatibility shims**, no half-finished implementations, no premature abstractions. The plan tells you what each milestone delivers; deliver that and stop.
+- **Error matching**: use sentinel errors (`var ErrFoo = errors.New(...)`) and `errors.Is` / `errors.As` for cross-package error dispatch. Do not match on `err.Error()` substrings — message text is presentation, not API, and substring matches break silently when wording changes. The one exception is third-party concrete error types we can't introspect cleanly (e.g. `modernc.org/sqlite`'s unique-constraint error); document the reason inline when you do.
 
 ## Repo layout
 

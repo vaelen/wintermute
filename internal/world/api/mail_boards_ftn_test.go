@@ -492,9 +492,31 @@ func TestSetDefaultNetwork_SwitchesAndKeepsIndexValid(t *testing.T) {
 
 func TestSetDefaultNetwork_Unknown(t *testing.T) {
 	e := newTestAPIWithServices(t)
-	err := e.api.SetDefaultNetwork(context.Background(), "ghost")
+	ctx := context.Background()
+	err := e.api.SetDefaultNetwork(ctx, "ghost")
 	var apiErr *Error
 	if !errors.As(err, &apiErr) || apiErr.Code != CodeNotFound {
 		t.Errorf("err = %v, want not_found", err)
+	}
+	// The transaction must roll back: the existing default network
+	// remains. After bootstrap with no explicit default, `local` is the
+	// default and clearing it would leave no default at all.
+	rows, listErr := e.api.ListNetworks(ctx)
+	if listErr != nil {
+		t.Fatalf("ListNetworks: %v", listErr)
+	}
+	defaults := 0
+	var defaultSlug string
+	for _, n := range rows {
+		if n.IsDefault {
+			defaults++
+			defaultSlug = n.Slug
+		}
+	}
+	if defaults != 1 {
+		t.Errorf("default count = %d, want 1 (rollback failed)", defaults)
+	}
+	if defaultSlug != "local" {
+		t.Errorf("default = %q, want local (rollback failed)", defaultSlug)
 	}
 }

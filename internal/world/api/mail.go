@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/mail"
@@ -35,7 +36,10 @@ type BroadcastMailOpts struct {
 
 // BroadcastMail sends the same message from the configured system handle
 // to every account whose access level matches opts.AccessLevel (empty
-// matches all). Returns the number of mail rows inserted.
+// matches all). Returns the number of mail rows inserted plus, if any
+// recipient failed twice in a row, an Error whose Details lists every
+// twice-failed username — so one transient SQLite contention doesn't
+// shred a server-wide announcement.
 //
 // Each row gets its own MSGID per the FTS-0009 uniqueness contract.
 func (a *API) BroadcastMail(ctx context.Context, subject, body string, opts BroadcastMailOpts) (int, error) {
@@ -61,14 +65,33 @@ func (a *API) BroadcastMail(ctx context.Context, subject, body string, opts Broa
 	if err != nil {
 		return 0, err
 	}
-	var n int
-	for _, u := range usernames {
-		if _, err := a.Mail.SendFromSystem(ctx, u, subject, body); err != nil {
-			return n, fmt.Errorf("broadcast to %q: %w", u, err)
+
+	send := func(targets []string) (sent int, failed []string) {
+		for _, u := range targets {
+			if _, err := a.Mail.SendFromSystem(ctx, u, subject, body); err != nil {
+				failed = append(failed, u)
+				continue
+			}
+			sent++
 		}
-		n++
+		return sent, failed
 	}
-	return n, nil
+
+	sent, failed := send(usernames)
+	if len(failed) == 0 {
+		return sent, nil
+	}
+	// Second pass: retry once. Anything still failing is reported in a
+	// single canonical Error so callers learn exactly which accounts
+	// didn't receive the message.
+	retried, stillFailed := send(failed)
+	sent += retried
+	if len(stillFailed) > 0 {
+		return sent, errorf(CodeInternal,
+			"broadcast failed for %d account(s): %s",
+			len(stillFailed), strings.Join(stillFailed, ", "))
+	}
+	return sent, nil
 }
 
 // DeleteMailForUser removes a single mail row owned by the named account.

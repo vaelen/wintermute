@@ -361,8 +361,9 @@ func TestDeleteBoard_RejectsIfHasPosts(t *testing.T) {
 	ctx := context.Background()
 	_, _ = e.svc.CreateBoard(ctx, CreateBoardSpec{Slug: "g", Name: "G", NetworkSlug: "local"})
 	_, _ = e.svc.Post(ctx, "g", e.alice, "x", "y")
-	if err := e.svc.DeleteBoard(ctx, "g"); err == nil {
-		t.Errorf("DeleteBoard should refuse when posts exist")
+	err := e.svc.DeleteBoard(ctx, "g")
+	if !errors.Is(err, ErrHasPosts) {
+		t.Errorf("DeleteBoard err = %v, want ErrHasPosts", err)
 	}
 }
 

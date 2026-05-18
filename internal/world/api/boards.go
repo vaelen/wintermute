@@ -195,14 +195,11 @@ func translateBoardsErr(slug string, err error) error {
 		return errorf(CodeInvalidArgument, "unknown network: %v", err)
 	case errors.Is(err, boards.ErrForbidden):
 		return errorf(CodePermissionDenied, "%v", err)
+	case errors.Is(err, boards.ErrHasPosts):
+		return errorf(CodeInvalidArgument, "%v", err)
 	}
 	if isUniqueErr(err) {
 		return duplicateSlug(slug)
-	}
-	// "has N posts; refuse to delete" surfaces as invalid_argument so the
-	// caller can distinguish it from not_found.
-	if strings.Contains(err.Error(), "refuse to delete") {
-		return errorf(CodeInvalidArgument, "%v", err)
 	}
 	var apiErr *Error
 	if errors.As(err, &apiErr) {
@@ -213,7 +210,8 @@ func translateBoardsErr(slug string, err error) error {
 
 // isUniqueErr reports whether err looks like a SQLite UNIQUE-constraint
 // violation. Matched on text because modernc.org/sqlite returns its own
-// concrete error type.
+// concrete error type — see the "Error matching" convention in
+// CLAUDE.md for why substring matching is justified here.
 func isUniqueErr(err error) bool {
 	if err == nil {
 		return false

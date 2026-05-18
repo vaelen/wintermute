@@ -171,9 +171,12 @@ func TestLuaBoardDeleteRefusesWithPosts(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from delete with posts")
 	}
-	if !strings.Contains(err.Error(), "invalid_argument") &&
-		!strings.Contains(err.Error(), "refuse to delete") {
-		t.Errorf("error = %q, want refuse-to-delete signal", err.Error())
+	// Canonical envelope: "wintermute: invalid_argument: ...".
+	if !strings.Contains(err.Error(), "wintermute: invalid_argument:") {
+		t.Errorf("error = %q, want canonical invalid_argument envelope", err.Error())
+	}
+	if !strings.Contains(err.Error(), "has posts") {
+		t.Errorf("error = %q, want mention of 'has posts'", err.Error())
 	}
 }
 

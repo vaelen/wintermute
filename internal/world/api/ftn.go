@@ -60,7 +60,10 @@ func (a *API) SetDefaultNetwork(ctx context.Context, slug string) error {
 	if slug == "" {
 		return errorf(CodeInvalidArgument, "slug is required")
 	}
-	var affected int64
+	// errUnknownNetwork is returned from the writer closure when slug
+	// matches no row, so the transaction rolls back before we map it to
+	// the canonical not_found Error.
+	errUnknownNetwork := errors.New("unknown network")
 	err := a.DB.Write(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE ftn_networks SET is_default = 0`); err != nil {
@@ -71,14 +74,17 @@ func (a *API) SetDefaultNetwork(ctx context.Context, slug string) error {
 		if err != nil {
 			return fmt.Errorf("set default: %w", err)
 		}
-		affected, _ = res.RowsAffected()
+		affected, _ := res.RowsAffected()
+		if affected == 0 {
+			return errUnknownNetwork
+		}
 		return nil
 	})
+	if errors.Is(err, errUnknownNetwork) {
+		return notFound("ftn_network", slug)
+	}
 	if err != nil {
 		return errorf(CodeInternal, "%v", err)
-	}
-	if affected == 0 {
-		return notFound("ftn_network", slug)
 	}
 	return nil
 }
