@@ -213,7 +213,9 @@ func TestAdmin_users_promote_changesAccessLevel(t *testing.T) {
 		t.Fatalf("did not land on alice's view: %s", buf.String())
 	}
 	buf.Reset()
-	h.Handle(p, "U") // Promote to builder
+	// Player view offers numbered transitions: 1) Promote to builder,
+	// 2) Promote to admin. Pick 1.
+	h.Handle(p, "1")
 	got, err := f.auth.GetByID(context.Background(), f.player.ID)
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)
@@ -240,7 +242,9 @@ func TestAdmin_users_selfPromote_refused(t *testing.T) {
 		t.Fatalf("did not land on root's view: %s", buf.String())
 	}
 	buf.Reset()
-	h.Handle(p, "X") // Demote yourself to builder
+	// Admin view offers 1) Demote to player, 2) Demote to builder. Pick
+	// 2 to try and demote yourself — should be refused.
+	h.Handle(p, "2")
 	got, err := f.auth.GetByID(context.Background(), f.admin.ID)
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)

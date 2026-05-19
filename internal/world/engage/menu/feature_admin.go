@@ -186,20 +186,49 @@ func (s adminUserView) render(h *Handler, _ *engage.Participant) string {
 		Row{Label: "Height:      " + intPtrOrDash(acc.TerminalHeight)},
 		Row{Blank: true},
 	)
-	if acc.AccessLevel != auth.AccessAdmin {
-		rows = append(rows, Row{Selector: "P)", Label: "Promote to admin"})
-	}
-	if acc.AccessLevel == auth.AccessPlayer {
-		rows = append(rows, Row{Selector: "U)", Label: "Promote to builder"})
-	}
-	if acc.AccessLevel == auth.AccessBuilder {
-		rows = append(rows, Row{Selector: "D)", Label: "Demote to player"})
-	}
-	if acc.AccessLevel == auth.AccessAdmin {
-		rows = append(rows, Row{Selector: "X)", Label: "Demote to builder"})
+	for i, t := range userViewTransitions(acc.AccessLevel) {
+		rows = append(rows, Row{
+			Selector: fmt.Sprintf("%d)", i+1),
+			Label:    t.label,
+		})
 	}
 	rows = append(rows, Row{Selector: "B)", Label: "Back"}, Row{Blank: true})
-	return frame(h, "admin — User", rows)
+	return frame(h, "admin — User", rows) + "Select: "
+}
+
+// userViewTransition is one (label, target-level) pair offered on the
+// user-view screen. The set varies by the target's current level so we
+// never render a transition that's a no-op.
+type userViewTransition struct {
+	label string
+	level auth.AccessLevel
+}
+
+// userViewTransitions returns the access-level changes the admin can
+// apply to a target at the given current level. Numbered selectors are
+// used in the rendered menu (not single letters) to avoid colliding
+// with pagination keys in the parent users-list state — N/P move
+// between pages there; reflex-typing "p" should never escalate a
+// target to admin one screen deeper.
+func userViewTransitions(current auth.AccessLevel) []userViewTransition {
+	switch current {
+	case auth.AccessPlayer:
+		return []userViewTransition{
+			{"Promote to builder", auth.AccessBuilder},
+			{"Promote to admin", auth.AccessAdmin},
+		}
+	case auth.AccessBuilder:
+		return []userViewTransition{
+			{"Demote to player", auth.AccessPlayer},
+			{"Promote to admin", auth.AccessAdmin},
+		}
+	case auth.AccessAdmin:
+		return []userViewTransition{
+			{"Demote to player", auth.AccessPlayer},
+			{"Demote to builder", auth.AccessBuilder},
+		}
+	}
+	return nil
 }
 
 func (s adminUserView) handle(h *Handler, p *engage.Participant, line string) {
@@ -228,20 +257,13 @@ func (s adminUserView) handle(h *Handler, p *engage.Participant, line string) {
 		_ = p.Write("Cannot change your own access level. Ask another admin.\r\n")
 		return
 	}
-	var newLevel auth.AccessLevel
-	switch low {
-	case "p":
-		newLevel = auth.AccessAdmin
-	case "u":
-		newLevel = auth.AccessBuilder
-	case "d":
-		newLevel = auth.AccessPlayer
-	case "x":
-		newLevel = auth.AccessBuilder
-	default:
+	choices := userViewTransitions(target.AccessLevel)
+	n, perr := strconv.Atoi(low)
+	if perr != nil || n < 1 || n > len(choices) {
 		h.redraw(p)
 		return
 	}
+	newLevel := choices[n-1].level
 	if newLevel == target.AccessLevel {
 		h.redraw(p)
 		return
@@ -578,7 +600,16 @@ func (s adminBoardsList) handle(h *Handler, p *engage.Participant, line string) 
 		h.redraw(p)
 		return
 	case "b", "back", "..":
-		h.transition(p, adminMain{})
+		// Multi-network: the admin reached this list via the network
+		// picker, so Back returns there. Single-network: the picker is
+		// skipped on entry, so returning to it would be useless — go
+		// straight back to the admin main menu instead.
+		nets, _ := loadNetworks(h)
+		if len(nets) > 1 {
+			h.transition(p, adminBoardsEntry{})
+		} else {
+			h.transition(p, adminMain{})
+		}
 		return
 	case "c", "create":
 		h.transition(p, adminBoardsCreateSlug{network: s.network})
@@ -1161,12 +1192,29 @@ func (s adminFileView) render(h *Handler, _ *engage.Participant) string {
 		rows = append(rows, Row{Blank: true}, Row{Selector: "B)", Label: "Back"}, Row{Blank: true})
 		return frame(h, "admin — Files", rows)
 	}
-	var f files.File
+	var (
+		f     files.File
+		found bool
+	)
 	for i := range list {
 		if list[i].ID == s.id {
 			f = list[i]
+			found = true
 			break
 		}
+	}
+	if !found {
+		// The file went away between the list view and the view-detail
+		// transition — most likely another admin deleted it concurrently.
+		// Surface the gap explicitly rather than rendering an empty row
+		// that hides the cause.
+		rows = append(rows,
+			Row{Label: fmt.Sprintf("(file id %d is no longer in area %q)", s.id, s.area)},
+			Row{Blank: true},
+			Row{Selector: "B)", Label: "Back"},
+			Row{Blank: true},
+		)
+		return frame(h, "admin — Files", rows)
 	}
 	rows = append(rows,
 		Row{Label: "Slug:        " + f.Slug},

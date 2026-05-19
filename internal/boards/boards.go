@@ -221,8 +221,8 @@ func (s *Service) SetAdminMinLevel(ctx context.Context, slug string, level int) 
 }
 
 func (s *Service) setIntCol(ctx context.Context, slug, col string, val int) error {
-	// Column name is hard-coded by the call sites above, never user input,
-	// so it's safe to interpolate.
+	// Column name is caller-controlled (hard-coded by the wrappers above),
+	// never user input.
 	query := fmt.Sprintf(`UPDATE boards SET %s = ? WHERE slug = ?`, col)
 	return s.db.Write(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx, query, val, slug)
@@ -271,11 +271,16 @@ func (s *Service) SetAreaTag(ctx context.Context, slug, areaTag string) error {
 // ListByNetwork returns every board attached to the named network,
 // regardless of ACL. Intended for the admin menu, which must see boards
 // even when the operator's account would not be permitted to read them.
-// Returns ErrUnknownNetwork if the network slug doesn't exist.
+// Returns ErrUnknownNetwork if the network slug doesn't exist; any
+// other read error is returned unwrapped so transient DB failures
+// remain distinguishable from a missing slug.
 func (s *Service) ListByNetwork(ctx context.Context, networkSlug string) ([]Board, error) {
 	net, err := ftnnetworks.Get(ctx, s.db, networkSlug)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrUnknownNetwork, networkSlug)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: %s", ErrUnknownNetwork, networkSlug)
+		}
+		return nil, fmt.Errorf("boards: list-by-network: %w", err)
 	}
 	rows, err := s.db.Read().QueryContext(ctx, `
 		SELECT id, network_id, slug, name, description, area_tag,

@@ -609,7 +609,8 @@ func TestAdminMenu_endToEnd(t *testing.T) {
 	// Sorted by username: alice (1), bob (2).
 	alice.send("2\r\n")
 	alice.expect("Username:    bob", 5*time.Second)
-	alice.send("U\r\n") // promote to builder
+	// Player view: 1) Promote to builder, 2) Promote to admin.
+	alice.send("1\r\n")
 	alice.drainFor(200 * time.Millisecond)
 	bob, err := srv.authS.GetByUsername(context.Background(), "bob")
 	if err != nil {
