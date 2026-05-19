@@ -190,7 +190,7 @@ func TestAtCleanupFilesReportsCounts(t *testing.T) {
 	h.Admin.API.Files = filesSvc
 
 	// Issue an upload token that's already expired so the janitor reaps it.
-	if _, err := filesSvc.IssueUpload(ctx, h.Presence.Account.ID, "stale", -1); err != nil {
+	if _, err := filesSvc.IssueUpload(ctx, h.Presence.Account.ID, "stale", "", -1); err != nil {
 		t.Fatalf("IssueUpload: %v", err)
 	}
 

@@ -7,7 +7,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 
 	"github.com/vaelen/wintermute/internal/world/engage"
 )
@@ -28,9 +27,11 @@ type SetEngageOpts struct {
 	Menu           []engage.MenuEntry
 }
 
-// SetEngage marks an object as engageable. opts.Kind must be "terminal"
-// or "npc" — "custom" is reserved for a later milestone. Empty verb
-// slices fall back to the kind-defaults via engage.ApplyKindDefaults.
+// SetEngage marks an object as engageable. opts.Kind must be "terminal",
+// "menu_terminal", or "npc" — "custom" is reserved for a later milestone.
+// Empty verb slices fall back to the kind-defaults via
+// engage.ApplyKindDefaults. opts.Menu is only valid when Kind is
+// "menu_terminal" and is validated against the closed feature set.
 func (a *API) SetEngage(ctx context.Context, slug string, opts SetEngageOpts) error {
 	if a.Engage == nil {
 		return errorf(CodeInternal, "engage cache not configured")
@@ -48,6 +49,23 @@ func (a *API) SetEngage(ctx context.Context, slug string, opts SetEngageOpts) er
 	if err := engage.ValidateMenu(opts.Menu); err != nil {
 		return errorf(CodeInvalidArgument, "%s", err.Error())
 	}
+	// Verify every FeatureFiles entry references a known area before we
+	// persist. The DB has no FK from object_engage.policy back to
+	// file_areas (the column is opaque JSON), so a typo here would
+	// otherwise surface as a runtime "area not found" inside the menu
+	// the next time a player opened it. Skipped when a.Files is unset
+	// (test paths that don't wire the files service).
+	if a.Files != nil {
+		for i, e := range opts.Menu {
+			if e.Feature != engage.FeatureFiles {
+				continue
+			}
+			if _, gerr := a.Files.GetArea(ctx, e.Area); gerr != nil {
+				return errorf(CodeInvalidArgument,
+					"menu[%d]: unknown area %q", i, e.Area)
+			}
+		}
+	}
 	obj, err := a.World.ObjectBySlug(slug)
 	if err != nil {
 		return translateWorldErr("object", slug, err)
@@ -57,7 +75,7 @@ func (a *API) SetEngage(ctx context.Context, slug string, opts SetEngageOpts) er
 	dv, _ := json.Marshal(opts.DisengageVerbs)
 	policy, perr := engage.EncodePolicyJSON(opts.Policy, opts.Menu)
 	if perr != nil {
-		return fmt.Errorf("api: set_engage: encode policy: %w", perr)
+		return errorf(CodeInternal, "set_engage: encode policy: %v", perr)
 	}
 
 	if err := a.DB.Write(ctx, func(tx *sql.Tx) error {
@@ -82,7 +100,7 @@ func (a *API) SetEngage(ctx context.Context, slug string, opts SetEngageOpts) er
 		)
 		return err
 	}); err != nil {
-		return fmt.Errorf("api: set_engage: %w", err)
+		return errorf(CodeInternal, "set_engage: %v", err)
 	}
 
 	h := &engage.Host{
@@ -116,7 +134,7 @@ func (a *API) ClearEngage(ctx context.Context, slug string) error {
 			`DELETE FROM object_engage WHERE object_id = ?`, int64(obj.ID))
 		return err
 	}); err != nil {
-		return fmt.Errorf("api: clear_engage: %w", err)
+		return errorf(CodeInternal, "clear_engage: %v", err)
 	}
 	a.Engage.Delete(obj.ID)
 	return nil

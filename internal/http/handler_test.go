@@ -66,7 +66,7 @@ func setup(t *testing.T) *env {
 func TestUpload_HappyPath(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
-	tok, _ := e.files.IssueUpload(ctx, e.alice.ID, "notes", time.Minute)
+	tok, _ := e.files.IssueUpload(ctx, e.alice.ID, "notes", "", time.Minute)
 
 	body := []byte("file contents here")
 	req, _ := netHTTP.NewRequest("POST", e.srv.URL+"/upload/"+tok.Value, bytes.NewReader(body))
@@ -113,9 +113,39 @@ func TestUpload_HappyPath(t *testing.T) {
 	}
 }
 
+// TestUpload_StampsTokenArea covers the M6.3 fix: when an upload token
+// was issued with a non-default area, the redeem path must stamp the
+// new file row with that area instead of defaulting to 'dropbox'.
+func TestUpload_StampsTokenArea(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	if err := e.files.CreateArea(ctx, files.Area{Slug: "uploads", Name: "Uploads"}); err != nil {
+		t.Fatalf("CreateArea: %v", err)
+	}
+	tok, _ := e.files.IssueUpload(ctx, e.alice.ID, "to-uploads", "uploads", time.Minute)
+	body := []byte("payload")
+	req, _ := netHTTP.NewRequest("POST", e.srv.URL+"/upload/"+tok.Value, bytes.NewReader(body))
+	resp, err := netHTTP.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, b)
+	}
+	f, err := e.files.GetFile(ctx, "to-uploads")
+	if err != nil {
+		t.Fatalf("GetFile: %v", err)
+	}
+	if f.Area != "uploads" {
+		t.Errorf("file Area = %q, want %q", f.Area, "uploads")
+	}
+}
+
 func TestUpload_RefusesSecondUse(t *testing.T) {
 	e := setup(t)
-	tok, _ := e.files.IssueUpload(context.Background(), e.alice.ID, "notes", time.Minute)
+	tok, _ := e.files.IssueUpload(context.Background(), e.alice.ID, "notes", "", time.Minute)
 	url := e.srv.URL + "/upload/" + tok.Value
 	for i, want := range []int{200, 410} {
 		resp, err := netHTTP.Post(url, "application/octet-stream", strings.NewReader("x"))
@@ -131,7 +161,7 @@ func TestUpload_RefusesSecondUse(t *testing.T) {
 
 func TestUpload_RefusesGet(t *testing.T) {
 	e := setup(t)
-	tok, _ := e.files.IssueUpload(context.Background(), e.alice.ID, "notes", time.Minute)
+	tok, _ := e.files.IssueUpload(context.Background(), e.alice.ID, "notes", "", time.Minute)
 	resp, _ := netHTTP.Get(e.srv.URL + "/upload/" + tok.Value)
 	defer resp.Body.Close()
 	if resp.StatusCode != 405 {
@@ -141,7 +171,7 @@ func TestUpload_RefusesGet(t *testing.T) {
 
 func TestUpload_TooLarge(t *testing.T) {
 	e := setup(t)
-	tok, _ := e.files.IssueUpload(context.Background(), e.alice.ID, "big", time.Minute)
+	tok, _ := e.files.IssueUpload(context.Background(), e.alice.ID, "big", "", time.Minute)
 	big := bytes.Repeat([]byte("X"), (1<<20)+1)
 	req, _ := netHTTP.NewRequest("POST", e.srv.URL+"/upload/"+tok.Value, bytes.NewReader(big))
 	resp, err := netHTTP.DefaultClient.Do(req)
@@ -210,7 +240,7 @@ func TestDownload_RefusesSecondUse(t *testing.T) {
 
 func TestDownload_RefusesUploadToken(t *testing.T) {
 	e := setup(t)
-	tok, _ := e.files.IssueUpload(context.Background(), e.alice.ID, "x", time.Minute)
+	tok, _ := e.files.IssueUpload(context.Background(), e.alice.ID, "x", "", time.Minute)
 	r, _ := netHTTP.Get(e.srv.URL + "/download/" + tok.Value)
 	defer r.Body.Close()
 	if r.StatusCode != 400 {
@@ -223,7 +253,7 @@ func TestDownload_RefusesUploadToken(t *testing.T) {
 // used. The client should then be able to POST the same token to /upload/.
 func TestDownload_WrongKindDoesNotBurnToken(t *testing.T) {
 	e := setup(t)
-	tok, _ := e.files.IssueUpload(context.Background(), e.alice.ID, "x", time.Minute)
+	tok, _ := e.files.IssueUpload(context.Background(), e.alice.ID, "x", "", time.Minute)
 	r, _ := netHTTP.Get(e.srv.URL + "/download/" + tok.Value)
 	_ = r.Body.Close()
 	if r.StatusCode != 400 {

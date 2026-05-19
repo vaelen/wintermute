@@ -56,7 +56,7 @@ type Policy struct {
 // kind-defaults) is what handlers and the registry see.
 type Host struct {
 	ObjectID       world.ObjectID
-	Kind           string // KindTerminal | KindNPC | KindCustom
+	Kind           string // KindTerminal | KindMenuTerminal | KindNPC | KindCustom
 	EngageVerbs    []string
 	DisengageVerbs []string
 	EnterMsg       string // templated with {{player}}, {{host}}

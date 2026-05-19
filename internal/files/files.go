@@ -81,6 +81,11 @@ type Token struct {
 	AccountID int64
 	FileID    *int64
 	Slug      string
+	// Area is the destination area for an upload token (M6.3). The
+	// HTTP redeem path stamps this onto the new files row so kiosks
+	// scoped to a non-default area actually deposit there. Empty for
+	// download tokens.
+	Area      string
 	ExpiresAt time.Time
 	UsedAt    *time.Time
 }
@@ -316,9 +321,15 @@ func (s *Service) DeleteFile(ctx context.Context, id int64) error {
 	return nil
 }
 
-// IssueUpload creates a fresh upload token valid for ttl.
-func (s *Service) IssueUpload(ctx context.Context, accountID int64, slug string, ttl time.Duration) (Token, error) {
-	return s.issueToken(ctx, accountID, KindUpload, nil, slug, ttl)
+// IssueUpload creates a fresh upload token valid for ttl. area names
+// the destination area (e.g. "dropbox") that the new file row will be
+// stamped with on redeem. An empty area defaults to DefaultArea, which
+// matches the legacy behaviour of the pre-M6.3 raw `upload` command.
+func (s *Service) IssueUpload(ctx context.Context, accountID int64, slug, area string, ttl time.Duration) (Token, error) {
+	if area == "" {
+		area = DefaultArea
+	}
+	return s.issueToken(ctx, accountID, KindUpload, nil, slug, area, ttl)
 }
 
 // IssueDownload creates a fresh download token bound to fileID.
@@ -327,10 +338,10 @@ func (s *Service) IssueDownload(ctx context.Context, accountID, fileID int64, tt
 		return Token{}, fmt.Errorf("files: issue download: %w", err)
 	}
 	id := fileID
-	return s.issueToken(ctx, accountID, KindDownload, &id, "", ttl)
+	return s.issueToken(ctx, accountID, KindDownload, &id, "", "", ttl)
 }
 
-func (s *Service) issueToken(ctx context.Context, accountID int64, kind TokenKind, fileID *int64, slug string, ttl time.Duration) (Token, error) {
+func (s *Service) issueToken(ctx context.Context, accountID int64, kind TokenKind, fileID *int64, slug, area string, ttl time.Duration) (Token, error) {
 	val, err := randomTokenValue()
 	if err != nil {
 		return Token{}, err
@@ -340,17 +351,30 @@ func (s *Service) issueToken(ctx context.Context, accountID int64, kind TokenKin
 	if fileID != nil {
 		fid = sql.NullInt64{Int64: *fileID, Valid: true}
 	}
+	// file_tokens.area is NOT NULL DEFAULT 'dropbox' (migration 0018).
+	// Persist the literal default for download tokens too — the column
+	// is ignored on redeem for downloads but the DB still requires a
+	// valid value.
+	storedArea := area
+	if storedArea == "" {
+		storedArea = DefaultArea
+	}
 	err = s.db.Write(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO file_tokens(value, kind, account_id, file_id, slug, expires_at)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, val, string(kind), accountID, fid, sql.NullString{String: slug, Valid: slug != ""}, expires.Unix())
+			INSERT INTO file_tokens(value, kind, account_id, file_id, slug, area, expires_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, val, string(kind), accountID, fid,
+			sql.NullString{String: slug, Valid: slug != ""},
+			storedArea, expires.Unix())
 		return err
 	})
 	if err != nil {
 		return Token{}, fmt.Errorf("files: issue token: %w", err)
 	}
-	return Token{Value: val, Kind: kind, AccountID: accountID, FileID: fileID, Slug: slug, ExpiresAt: expires}, nil
+	return Token{
+		Value: val, Kind: kind, AccountID: accountID, FileID: fileID,
+		Slug: slug, Area: area, ExpiresAt: expires,
+	}, nil
 }
 
 // RedeemToken looks up, validates, and marks-used the token. expectedKind
@@ -368,10 +392,10 @@ func (s *Service) RedeemToken(ctx context.Context, value string, expectedKind To
 	)
 	err := s.db.Write(ctx, func(tx *sql.Tx) error {
 		row := tx.QueryRowContext(ctx, `
-			SELECT value, kind, account_id, file_id, slug, expires_at, used_at
+			SELECT value, kind, account_id, file_id, slug, area, expires_at, used_at
 			FROM file_tokens WHERE value = ?
 		`, value)
-		if err := row.Scan(&got.Value, &kind, &got.AccountID, &fileID, &slug, &expiresAt, &usedAt); err != nil {
+		if err := row.Scan(&got.Value, &kind, &got.AccountID, &fileID, &slug, &got.Area, &expiresAt, &usedAt); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrTokenNotFound
 			}

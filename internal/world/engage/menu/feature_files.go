@@ -120,6 +120,12 @@ func (s filesList) issueDownload(h *Handler, p *engage.Participant, ff files.Fil
 	h.redraw(p)
 }
 
+// loadFiles lists every file in the configured area regardless of owner.
+// Areas are intentionally shared file pools (M6.2 design), so a player
+// browsing a kiosk's area sees — and can issue download tokens for —
+// any account's contributions there. Per-file ACLs are still enforced
+// by the files service; area-level visibility is wholly the area's
+// read_min_level band.
 func loadFiles(h *Handler, p *engage.Participant, area string) ([]files.File, error) {
 	d, _, ok := filesReady(h, p)
 	if !ok {
@@ -174,7 +180,7 @@ func (s fileUploadSlug) handle(h *Handler, p *engage.Participant, line string) {
 		h.transition(p, s.parent)
 		return
 	}
-	tok, err := d.Files.IssueUpload(h.ctx(), acc.ID, trimmed, tokenTTL)
+	tok, err := d.Files.IssueUpload(h.ctx(), acc.ID, trimmed, s.parent.area, tokenTTL)
 	if err != nil {
 		_ = p.Write(fmt.Sprintf("upload: %v\r\n", err))
 		h.transition(p, s.parent)

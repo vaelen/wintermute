@@ -51,6 +51,12 @@ type TerminalDeps struct {
 	// AccountFor maps a player's body ObjectID to its auth.Account.
 	// Required when Mail/Boards/Files are non-nil.
 	AccountFor func(world.ObjectID) (*auth.Account, error)
+	// AccountByID resolves an account row by its primary key. Used by
+	// reply flows that need a guaranteed-current username for the
+	// sender of the parent message (mail.Mail.FromName is a send-time
+	// display snapshot, not a stable handle). Optional; nil callers
+	// fall back to FromName.
+	AccountByID func(id int64) (*auth.Account, error)
 }
 
 // TerminalHandler is the built-in handler for kind='terminal' hosts.
@@ -510,7 +516,10 @@ func (h *TerminalHandler) handleUpload(p *Participant, args string) {
 		_ = p.Write(`upload: usage "upload \"<slug>\""` + "\r\n")
 		return
 	}
-	tok, err := h.deps.Files.IssueUpload(ctx, acc.ID, slug, 5*time.Minute)
+	// Raw `upload` from the terminal has no area context; pass empty
+	// to let files.IssueUpload default to DefaultArea (matches the
+	// pre-M6.3 behaviour for this command).
+	tok, err := h.deps.Files.IssueUpload(ctx, acc.ID, slug, "", 5*time.Minute)
 	if err != nil {
 		_ = p.Write(fmt.Sprintf("upload: %v\r\n", err))
 		return

@@ -145,7 +145,15 @@ type mailRead struct {
 func (s mailRead) render(h *Handler, p *engage.Participant) string {
 	d, acc, ok := mailReady(h, p)
 	if !ok {
-		return placeholderState{title: "Mail"}.render(h, p)
+		rows := []Row{
+			{Blank: true},
+			{Label: "(mail service unavailable)"},
+			{Blank: true},
+			{Selector: "B)", Label: "Back"},
+			{Blank: true},
+		}
+		f := Frame{Width: h.width0(), Title: "Mail", Rows: rows}
+		return f.String() + "Select: "
 	}
 	m, err := d.Mail.Read(h.ctx(), s.mailID, acc.ID)
 	rows := []Row{{Blank: true}}
@@ -186,23 +194,45 @@ func (s mailRead) handle(h *Handler, p *engage.Participant, line string) {
 		h.transition(p, s.parent)
 		return
 	case "r", "reply":
-		if d, acc, ok := mailReady(h, p); ok {
-			m, err := d.Mail.Read(h.ctx(), s.mailID, acc.ID)
-			if err == nil {
-				subj := m.Subject
-				if !strings.HasPrefix(strings.ToLower(subj), "re:") {
-					subj = "Re: " + subj
-				}
-				h.transition(p, mailComposeBody{
-					parent:  s.parent,
-					to:      m.FromName,
-					subject: subj,
-					replyTo: m.MSGID,
-				})
-				return
+		d, acc, ok := mailReady(h, p)
+		if !ok {
+			h.redraw(p)
+			return
+		}
+		m, err := d.Mail.Read(h.ctx(), s.mailID, acc.ID)
+		if err != nil {
+			h.redraw(p)
+			return
+		}
+		if !m.FromID.Valid {
+			// System-originated mail: FromName is the system handle,
+			// not an accounts.username, so Mail.Send would fail
+			// recipient lookup. Refuse the reply explicitly rather
+			// than letting it fall through.
+			_ = p.Write("\r\nCannot reply: message has no resolvable sender.\r\n\r\n")
+			return
+		}
+		// Resolve the sender's current username via FromID. FromName is
+		// a display snapshot taken at send time and may not match a
+		// current accounts.username (and can never be trusted for
+		// system mail). Fall back to FromName only when the lookup
+		// is unconfigured.
+		to := m.FromName
+		if d.AccountByID != nil {
+			if sender, lerr := d.AccountByID(m.FromID.Int64); lerr == nil && sender != nil {
+				to = sender.Username
 			}
 		}
-		h.redraw(p)
+		subj := m.Subject
+		if !strings.HasPrefix(strings.ToLower(subj), "re:") {
+			subj = "Re: " + subj
+		}
+		h.transition(p, mailComposeBody{
+			parent:  s.parent,
+			to:      to,
+			subject: subj,
+			replyTo: m.MSGID,
+		})
 		return
 	}
 	h.redraw(p)
@@ -335,7 +365,9 @@ func truncRune(s string, n int) string {
 }
 
 // splitBodyLines breaks body into terminal-friendly lines, naively
-// truncating individual lines longer than max. M6.3 does not word-wrap.
+// truncating individual lines longer than max runes. M6.3 does not
+// word-wrap. The split is rune-aware so multi-byte UTF-8 codepoints
+// are never broken mid-sequence.
 func splitBodyLines(body string, max int) []string {
 	if max <= 0 {
 		max = 40
@@ -343,11 +375,12 @@ func splitBodyLines(body string, max int) []string {
 	var out []string
 	for _, raw := range strings.Split(body, "\n") {
 		raw = strings.TrimRight(raw, "\r")
-		for len(raw) > max {
-			out = append(out, raw[:max])
-			raw = raw[max:]
+		runes := []rune(raw)
+		for len(runes) > max {
+			out = append(out, string(runes[:max]))
+			runes = runes[max:]
 		}
-		out = append(out, raw)
+		out = append(out, string(runes))
 	}
 	return out
 }

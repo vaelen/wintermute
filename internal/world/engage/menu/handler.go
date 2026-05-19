@@ -19,8 +19,10 @@ import (
 // defaults to DefaultWidth; callers may override with SetWidth before
 // or during the engagement.
 //
-// Capacity is 1 (one participant per host) as in M5.7; the per-state
-// mutable fields are guarded by mu for the future.
+// Capacity is 1 (one participant per host) as in M5.7. The per-state
+// mutable fields are guarded by mu because main.go's setup path may
+// call SetDeps / SetWidth / SetDisengage from a goroutine other than
+// the one driving Handle for the engagement.
 type Handler struct {
 	host    *engage.Host
 	deps    *engage.TerminalDeps
@@ -251,6 +253,11 @@ func featureNote(h *Handler, p *engage.Participant, e engage.MenuEntry) string {
 }
 
 // newFeatureState picks the submenu state for a given menu entry.
+// The set of accepted features is closed and enforced by
+// engage.ValidateMenu at set_engage time, so an unknown Feature here
+// is a programming error (someone added a Feature* constant without
+// extending the switch) rather than a config bug — hence the panic
+// instead of a soft "not yet implemented" fallback.
 func newFeatureState(e engage.MenuEntry) state {
 	switch e.Feature {
 	case engage.FeatureMail:
@@ -259,32 +266,9 @@ func newFeatureState(e engage.MenuEntry) state {
 		return boardsList{}
 	case engage.FeatureFiles:
 		return filesList{area: e.Area}
+	default:
+		panic(fmt.Sprintf("menu: unknown feature %q after ValidateMenu", e.Feature))
 	}
-	return placeholderState{title: featureLabel(e)}
-}
-
-// placeholderState is the temporary destination for unimplemented features.
-// Pressing B (or empty) returns to the main menu.
-type placeholderState struct{ title string }
-
-func (s placeholderState) render(h *Handler, _ *engage.Participant) string {
-	rows := []Row{
-		{Blank: true},
-		{Label: s.title + " — not yet implemented."},
-		{Blank: true},
-		{Selector: "B)", Label: "Back"},
-		{Blank: true},
-	}
-	f := Frame{Width: h.width0(), Title: s.title, Rows: rows}
-	return f.String() + "Select: "
-}
-
-func (s placeholderState) handle(h *Handler, p *engage.Participant, line string) {
-	if isBackInput(line) {
-		h.transition(p, mainMenu{})
-		return
-	}
-	h.redraw(p)
 }
 
 // isBackInput reports whether line means "return to the parent menu".

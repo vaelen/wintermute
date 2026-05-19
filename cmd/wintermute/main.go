@@ -580,6 +580,9 @@ func buildTerminalDeps(
 		UploadURL:   func(token string) string { return base + "/upload/" + token },
 		DownloadURL: func(token string) string { return base + "/download/" + token },
 		AccountFor:  accountFor,
+		AccountByID: func(id int64) (*auth.Account, error) {
+			return authStore.GetByID(rootCtx, id)
+		},
 	}
 }
 

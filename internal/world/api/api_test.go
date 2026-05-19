@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/vaelen/wintermute/internal/auth"
+	"github.com/vaelen/wintermute/internal/files"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
 	"github.com/vaelen/wintermute/internal/world/engage"
@@ -44,6 +45,25 @@ func newTestAPIWithEngage(t *testing.T) (*API, *engage.HostCache) {
 		t.Fatalf("hostCache.Load: %v", err)
 	}
 	a.Engage = hc
+	return a, hc
+}
+
+// newTestAPIWithEngageAndFiles is like newTestAPIWithEngage but also
+// wires a real files.Service so SetEngage can validate area existence
+// for FeatureFiles menu entries.
+func newTestAPIWithEngageAndFiles(t *testing.T) (*API, *engage.HostCache) {
+	t.Helper()
+	a, _, db := newTestAPI(t)
+	hc := engage.NewHostCache()
+	if err := hc.Load(context.Background(), db); err != nil {
+		t.Fatalf("hostCache.Load: %v", err)
+	}
+	a.Engage = hc
+	fs, err := files.NewService(db, filepath.Join(t.TempDir(), "blobs"))
+	if err != nil {
+		t.Fatalf("files.NewService: %v", err)
+	}
+	a.Files = fs
 	return a, hc
 }
 
@@ -412,6 +432,53 @@ func TestSetEngageMenuTerminal_persistsMenuEntries(t *testing.T) {
 		if reloaded.Menu[i] != menu[i] {
 			t.Errorf("reloaded Menu[%d] = %+v, want %+v", i, reloaded.Menu[i], menu[i])
 		}
+	}
+}
+
+func TestSetEngageMenuTerminal_rejectsUnknownArea(t *testing.T) {
+	a, _ := newTestAPIWithEngageAndFiles(t)
+	ctx := context.Background()
+	if _, err := a.CreateObject(ctx, ObjectSpec{
+		Slug: "kiosk", Name: "Kiosk",
+		Kind: world.KindItem, RoomSlug: "lobby",
+	}); err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+	err := a.SetEngage(ctx, "kiosk", SetEngageOpts{
+		Kind: engage.KindMenuTerminal,
+		Menu: []engage.MenuEntry{
+			{Feature: engage.FeatureFiles, Area: "no-such-area"},
+		},
+	})
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *Error, got %T: %v", err, err)
+	}
+	if apiErr.Code != CodeInvalidArgument {
+		t.Errorf("code = %q, want invalid_argument", apiErr.Code)
+	}
+	if !strings.Contains(strings.ToLower(apiErr.Error()), "area") {
+		t.Errorf("error should mention area: %q", apiErr.Error())
+	}
+}
+
+func TestSetEngageMenuTerminal_acceptsKnownArea(t *testing.T) {
+	a, _ := newTestAPIWithEngageAndFiles(t)
+	ctx := context.Background()
+	if _, err := a.CreateObject(ctx, ObjectSpec{
+		Slug: "kiosk", Name: "Kiosk",
+		Kind: world.KindItem, RoomSlug: "lobby",
+	}); err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+	// 'dropbox' is seeded by the file_areas migration.
+	if err := a.SetEngage(ctx, "kiosk", SetEngageOpts{
+		Kind: engage.KindMenuTerminal,
+		Menu: []engage.MenuEntry{
+			{Feature: engage.FeatureFiles, Area: "dropbox"},
+		},
+	}); err != nil {
+		t.Fatalf("SetEngage: %v", err)
 	}
 }
 

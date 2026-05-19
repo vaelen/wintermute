@@ -160,6 +160,9 @@ func startMenuEngageServer(t *testing.T) *testServer {
 		UploadURL:   func(t string) string { return "https://example.test/upload/" + t },
 		DownloadURL: func(t string) string { return "https://example.test/download/" + t },
 		AccountFor:  accountFor,
+		AccountByID: func(id int64) (*auth.Account, error) {
+			return a.GetByID(ctx, id)
+		},
 	}
 
 	playerNameOf := func(id world.ObjectID) string {

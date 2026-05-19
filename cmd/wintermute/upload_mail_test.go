@@ -63,7 +63,7 @@ func TestUploadDeliversSystemMail(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
-	tok, err := filesSvc.IssueUpload(ctx, alice.ID, "notes", time.Minute)
+	tok, err := filesSvc.IssueUpload(ctx, alice.ID, "notes", "", time.Minute)
 	if err != nil {
 		t.Fatalf("IssueUpload: %v", err)
 	}
