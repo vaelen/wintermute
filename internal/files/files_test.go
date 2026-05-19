@@ -142,7 +142,7 @@ func TestGetBlob_NotFound(t *testing.T) {
 
 func TestIssueUpload_TokenIsRandom32Hex(t *testing.T) {
 	e := setup(t)
-	tok, err := e.svc.IssueUpload(context.Background(), e.alice.ID, "notes", time.Minute)
+	tok, err := e.svc.IssueUpload(context.Background(), e.alice.ID, "notes", "", time.Minute)
 	if err != nil {
 		t.Fatalf("IssueUpload: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestIssueUpload_TokenIsRandom32Hex(t *testing.T) {
 func TestIssueUpload_PersistsToken(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
-	tok, _ := e.svc.IssueUpload(ctx, e.alice.ID, "notes", time.Minute)
+	tok, _ := e.svc.IssueUpload(ctx, e.alice.ID, "notes", "", time.Minute)
 	got, err := e.svc.RedeemToken(ctx, tok.Value, KindUpload)
 	if err != nil {
 		t.Fatalf("RedeemToken: %v", err)
@@ -169,10 +169,50 @@ func TestIssueUpload_PersistsToken(t *testing.T) {
 	}
 }
 
+// TestIssueUpload_CapturesArea covers the M6.3 fix: upload tokens
+// carry the destination area through to redeem so the HTTP handler
+// stamps the file row with the right value. Pre-M6.3 the area was
+// dropped on the floor and every uploaded file landed in 'dropbox'
+// regardless of the kiosk's configuration.
+func TestIssueUpload_CapturesArea(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	if err := e.svc.CreateArea(ctx, Area{Slug: "uploads", Name: "Uploads"}); err != nil {
+		t.Fatalf("CreateArea: %v", err)
+	}
+	tok, err := e.svc.IssueUpload(ctx, e.alice.ID, "x", "uploads", time.Minute)
+	if err != nil {
+		t.Fatalf("IssueUpload: %v", err)
+	}
+	if tok.Area != "uploads" {
+		t.Errorf("issued token Area = %q, want %q", tok.Area, "uploads")
+	}
+	got, err := e.svc.RedeemToken(ctx, tok.Value, KindUpload)
+	if err != nil {
+		t.Fatalf("RedeemToken: %v", err)
+	}
+	if got.Area != "uploads" {
+		t.Errorf("redeemed token Area = %q, want %q", got.Area, "uploads")
+	}
+}
+
+func TestIssueUpload_EmptyAreaDefaultsToDropbox(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	tok, err := e.svc.IssueUpload(ctx, e.alice.ID, "x", "", time.Minute)
+	if err != nil {
+		t.Fatalf("IssueUpload: %v", err)
+	}
+	got, _ := e.svc.RedeemToken(ctx, tok.Value, KindUpload)
+	if got.Area != DefaultArea {
+		t.Errorf("default area = %q, want %q", got.Area, DefaultArea)
+	}
+}
+
 func TestRedeem_OneShot(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
-	tok, _ := e.svc.IssueUpload(ctx, e.alice.ID, "notes", time.Minute)
+	tok, _ := e.svc.IssueUpload(ctx, e.alice.ID, "notes", "", time.Minute)
 	if _, err := e.svc.RedeemToken(ctx, tok.Value, KindUpload); err != nil {
 		t.Fatalf("first redeem: %v", err)
 	}
@@ -184,7 +224,7 @@ func TestRedeem_OneShot(t *testing.T) {
 func TestRedeem_Expired(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
-	tok, _ := e.svc.IssueUpload(ctx, e.alice.ID, "notes", -time.Second)
+	tok, _ := e.svc.IssueUpload(ctx, e.alice.ID, "notes", "", -time.Second)
 	if _, err := e.svc.RedeemToken(ctx, tok.Value, KindUpload); !errors.Is(err, ErrTokenExpired) {
 		t.Errorf("err = %v, want ErrTokenExpired", err)
 	}
@@ -204,7 +244,7 @@ func TestRedeem_Missing(t *testing.T) {
 func TestRedeem_WrongKindDoesNotBurn(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
-	tok, _ := e.svc.IssueUpload(ctx, e.alice.ID, "notes", time.Minute)
+	tok, _ := e.svc.IssueUpload(ctx, e.alice.ID, "notes", "", time.Minute)
 	if _, err := e.svc.RedeemToken(ctx, tok.Value, KindDownload); !errors.Is(err, ErrTokenWrongKind) {
 		t.Fatalf("wrong-kind redeem err = %v, want ErrTokenWrongKind", err)
 	}
@@ -269,8 +309,8 @@ func TestDeleteFile_RemovesRow(t *testing.T) {
 func TestJanitor_RemovesExpiredTokens(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
-	t1, _ := e.svc.IssueUpload(ctx, e.alice.ID, "a", -time.Second)
-	t2, _ := e.svc.IssueUpload(ctx, e.alice.ID, "b", time.Minute)
+	t1, _ := e.svc.IssueUpload(ctx, e.alice.ID, "a", "", -time.Second)
+	t2, _ := e.svc.IssueUpload(ctx, e.alice.ID, "b", "", time.Minute)
 
 	stats, err := e.svc.Janitor(ctx, time.Minute)
 	if err != nil {

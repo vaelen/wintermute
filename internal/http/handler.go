@@ -104,7 +104,7 @@ func uploadHandler(fs *files.Service, opts HandlerOptions) netHTTP.Handler {
 			return
 		}
 
-		fid, err := fs.NewFile(r.Context(), tok.Slug, tok.AccountID, hash, size, mime, "", "")
+		fid, err := fs.NewFile(r.Context(), tok.Slug, tok.AccountID, hash, size, mime, "", tok.Area)
 		if err != nil {
 			opts.Logger.Error("upload NewFile", "err", err)
 			if errors.Is(err, files.ErrSlugTaken) {

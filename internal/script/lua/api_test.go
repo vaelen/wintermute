@@ -372,6 +372,64 @@ func TestLuaSetEngageTerminal(t *testing.T) {
 	}
 }
 
+func TestLuaSetEngageMenuTerminal_storesMenuEntries(t *testing.T) {
+	pool, wapi, hc := newTestPoolWithEngage(t)
+	id, err := wapi.CreateObject(context.Background(), worldapi.ObjectSpec{
+		Slug: "lobby-kiosk", Name: "Lobby Kiosk",
+		Kind: "item", RoomSlug: "lobby",
+	})
+	if err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+	err = runScript(t, pool, `
+		wintermute.object.set_engage("lobby-kiosk", {
+			kind = "menu_terminal",
+			menu = {
+				{ feature = "mail" },
+				{ feature = "boards" },
+				{ feature = "files", area = "dropbox" },
+			},
+		})
+	`)
+	if err != nil {
+		t.Fatalf("set_engage script: %v", err)
+	}
+	h := hc.Get(id)
+	if h == nil {
+		t.Fatal("expected host in cache")
+	}
+	if h.Kind != "menu_terminal" {
+		t.Errorf("Kind = %q, want menu_terminal", h.Kind)
+	}
+	if len(h.Menu) != 3 {
+		t.Fatalf("Menu = %+v, want 3 entries", h.Menu)
+	}
+	if h.Menu[0].Feature != "mail" {
+		t.Errorf("Menu[0] = %+v", h.Menu[0])
+	}
+	if h.Menu[2].Feature != "files" || h.Menu[2].Area != "dropbox" {
+		t.Errorf("Menu[2] = %+v", h.Menu[2])
+	}
+}
+
+func TestLuaSetEngageMenuTerminal_rejectsFilesWithoutArea(t *testing.T) {
+	pool, wapi, _ := newTestPoolWithEngage(t)
+	if _, err := wapi.CreateObject(context.Background(), worldapi.ObjectSpec{
+		Slug: "kiosk", Name: "Kiosk", Kind: "item", RoomSlug: "lobby",
+	}); err != nil {
+		t.Fatalf("CreateObject: %v", err)
+	}
+	err := runScript(t, pool, `
+		wintermute.object.set_engage("kiosk", {
+			kind = "menu_terminal",
+			menu = { { feature = "files" } },
+		})
+	`)
+	if err == nil {
+		t.Fatal("expected error for files without area")
+	}
+}
+
 func TestLuaSetEngageMissingKindErrors(t *testing.T) {
 	pool, _, _ := newTestPoolWithEngage(t)
 	err := runScript(t, pool, `

@@ -56,7 +56,7 @@ type Policy struct {
 // kind-defaults) is what handlers and the registry see.
 type Host struct {
 	ObjectID       world.ObjectID
-	Kind           string // KindTerminal | KindNPC | KindCustom
+	Kind           string // KindTerminal | KindMenuTerminal | KindNPC | KindCustom
 	EngageVerbs    []string
 	DisengageVerbs []string
 	EnterMsg       string // templated with {{player}}, {{host}}
@@ -64,6 +64,7 @@ type Host struct {
 	ExitMsg        string
 	Prompt         string // optional override for the in-engagement prompt
 	Policy         Policy
+	Menu           []MenuEntry // M6.3: populated when Kind == KindMenuTerminal
 }
 
 // Participant is a session's seat at an engagement. The Write callback
