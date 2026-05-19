@@ -276,17 +276,110 @@ func TestTerminalDetect_telnet_sendsTTYPERequest(t *testing.T) {
 	c.send("quit\r\n")
 }
 
-// TestTerminalDetect_nonTelnet_printsComingSoon covers the deferred
-// case: a plain TCP connection that never negotiates TTYPE / NAWS
-// gets a friendly placeholder pointing at the upcoming ANSI-based
-// detection rather than a silent no-op.
-func TestTerminalDetect_nonTelnet_printsComingSoon(t *testing.T) {
+// TestTerminalDetect_nonTelnet_runsAnsiProbes covers the M6.5 path: a
+// plain TCP connection that doesn't reply to any probe still completes
+// the detection flow cleanly, prints the "Detecting / Detection
+// complete" pair, and leaves the session usable.
+func TestTerminalDetect_nonTelnet_runsAnsiProbes(t *testing.T) {
 	srv := startServer(t)
 	c := dialClient(t, srv)
 	c.loginNew("alice", "hunter22")
 	c.drainFor(200 * time.Millisecond)
 	c.send("terminal detect\r\n")
-	c.expect("Coming soon", 5*time.Second)
+	c.expect("Detecting terminal type", 5*time.Second)
+	c.expect("Detection complete", 5*time.Second)
+	c.send("quit\r\n")
+}
+
+// TestTerminalDetect_nonTelnet_emulatesXtermProbes verifies the
+// end-to-end M6.5 detection flow: a raw-TCP client that emulates
+// Secondary DA = xterm-family + CSI 18 t reply with 100×30 dims drives
+// the server's `terminal detect` and shows the resulting type/size in
+// `terminal` status.
+func TestTerminalDetect_nonTelnet_emulatesXtermProbes(t *testing.T) {
+	srv := startServer(t)
+	c := dialClient(t, srv)
+	c.loginNew("alice", "hunter22")
+	c.drainFor(200 * time.Millisecond)
+	// Send the probe replies BEFORE the command so they're in the
+	// server's read buffer when runDetect drains. The drain runs for
+	// ~250ms after writing probes, so we have to either pre-stuff the
+	// buffer or send right after `terminal detect\r\n`. Pre-stuffing
+	// is simpler and removes timing risk.
+	probeReplies := "\x1B[?62;c" + // Primary DA
+		"\x1B[>41;384;0c" + // Secondary DA: xterm family
+		"\x1BP>|xterm(384)\x1B\\" + // XTVERSION
+		"\x1B[8;30;100t" // Window size 30×100
+	c.send("terminal detect\r\n" + probeReplies)
+	c.expect("Detection complete", 5*time.Second)
+	// Verify status reflects the probed identity and dimensions.
+	// Order matches the rendered status: size comes before type.
+	c.send("terminal\r\n")
+	c.expect("size     : 100 x 30", 5*time.Second)
+	c.expect("type     : xterm", 5*time.Second)
+	c.send("quit\r\n")
+}
+
+// TestLoginAnsiProbes_seedTerminalType verifies the M6.5 login-time
+// detection: a raw-TCP client that emulates an xterm-family Secondary
+// DA + CSI 18 t reply gets TermType / Width / Height populated on the
+// session capabilities before the encoding prompt. The press-enter
+// read drains the probe replies that arrive interleaved with the
+// user's Enter keystroke.
+func TestLoginAnsiProbes_seedTerminalType(t *testing.T) {
+	srv := startServer(t)
+	c := dialClient(t, srv)
+	c.expect("Detecting terminal type", 5*time.Second)
+	c.expect("PRESS ENTER TO BEGIN", 5*time.Second)
+	// Cooked-mode terminals send their probe replies line-buffered
+	// with the user's Enter. We send the replies followed by CR so
+	// the press-enter read returns with both.
+	probeReplies := "\x1B[?62;c" +
+		"\x1B[>41;384;0c" +
+		"\x1B[8;30;100t" +
+		"\r\n"
+	c.send(probeReplies)
+	c.expect("ENABLE ECHO", 5*time.Second)
+	c.send("\r\n")
+	// Default encoding is UTF-8 because Primary DA marked ANSI capable.
+	c.expect("TERMINAL TYPE:", 5*time.Second)
+	c.send("\r\n") // accept default
+	c.expect("Username", 5*time.Second)
+	c.send("new\r\n")
+	c.expect("Choose a username", 5*time.Second)
+	c.send("alice\r\n")
+	c.expect("Choose a password", 5*time.Second)
+	c.send("hunter22\r\n")
+	c.expect("Account \"alice\" created", 5*time.Second)
+	c.expect("Username", 5*time.Second)
+	c.send("alice\r\n")
+	c.expect("Password", 5*time.Second)
+	c.send("hunter22\r\n")
+	c.expect("Welcome, alice", 5*time.Second)
+	c.expect(">", 5*time.Second)
+	c.send("terminal\r\n")
+	c.expect("size     : 100 x 30", 5*time.Second)
+	c.expect("type     : xterm", 5*time.Second)
+	c.send("quit\r\n")
+}
+
+// TestTerminalDetect_nonTelnet_cprFallbackForSize confirms that when a
+// terminal ignores CSI 18 t but answers the cursor-position-report
+// fallback, Width/Height get populated from the CPR reply.
+func TestTerminalDetect_nonTelnet_cprFallbackForSize(t *testing.T) {
+	srv := startServer(t)
+	c := dialClient(t, srv)
+	c.loginNew("alice", "hunter22")
+	c.drainFor(200 * time.Millisecond)
+	// Only a Secondary DA reply (no XTVERSION, no CSI 18 t) plus a CPR
+	// reply at 50×132 — exercises the precedence "CPR used when
+	// nothing else" path.
+	probeReplies := "\x1B[>41;0;0c" +
+		"\x1B[50;132R"
+	c.send("terminal detect\r\n" + probeReplies)
+	c.expect("Detection complete", 5*time.Second)
+	c.send("terminal\r\n")
+	c.expect("size     : 132 x 50", 5*time.Second)
 	c.send("quit\r\n")
 }
 

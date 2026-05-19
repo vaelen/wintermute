@@ -7,6 +7,285 @@ import (
 	"testing"
 )
 
+func TestScanProbeReplies_PrimaryDA(t *testing.T) {
+	cases := []string{
+		"\x1B[?1;2c",
+		"\x1B[?62;c",
+		"prefix\x1B[?6c suffix",
+	}
+	for _, c := range cases {
+		var h DetectHints
+		ScanProbeReplies([]byte(c), &h)
+		if !h.ANSICapable {
+			t.Errorf("ScanProbeReplies(%q): ANSICapable = false, want true", c)
+		}
+	}
+}
+
+func TestScanProbeReplies_SecondaryDA(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantType int
+	}{
+		{"\x1B[>0;115;0c", 0},
+		{"\x1B[>1;10;0c", 1},
+		{"\x1B[>41;384;0c", 41},
+		{"prefix\x1B[>82;20710;0c", 82},
+		{"\x1B[>84;0;0c", 84},
+		{"\x1B[>c", 0}, // empty params
+	}
+	for _, c := range cases {
+		var h DetectHints
+		ScanProbeReplies([]byte(c.in), &h)
+		if h.SecondaryDAType != c.wantType {
+			t.Errorf("ScanProbeReplies(%q): SecondaryDAType = %d, want %d",
+				c.in, h.SecondaryDAType, c.wantType)
+		}
+		if !h.ANSICapable {
+			t.Errorf("ScanProbeReplies(%q): ANSICapable = false, want true", c.in)
+		}
+	}
+}
+
+func TestScanProbeReplies_XTVersion(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"\x1BP>|xterm(384)\x1B\\", "xterm(384)"},
+		{"\x1BP>|kitty 0.35.2\x07", "kitty 0.35.2"},
+		{"\x1BP>|WezTerm 20240814-114907-3b2eba32\x1B\\", "WezTerm 20240814-114907-3b2eba32"},
+		{"\x1BP>|tmux 3.4\x1B\\", "tmux 3.4"},
+		{"\x1BP>| iTerm2 3.5.0\x1B\\", "iTerm2 3.5.0"}, // leading space stripped
+	}
+	for _, c := range cases {
+		var h DetectHints
+		ScanProbeReplies([]byte(c.in), &h)
+		if h.XTVersion != c.want {
+			t.Errorf("ScanProbeReplies(%q): XTVersion = %q, want %q",
+				c.in, h.XTVersion, c.want)
+		}
+	}
+}
+
+func TestScanProbeReplies_WindowSize(t *testing.T) {
+	cases := []struct {
+		in           string
+		wantR, wantC int
+	}{
+		{"\x1B[8;24;80t", 24, 80},
+		{"\x1B[8;30;100t", 30, 100},
+		{"prefix\x1B[8;50;132t suffix", 50, 132},
+	}
+	for _, c := range cases {
+		var h DetectHints
+		ScanProbeReplies([]byte(c.in), &h)
+		if h.WinRows != c.wantR || h.WinCols != c.wantC {
+			t.Errorf("ScanProbeReplies(%q): WinRows=%d WinCols=%d, want %d/%d",
+				c.in, h.WinRows, h.WinCols, c.wantR, c.wantC)
+		}
+	}
+}
+
+func TestScanProbeReplies_CursorPositionReport(t *testing.T) {
+	cases := []struct {
+		in           string
+		wantR, wantC int
+	}{
+		{"\x1B[24;80R", 24, 80},
+		{"prefix\x1B[50;132R", 50, 132},
+		{"\x1B[1;1R", 1, 1},
+	}
+	for _, c := range cases {
+		var h DetectHints
+		ScanProbeReplies([]byte(c.in), &h)
+		if h.CursorRows != c.wantR || h.CursorCols != c.wantC {
+			t.Errorf("ScanProbeReplies(%q): CursorRows=%d CursorCols=%d, want %d/%d",
+				c.in, h.CursorRows, h.CursorCols, c.wantR, c.wantC)
+		}
+	}
+}
+
+func TestScanProbeReplies_AllAtOnce(t *testing.T) {
+	// A real cooked-mode terminal's response to AllProbes might arrive
+	// interleaved like this. ScanProbeReplies must extract every field
+	// in one pass.
+	buf := []byte("\x1B[?62;1;2c" +
+		"\x1B[>41;384;0c" +
+		"\x1BP>|xterm(384)\x1B\\" +
+		"\x1B[8;30;100t" +
+		"\x1B[30;100R" +
+		"\r\n")
+	var h DetectHints
+	ScanProbeReplies(buf, &h)
+	if !h.ANSICapable {
+		t.Errorf("ANSICapable not set")
+	}
+	if h.SecondaryDAType != 41 {
+		t.Errorf("SecondaryDAType = %d, want 41", h.SecondaryDAType)
+	}
+	if h.XTVersion != "xterm(384)" {
+		t.Errorf("XTVersion = %q, want xterm(384)", h.XTVersion)
+	}
+	if h.WinRows != 30 || h.WinCols != 100 {
+		t.Errorf("WinSize = %dx%d, want 30x100", h.WinRows, h.WinCols)
+	}
+	if h.CursorRows != 30 || h.CursorCols != 100 {
+		t.Errorf("CursorPos = %dx%d, want 30x100", h.CursorRows, h.CursorCols)
+	}
+}
+
+func TestScanProbeReplies_FirstWins(t *testing.T) {
+	// A second call merging into the same hints must NOT overwrite
+	// already-populated fields. This matters at login, where the press-
+	// enter read may capture replies that a previous short-drain read
+	// already captured.
+	h := DetectHints{
+		SecondaryDAType: 41,
+		XTVersion:       "xterm(384)",
+		WinRows:         30, WinCols: 100,
+		CursorRows: 30, CursorCols: 100,
+	}
+	ScanProbeReplies([]byte(
+		"\x1B[>1;100;0c"+
+			"\x1BP>|kitty 0.99\x1B\\"+
+			"\x1B[8;50;132t"+
+			"\x1B[50;132R",
+	), &h)
+	if h.SecondaryDAType != 41 {
+		t.Errorf("SecondaryDAType overwritten: got %d", h.SecondaryDAType)
+	}
+	if h.XTVersion != "xterm(384)" {
+		t.Errorf("XTVersion overwritten: got %q", h.XTVersion)
+	}
+	if h.WinRows != 30 || h.WinCols != 100 {
+		t.Errorf("WinSize overwritten: got %dx%d", h.WinRows, h.WinCols)
+	}
+	if h.CursorRows != 30 || h.CursorCols != 100 {
+		t.Errorf("CursorPos overwritten: got %dx%d", h.CursorRows, h.CursorCols)
+	}
+}
+
+func TestScanProbeReplies_HandlesGarbage(t *testing.T) {
+	// Stray ESC, unterminated CSI, mixed user text — must not panic
+	// and must extract what it can.
+	cases := []string{
+		"",
+		"\x1B",
+		"\x1B[",
+		"\x1B[incomplete",
+		"plain text only",
+		"\x1B(B" + "\x1B[24;80R", // designator + valid CPR
+	}
+	for _, c := range cases {
+		var h DetectHints
+		ScanProbeReplies([]byte(c), &h)
+	}
+}
+
+func TestResolveTermType_Precedence(t *testing.T) {
+	cases := []struct {
+		name string
+		h    DetectHints
+		want string
+	}{
+		{"TTYPE wins over XTVersion and SecondaryDA",
+			DetectHints{TermType: "vt100", XTVersion: "xterm(384)", SecondaryDAType: 41},
+			"vt100"},
+		{"XTVersion wins over SecondaryDA",
+			DetectHints{XTVersion: "xterm(384)", SecondaryDAType: 1},
+			"xterm"},
+		{"SecondaryDA used when nothing else",
+			DetectHints{SecondaryDAType: 41},
+			"xterm"},
+		{"All empty → empty",
+			DetectHints{},
+			""},
+		{"XTVersion unknown family → raw string",
+			DetectHints{XTVersion: "some-future-terminal 1.0"},
+			"some-future-terminal 1.0"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.h.ResolveTermType()
+			if got != c.want {
+				t.Errorf("ResolveTermType = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestResolveSize_Precedence(t *testing.T) {
+	cases := []struct {
+		name         string
+		h            DetectHints
+		wantW, wantH int
+	}{
+		{"NAWS wins over CSI 18 t and CPR",
+			DetectHints{NAWSWidth: 132, NAWSHeight: 50, WinCols: 80, WinRows: 24, CursorCols: 100, CursorRows: 30},
+			132, 50},
+		{"CSI 18 t wins over CPR",
+			DetectHints{WinCols: 80, WinRows: 24, CursorCols: 100, CursorRows: 30},
+			80, 24},
+		{"CPR used when nothing else",
+			DetectHints{CursorCols: 100, CursorRows: 30},
+			100, 30},
+		{"All empty → zeros",
+			DetectHints{},
+			0, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.h.ResolveWidth(); got != c.wantW {
+				t.Errorf("ResolveWidth = %d, want %d", got, c.wantW)
+			}
+			if got := c.h.ResolveHeight(); got != c.wantH {
+				t.Errorf("ResolveHeight = %d, want %d", got, c.wantH)
+			}
+		})
+	}
+}
+
+func TestAutoDetect_UsesAllSources(t *testing.T) {
+	// A non-telnet client with no TTYPE/NAWS but ANSI probes for
+	// xterm-family + 100x30 size should produce the right caps.
+	h := DetectHints{
+		ANSICapable:     true,
+		SecondaryDAType: 41,
+		XTVersion:       "xterm(384)",
+		WinRows:         30, WinCols: 100,
+	}
+	got := AutoDetect(h)
+	if got.TermType != "xterm" {
+		t.Errorf("TermType = %q, want xterm", got.TermType)
+	}
+	if got.Encoding != EncodingUTF8 {
+		t.Errorf("Encoding = %v, want UTF-8", got.Encoding)
+	}
+	if got.Width != 100 || got.Height != 30 {
+		t.Errorf("size = %dx%d, want 100x30", got.Width, got.Height)
+	}
+	if !got.ANSI {
+		t.Errorf("ANSI = false, want true")
+	}
+}
+
+func TestAutoDetect_TTYPEWinsOverProbes(t *testing.T) {
+	// A telnet client with TTYPE=vt100 but Secondary DA replies with
+	// type 41 (xterm) — TTYPE wins. This is the acceptance criterion
+	// from the milestone doc.
+	h := DetectHints{
+		Telnet:          true,
+		TermType:        "vt100",
+		SecondaryDAType: 41,
+		ANSICapable:     true,
+	}
+	got := AutoDetect(h)
+	if got.TermType != "vt100" {
+		t.Errorf("TermType = %q, want vt100 (TTYPE > Secondary DA)", got.TermType)
+	}
+}
+
 func TestAutoDetectDefaults(t *testing.T) {
 	cases := []struct {
 		name       string

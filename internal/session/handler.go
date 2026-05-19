@@ -101,16 +101,21 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 
 	hints := term.DetectHints{}
 
-	// --- Press-enter banner + ANSI probe ---------------------------------
-	// Display a tiny banner and an ANSI Device Attributes query in one
-	// write. Cooked-mode terminals line-buffer their auto-response with
-	// the user's Enter keystroke, so when we read the next line both
-	// arrive together — no timing race, no probe timeout to tune.
-	pressEnter := []byte("WINTERMUTE\r\n\r\nPRESS ENTER TO BEGIN.\r\n")
-	if _, err := s.writer().Write(pressEnter); err != nil {
+	// --- Press-enter banner + ANSI probes --------------------------------
+	// Write the welcome banner, a "Detecting terminal type..." line that
+	// gives obvious context for any probe garble on dumb terminals,
+	// every detection probe, and finally the press-enter prompt — all
+	// in one write so the bytes travel together. Cooked-mode terminals
+	// line-buffer the probe replies with the user's Enter keystroke, so
+	// the readRawUntilNewline below catches both with no timing race.
+	banner := []byte("WINTERMUTE\r\n\r\nDetecting terminal type...\r\n")
+	if _, err := s.writer().Write(banner); err != nil {
 		return
 	}
-	if _, err := s.writer().Write(term.ANSIProbe); err != nil {
+	if _, err := s.writer().Write(term.AllProbes()); err != nil {
+		return
+	}
+	if _, err := s.writer().Write([]byte("PRESS ENTER TO BEGIN.\r\n")); err != nil {
 		return
 	}
 	raw, err := s.readRawUntilNewline()
@@ -118,18 +123,25 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		s.log.Debug("pre-prompt read failed", "err", err)
 		return
 	}
-	if term.HasDAResponse(raw) {
-		hints.ANSICapable = true
-	}
+	term.ScanProbeReplies(raw, &hints)
 
 	// Telnet status / TTYPE / NAWS hints reflect whatever the conn has
 	// learned by now (initial offers + any negotiation that completed
-	// before / during the press-enter read).
+	// before / during the press-enter read). TTYPE / NAWS take
+	// precedence over the ANSI-probe equivalents — set them last so
+	// they overwrite anything the scan extracted from a Secondary DA
+	// reply.
 	hints.Telnet = tc.Negotiated()
 	st := tc.State()
-	hints.TermType = st.TermType
-	hints.NAWSWidth = st.Width
-	hints.NAWSHeight = st.Height
+	if st.TermType != "" {
+		hints.TermType = st.TermType
+	}
+	if st.Width > 0 {
+		hints.NAWSWidth = st.Width
+	}
+	if st.Height > 0 {
+		hints.NAWSHeight = st.Height
+	}
 
 	// For non-telnet sessions, the engine cannot tell whether the user's
 	// terminal is doing local echo. Ask them. Default is No, which matches

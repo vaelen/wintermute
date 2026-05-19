@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/vaelen/wintermute/internal/term"
 	"github.com/vaelen/wintermute/internal/world"
@@ -364,42 +363,38 @@ func (h *Handler) terminalSetColor(ctx context.Context, s *Session, arg string) 
 	_ = s.writef("Color: %s.\r\n", state)
 }
 
-// terminalDetect re-runs terminal capability detection. For telnet
-// sessions it asks the client to re-report TTYPE (NAWS is push-based
-// so c.State() already reflects the latest value) and reconfigures
-// the encoder + Presence + active engagement once the reply arrives.
+// terminalDetect re-runs terminal capability detection. Works on both
+// telnet and non-telnet sessions via the shared runDetect helper: it
+// sends the ANSI probe bundle (Primary/Secondary DA, XTVERSION, window
+// size, cursor-position fallback), re-requests TTYPE when telnet, and
+// drains incoming bytes for a short window. Whatever surfaces is folded
+// into the live capabilities; the encoder, Presence, and any active
+// engagement (via engage.Resizer) reconfigure to match.
 //
-// For non-telnet sessions, ANSI-based detection (Secondary DA,
-// XTVERSION, CSI 18 t, cursor-position fallback for size) is planned
-// in milestone M6.5; until then the command prints a "coming soon"
-// placeholder rather than silently doing nothing.
+// Telnet itself is not re-detected — it's a connection-level property
+// fixed at the first IAC byte and unchanged afterwards.
 func (h *Handler) terminalDetect(ctx context.Context, s *Session) {
-	if !s.caps.Telnet {
-		_ = s.writeString(
-			"Terminal detection over plain TCP is not yet supported. " +
-				"Coming soon — see docs/milestones/06.5.\r\n")
-		return
-	}
-	_ = s.writeString("Detecting terminal...\r\n")
-	s.tc.RequestTTYPE()
-	// Wait for the TTYPE reply. The conn parser updates state.TermType
-	// inline as bytes arrive; one second gives a comfortable margin
-	// for slow links and busy CI runners while still feeling
-	// interactive for the local case.
-	time.Sleep(1 * time.Second)
-	st := s.tc.State()
-
+	hints := h.runDetect(s)
 	next := s.enc.Capabilities()
-	next.TermType = st.TermType
-	if st.Width > 0 {
-		next.Width = st.Width
+	if t := hints.ResolveTermType(); t != "" {
+		next.TermType = t
 	}
-	if st.Height > 0 {
-		next.Height = st.Height
+	if w := hints.ResolveWidth(); w > 0 {
+		next.Width = w
+	}
+	if ht := hints.ResolveHeight(); ht > 0 {
+		next.Height = ht
+	}
+	if hints.ANSICapable {
+		next.ANSI = true
 	}
 	h.reconfigure(ctx, s, next)
-	_ = s.writef("Detection complete: type=%q size=%dx%d.\r\n",
-		st.TermType, st.Width, st.Height)
+	termType := next.TermType
+	if termType == "" {
+		termType = "(not reported)"
+	}
+	_ = s.writef("Detection complete: type=%s size=%dx%d.\r\n",
+		termType, next.Width, next.Height)
 }
 
 func (h *Handler) terminalSetEcho(s *Session, arg string) {
