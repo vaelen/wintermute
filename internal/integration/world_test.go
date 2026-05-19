@@ -155,6 +155,55 @@ func (c *client) loginNew(username, password string) {
 	c.expect(">", 5*time.Second)
 }
 
+// TestTerminalStatus_showsNegotiatedTermType verifies that a TTYPE
+// reported via telnet negotiation reaches the `terminal` status
+// output. The value is not persisted — a reconnect with no TTYPE
+// would show an empty type — but for the lifetime of a session
+// other code (presence-aware tools, future capability gating)
+// can rely on it.
+func TestTerminalStatus_showsNegotiatedTermType(t *testing.T) {
+	srv := startServer(t)
+	c := dialClient(t, srv)
+
+	// Client side of TTYPE: agree to send, then deliver "xterm-256color"
+	// in response to the server's request. The server sends DO TTYPE on
+	// connect and SB TTYPE SEND right after seeing WILL TTYPE, so the
+	// IS reply is safe to send immediately after WILL.
+	// IAC=255 WILL=251 SB=250 SE=240; TTYPE option=24; IS=0.
+	tt := []byte{
+		255, 251, 24, // IAC WILL TTYPE
+		255, 250, 24, 0, // IAC SB TTYPE IS
+		'x', 't', 'e', 'r', 'm', '-', '2', '5', '6', 'c', 'o', 'l', 'o', 'r',
+		255, 240, // IAC SE
+	}
+	if _, err := c.conn.Write(tt); err != nil {
+		t.Fatalf("write TTYPE: %v", err)
+	}
+	// Telnet sessions skip ENABLE ECHO; inline the login flow.
+	c.expect("PRESS ENTER TO BEGIN", 5*time.Second)
+	c.send("\r\n")
+	c.expect("TERMINAL TYPE:", 5*time.Second)
+	c.send("u\r\n")
+	c.expect("Username", 5*time.Second)
+	c.send("new\r\n")
+	c.expect("Choose a username", 5*time.Second)
+	c.send("alice\r\n")
+	c.expect("Choose a password", 5*time.Second)
+	c.send("hunter22\r\n")
+	c.expect("Account \"alice\" created", 5*time.Second)
+	c.expect("Username", 5*time.Second)
+	c.send("alice\r\n")
+	c.expect("Password", 5*time.Second)
+	c.send("hunter22\r\n")
+	c.expect("Welcome, alice", 5*time.Second)
+	c.expect(">", 5*time.Second)
+
+	c.send("terminal\r\n")
+	c.expect("Terminal settings:", 5*time.Second)
+	c.expect("xterm-256color", 5*time.Second)
+	c.send("quit\r\n")
+}
+
 func TestNewAccountSpawnsInLobbyAndCanLook(t *testing.T) {
 	srv := startServer(t)
 	c := dialClient(t, srv)

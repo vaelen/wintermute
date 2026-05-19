@@ -165,6 +165,7 @@ func (h *Handler) attachToWorld(ctx context.Context, s *Session) *worldcmd.Handl
 		SessionID:  s.id,
 		TermWidth:  s.caps.Width,
 		TermHeight: s.caps.Height,
+		TermType:   s.caps.TermType,
 	}
 	s.presence = pres
 	if _, err := h.World.Attach(pres); err != nil {
@@ -278,14 +279,20 @@ func (h *Handler) printTerminalStatus(s *Session) {
 	if s.echoOn() {
 		echoStr = "on"
 	}
+	termTypeStr := c.TermType
+	if termTypeStr == "" {
+		termTypeStr = "(not reported)"
+	}
 	_ = s.writef("Terminal settings:\r\n"+
 		"  encoding : %s\r\n"+
 		"  size     : %d x %d\r\n"+
+		"  type     : %s\r\n"+
 		"  color    : %s\r\n"+
 		"  lines    : %s\r\n"+
 		"  echo     : %s\r\n"+
 		"  telnet   : %s\r\n",
-		c.Encoding, c.Width, c.Height, colorStr, linesStr, echoStr, telnetStr)
+		c.Encoding, c.Width, c.Height, termTypeStr,
+		colorStr, linesStr, echoStr, telnetStr)
 }
 
 func (h *Handler) terminalSetEncoding(ctx context.Context, s *Session, arg string) {
@@ -402,6 +409,7 @@ func (h *Handler) reconfigure(ctx context.Context, s *Session, next term.Capabil
 	if s.presence != nil {
 		s.presence.TermWidth = next.Width
 		s.presence.TermHeight = next.Height
+		s.presence.TermType = next.TermType
 	}
 	if eng := s.Engagement(); eng != nil {
 		if r, ok := eng.Handler.(engage.Resizer); ok {

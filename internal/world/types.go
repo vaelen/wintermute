@@ -103,10 +103,17 @@ type Presence struct {
 	// in cells, snapshotted from the session's term.Capabilities at
 	// attach time. Either may be 0 when the client did not negotiate
 	// NAWS; callers must clamp / fall back accordingly. Mid-session
-	// resize is not tracked — the values reflect dimensions at the
-	// moment Attach was called.
+	// resize lands here via session.reconfigure.
 	TermWidth  int
 	TermHeight int
+
+	// TermType is the raw TTYPE string the client reported via telnet
+	// (e.g. "xterm-256color", "vt100"). Empty when no TTYPE was
+	// negotiated. Per-session only — not persisted across reconnects.
+	// Informational: capability gating should prefer the booleans on
+	// term.Capabilities (ANSI, Color, DECLineDrawing) over substring
+	// matching this string.
+	TermType string
 
 	// detached is set when the world unregisters this presence (clean
 	// logout or force-detach to make room for a new login). Mutations
