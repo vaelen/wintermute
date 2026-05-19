@@ -175,6 +175,27 @@ func Get(ctx context.Context, db *store.DB, slug string) (Network, error) {
 	return n, nil
 }
 
+// SetDefault marks the network with the given slug as the default,
+// clearing the flag on every other row. The clear+set happens in a
+// single transaction so there is never a moment with two defaults.
+// Returns an error if no network matches slug.
+func SetDefault(ctx context.Context, db *store.DB, slug string) error {
+	return db.Write(ctx, func(tx *sql.Tx) error {
+		var id int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT id FROM ftn_networks WHERE slug = ?`, slug).Scan(&id); err != nil {
+			return fmt.Errorf("ftn networks: SetDefault %q: %w", slug, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE ftn_networks SET is_default = 0`); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx,
+			`UPDATE ftn_networks SET is_default = 1 WHERE id = ?`, id)
+		return err
+	})
+}
+
 // Default returns the network row flagged is_default = 1.
 func Default(ctx context.Context, db *store.DB) (Network, error) {
 	var n Network

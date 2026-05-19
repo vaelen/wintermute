@@ -20,6 +20,7 @@ const (
 	FeatureMail   = "mail"
 	FeatureBoards = "boards"
 	FeatureFiles  = "files"
+	FeatureAdmin  = "admin"
 )
 
 // MenuEntry is one row of an object's menu configuration. Feature picks
@@ -36,7 +37,7 @@ type MenuEntry struct {
 func ValidateMenu(entries []MenuEntry) error {
 	for i, e := range entries {
 		switch e.Feature {
-		case FeatureMail, FeatureBoards:
+		case FeatureMail, FeatureBoards, FeatureAdmin:
 			if e.Area != "" {
 				return fmt.Errorf("menu[%d]: feature %q does not accept area", i, e.Feature)
 			}

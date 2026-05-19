@@ -215,8 +215,9 @@ type state interface {
 type mainMenu struct{}
 
 func (mainMenu) render(h *Handler, p *engage.Participant) string {
+	entries := visibleMenu(h, p)
 	rows := []Row{{Blank: true}}
-	for i, e := range h.host.Menu {
+	for i, e := range entries {
 		sel := fmt.Sprintf("%d)", i+1)
 		rows = append(rows, Row{
 			Selector: sel,
@@ -249,12 +250,48 @@ func (mainMenu) handle(h *Handler, p *engage.Participant, line string) {
 		}
 		return
 	}
-	if n, err := strconv.Atoi(low); err == nil && n >= 1 && n <= len(h.host.Menu) {
-		entry := h.host.Menu[n-1]
-		h.transition(p, newFeatureState(entry))
+	entries := visibleMenu(h, p)
+	if n, err := strconv.Atoi(low); err == nil && n >= 1 && n <= len(entries) {
+		h.transition(p, newFeatureState(entries[n-1]))
 		return
 	}
 	h.redraw(p)
+}
+
+// visibleMenu returns the menu entries the participant is allowed to see.
+// Admin entries are filtered out for non-admin participants; the indices
+// in the returned slice are the indices the user actually sees, so the
+// renderer and handler always agree on numbering. A nil/failed account
+// lookup is treated as "non-admin" — fail closed.
+func visibleMenu(h *Handler, p *engage.Participant) []engage.MenuEntry {
+	all := h.host.Menu
+	if !menuHasAdmin(all) {
+		return all
+	}
+	isAdmin := false
+	if acc, err := h.accountFor(p); err == nil && acc != nil && acc.AccessLevel == auth.AccessAdmin {
+		isAdmin = true
+	}
+	if isAdmin {
+		return all
+	}
+	out := make([]engage.MenuEntry, 0, len(all))
+	for _, e := range all {
+		if e.Feature == engage.FeatureAdmin {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+func menuHasAdmin(entries []engage.MenuEntry) bool {
+	for _, e := range entries {
+		if e.Feature == engage.FeatureAdmin {
+			return true
+		}
+	}
+	return false
 }
 
 // featureLabel returns the human-readable label for a menu entry.
@@ -269,6 +306,8 @@ func featureLabel(e engage.MenuEntry) string {
 			return "Files — " + e.Area
 		}
 		return "Files"
+	case engage.FeatureAdmin:
+		return "Admin"
 	}
 	return e.Feature
 }
@@ -311,6 +350,8 @@ func newFeatureState(e engage.MenuEntry) state {
 		return boardsList{}
 	case engage.FeatureFiles:
 		return filesList{area: e.Area}
+	case engage.FeatureAdmin:
+		return adminMain{}
 	default:
 		panic(fmt.Sprintf("menu: unknown feature %q after ValidateMenu", e.Feature))
 	}

@@ -17,10 +17,14 @@ import (
 	"time"
 
 	"github.com/vaelen/wintermute/internal/auth"
+	"github.com/vaelen/wintermute/internal/boards"
+	"github.com/vaelen/wintermute/internal/files"
+	"github.com/vaelen/wintermute/internal/mail"
 	"github.com/vaelen/wintermute/internal/session"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/term"
 	"github.com/vaelen/wintermute/internal/world"
+	worldapi "github.com/vaelen/wintermute/internal/world/api"
 	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
 )
 
@@ -36,6 +40,14 @@ type testServer struct {
 	// startAdminServer (M5+); tests that don't need admin scripting
 	// leave it nil.
 	admin *worldcmd.AdminBackend
+	// The following are populated by startMenuEngageServer for tests
+	// that need direct access to the service layer (e.g. assertions on
+	// DB state after exercising the admin menu).
+	mailSvc  *mail.Service
+	boardSvc *boards.Service
+	fileSvc  *files.Service
+	db       *store.DB
+	wapi     *worldapi.API
 }
 
 func startServer(t *testing.T) *testServer {
@@ -515,4 +527,3 @@ func min(a, b int) int {
 	}
 	return b
 }
-

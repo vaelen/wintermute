@@ -160,3 +160,23 @@ func TestValidateMenu_nonFilesRejectsArea(t *testing.T) {
 		t.Fatal("expected error for non-files entry with area")
 	}
 }
+
+func TestFeatureAdminConstant(t *testing.T) {
+	if FeatureAdmin != "admin" {
+		t.Errorf("FeatureAdmin = %q, want %q", FeatureAdmin, "admin")
+	}
+}
+
+func TestValidateMenu_okAdminFeature(t *testing.T) {
+	err := ValidateMenu([]MenuEntry{{Feature: FeatureAdmin}})
+	if err != nil {
+		t.Errorf("ValidateMenu admin: %v", err)
+	}
+}
+
+func TestValidateMenu_adminRejectsArea(t *testing.T) {
+	err := ValidateMenu([]MenuEntry{{Feature: FeatureAdmin, Area: "x"}})
+	if err == nil {
+		t.Fatal("expected error for admin entry with area")
+	}
+}

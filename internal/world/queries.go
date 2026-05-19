@@ -16,6 +16,33 @@ type PresentPlayer struct {
 	Awake    bool
 }
 
+// ListRooms returns every room in the world, sorted by slug ascending.
+// Intended for admin tooling that needs a full enumeration; the live
+// gameplay paths look rooms up by id or slug instead.
+func (w *World) ListRooms() []Room {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	out := make([]Room, 0, len(w.rooms))
+	for _, r := range w.rooms {
+		out = append(out, cloneRoom(r))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Slug < out[j].Slug })
+	return out
+}
+
+// ListObjects returns every object in the world, sorted by slug ascending.
+// Same intent as ListRooms — admin enumeration, not a gameplay path.
+func (w *World) ListObjects() []Object {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	out := make([]Object, 0, len(w.objects))
+	for _, o := range w.objects {
+		out = append(out, *o)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Slug < out[j].Slug })
+	return out
+}
+
 // PlayersInRoom returns the players currently located in room, sorted by
 // name. Disconnected players are included and marked Awake=false.
 func (w *World) PlayersInRoom(room RoomID) []PresentPlayer {

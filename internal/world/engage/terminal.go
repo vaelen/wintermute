@@ -6,6 +6,7 @@ package engage
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"github.com/vaelen/wintermute/internal/boards"
 	"github.com/vaelen/wintermute/internal/files"
 	"github.com/vaelen/wintermute/internal/mail"
+	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
 )
 
@@ -57,6 +59,40 @@ type TerminalDeps struct {
 	// display snapshot, not a stable handle). Optional; nil callers
 	// fall back to FromName.
 	AccountByID func(id int64) (*auth.Account, error)
+
+	// --- M6.4 admin-menu dependencies. ---------------------------------
+	// Each is optional; the menu's admin submenu reports a friendly
+	// "unavailable" notice for any subsection whose dependencies are
+	// missing rather than panicking. Required for the admin entry to
+	// be useful at runtime.
+
+	// Logger backs the audit-log emission for admin mutations. nil
+	// suppresses audit lines (tests that don't care about them).
+	Logger *slog.Logger
+
+	// Auth is the account store; backs the admin Users subsection.
+	Auth *auth.Store
+
+	// World is the in-memory world; backs the admin Objects and Rooms
+	// subsections.
+	World *world.World
+
+	// DB is the shared SQLite handle. The admin menu uses it for the
+	// FTN-networks subsection (which lives in a free-function package)
+	// and for cheap COUNT(*) summaries on the System stats screen.
+	DB *store.DB
+
+	// GetMOTD / SetMOTD bridge the kv-table MOTD owned by world/api.
+	// Wired by main from the *api.API the admin Lua bindings already
+	// hold; the engage package cannot import world/api directly
+	// without an import cycle.
+	GetMOTD func() string
+	SetMOTD func(ctx context.Context, msg string) error
+
+	// StartedAt is the timestamp the server began accepting input.
+	// Used by the admin System subsection to compute uptime. Zero
+	// value falls back to "unknown".
+	StartedAt time.Time
 }
 
 // TerminalHandler is the built-in handler for kind='terminal' hosts.
@@ -718,4 +754,3 @@ func pluralReply(n int) string {
 	}
 	return "ies"
 }
-
