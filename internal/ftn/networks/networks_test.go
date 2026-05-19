@@ -193,3 +193,39 @@ func TestOrigAddr(t *testing.T) {
 		t.Errorf("OrigAddr = %q", got)
 	}
 }
+
+func TestSetDefault_movesFlag(t *testing.T) {
+	d := tempDB(t)
+	ctx := context.Background()
+	if err := Bootstrap(ctx, d, []config.FTNNetwork{
+		{Slug: "fsx", Name: "fsxNet", Domain: "fsxnet", Addr: "21:1/100.0"},
+	}, slog.Default()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	// "local" is initially the default.
+	def, _ := Default(ctx, d)
+	if def.Slug != "local" {
+		t.Fatalf("initial default = %q, want local", def.Slug)
+	}
+	if err := SetDefault(ctx, d, "fsx"); err != nil {
+		t.Fatalf("SetDefault: %v", err)
+	}
+	def, _ = Default(ctx, d)
+	if def.Slug != "fsx" {
+		t.Errorf("after SetDefault, default = %q, want fsx", def.Slug)
+	}
+	// "local" should no longer be marked default.
+	local, _ := Get(ctx, d, "local")
+	if local.IsDefault {
+		t.Errorf("local.IsDefault = true after switching default to fsx")
+	}
+}
+
+func TestSetDefault_unknownNetwork(t *testing.T) {
+	d := tempDB(t)
+	ctx := context.Background()
+	_ = Bootstrap(ctx, d, nil, slog.Default())
+	if err := SetDefault(ctx, d, "ghost"); err == nil {
+		t.Error("expected error for unknown slug")
+	}
+}

@@ -31,6 +31,19 @@ var defaultMetaCommands = []string{
 	"terminal",
 }
 
+// menuMetaCommands is the subset of defaultMetaCommands that still apply
+// inside a menu_terminal engagement. Menu hosts are modal: their state
+// machine owns every keystroke (numbered selectors, B for Back, Q for
+// Quit, plus per-screen letters like N for Next page and U for "promote
+// to builder"). Routing single-letter movement directions to the world
+// parser there would close the engagement out from under the user.
+// Universal world commands (look/who/help/terminal) stay reachable so
+// the player can still glance at the world or resize their terminal
+// mid-menu.
+var menuMetaCommands = []string{
+	"look", "l", "who", "help", "?", "terminal",
+}
+
 // commandLoop runs the post-login input loop. The line is first offered to
 // the world command handler (look/move/say/...); anything the world
 // doesn't recognize is dispatched here as a session-level command
@@ -202,12 +215,17 @@ func (h *Handler) detachFromWorld(s *Session, reason world.DisconnectReason) {
 // engagementMetaCommand reports whether the line's first token should
 // route through the world parser instead of the engagement handler.
 // Universal meta-commands plus the host's disengage verbs qualify.
+// Menu terminals use a tighter list — see menuMetaCommands.
 func engagementMetaCommand(line string, eng *engage.Engagement) bool {
 	if engage.MatchDisengageVerb(line, eng.Host) {
 		return true
 	}
 	cmd, _ := splitCmd(line)
-	return slices.Contains(defaultMetaCommands, strings.ToLower(cmd))
+	low := strings.ToLower(cmd)
+	if eng.Host.Kind == engage.KindMenuTerminal {
+		return slices.Contains(menuMetaCommands, low)
+	}
+	return slices.Contains(defaultMetaCommands, low)
 }
 
 // participantFor returns the participant entry for s within eng. Returns

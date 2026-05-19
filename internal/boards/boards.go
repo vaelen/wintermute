@@ -203,6 +203,108 @@ func (s *Service) GetBoard(ctx context.Context, slug string) (Board, error) {
 	return b, err
 }
 
+// SetReadMinLevel updates the minimum access level required to read the
+// board. Returns ErrNotFound if no board has the given slug.
+func (s *Service) SetReadMinLevel(ctx context.Context, slug string, level int) error {
+	return s.setIntCol(ctx, slug, "read_perms", level)
+}
+
+// SetPostMinLevel updates the minimum access level required to post.
+func (s *Service) SetPostMinLevel(ctx context.Context, slug string, level int) error {
+	return s.setIntCol(ctx, slug, "post_perms", level)
+}
+
+// SetAdminMinLevel updates the minimum access level required to admin
+// the board.
+func (s *Service) SetAdminMinLevel(ctx context.Context, slug string, level int) error {
+	return s.setIntCol(ctx, slug, "admin_perms", level)
+}
+
+func (s *Service) setIntCol(ctx context.Context, slug, col string, val int) error {
+	// Column name is caller-controlled (hard-coded by the wrappers above),
+	// never user input.
+	query := fmt.Sprintf(`UPDATE boards SET %s = ? WHERE slug = ?`, col)
+	return s.db.Write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, query, val, slug)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+// SetAreaTag sets or clears the FTN/Fidonet area tag for the board. An
+// empty value clears it (column becomes NULL).
+func (s *Service) SetAreaTag(ctx context.Context, slug, areaTag string) error {
+	var arg any
+	if areaTag == "" {
+		arg = nil
+	} else {
+		arg = areaTag
+	}
+	return s.db.Write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE boards SET area_tag = ? WHERE slug = ?`,
+			arg, slug,
+		)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+// ListByNetwork returns every board attached to the named network,
+// regardless of ACL. Intended for the admin menu, which must see boards
+// even when the operator's account would not be permitted to read them.
+// Returns ErrUnknownNetwork if the network slug doesn't exist; any
+// other read error is returned unwrapped so transient DB failures
+// remain distinguishable from a missing slug.
+func (s *Service) ListByNetwork(ctx context.Context, networkSlug string) ([]Board, error) {
+	net, err := ftnnetworks.Get(ctx, s.db, networkSlug)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: %s", ErrUnknownNetwork, networkSlug)
+		}
+		return nil, fmt.Errorf("boards: list-by-network: %w", err)
+	}
+	rows, err := s.db.Read().QueryContext(ctx, `
+		SELECT id, network_id, slug, name, description, area_tag,
+		       read_perms, post_perms, admin_perms
+		FROM boards
+		WHERE network_id = ?
+		ORDER BY slug
+	`, net.ID)
+	if err != nil {
+		return nil, fmt.Errorf("boards: list-by-network: %w", err)
+	}
+	defer rows.Close()
+	var out []Board
+	for rows.Next() {
+		var b Board
+		if err := rows.Scan(&b.ID, &b.NetworkID, &b.Slug, &b.Name, &b.Description,
+			&b.AreaTag, &b.ReadMinLevel, &b.PostMinLevel, &b.AdminMinLevel); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 // ListBoards returns every board the account is permitted to read.
 func (s *Service) ListBoards(ctx context.Context, acc *auth.Account) ([]Board, error) {
 	lvl := levelOf(acc)

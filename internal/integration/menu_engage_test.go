@@ -23,8 +23,8 @@ import (
 	"github.com/vaelen/wintermute/internal/boards"
 	"github.com/vaelen/wintermute/internal/config"
 	"github.com/vaelen/wintermute/internal/files"
-	ftnnetworks "github.com/vaelen/wintermute/internal/ftn/networks"
 	"github.com/vaelen/wintermute/internal/ftn/msgid"
+	ftnnetworks "github.com/vaelen/wintermute/internal/ftn/networks"
 	_ "github.com/vaelen/wintermute/internal/llm/fake"
 	"github.com/vaelen/wintermute/internal/mail"
 	"github.com/vaelen/wintermute/internal/npc"
@@ -139,6 +139,28 @@ func startMenuEngageServer(t *testing.T) *testServer {
 		t.Fatalf("SetEngage kiosk: %v", err)
 	}
 
+	// M6.4 admin-enabled terminal sits next to the kiosk. Has both Mail
+	// and Admin features so we can verify the per-participant filter
+	// keeps numbering contiguous for non-admins.
+	if _, err := wapi.CreateObject(ctx, worldapi.ObjectSpec{
+		Slug: "admin-console", Name: "admin console", Kind: world.KindItem, RoomSlug: "lobby",
+	}); err != nil {
+		_ = db.Close()
+		cancel()
+		t.Fatalf("CreateObject admin-console: %v", err)
+	}
+	if err := wapi.SetEngage(ctx, "admin-console", worldapi.SetEngageOpts{
+		Kind: engage.KindMenuTerminal,
+		Menu: []engage.MenuEntry{
+			{Feature: engage.FeatureMail},
+			{Feature: engage.FeatureAdmin},
+		},
+	}); err != nil {
+		_ = db.Close()
+		cancel()
+		t.Fatalf("SetEngage admin-console: %v", err)
+	}
+
 	// Engagement wiring — mirrors cmd/wintermute/main.go but only for the
 	// kinds we need here.
 	engageReg := engage.NewRegistry()
@@ -165,6 +187,14 @@ func startMenuEngageServer(t *testing.T) *testServer {
 		AccountByID: func(id int64) (*auth.Account, error) {
 			return a.GetByID(ctx, id)
 		},
+		// M6.4 admin-menu deps.
+		Logger:    logger,
+		Auth:      a,
+		World:     w,
+		DB:        db,
+		GetMOTD:   wapi.GetMOTD,
+		SetMOTD:   wapi.SetMOTD,
+		StartedAt: time.Now(),
 	}
 
 	playerNameOf := func(id world.ObjectID) string {
@@ -294,10 +324,15 @@ func startMenuEngageServer(t *testing.T) *testServer {
 	}()
 
 	srv := &testServer{
-		t:      t,
-		addr:   ln.Addr().String(),
-		authS:  a,
-		worldW: w,
+		t:        t,
+		addr:     ln.Addr().String(),
+		authS:    a,
+		worldW:   w,
+		mailSvc:  mailSvc,
+		boardSvc: boardsSvc,
+		fileSvc:  filesSvc,
+		db:       db,
+		wapi:     wapi,
 	}
 	srv.close = func() {
 		_ = ln.Close()
@@ -542,5 +577,183 @@ func TestMenuEngagement_endToEnd(t *testing.T) {
 	bob.send("B\r\n")
 	bob.send("Q\r\n")
 	alice.send("quit\r\n")
+	bob.send("quit\r\n")
+}
+
+// TestAdminMenu_endToEnd performs one mutation per admin subsection via
+// the live network engagement and asserts the underlying state changed.
+// alice is the first account created on a fresh server, so the session
+// layer's first-account-is-admin rule applies — she has admin authority
+// when she sits down at the admin console.
+func TestAdminMenu_endToEnd(t *testing.T) {
+	srv := startMenuEngageServer(t)
+	alice := dialClient(t, srv)
+	alice.loginNew("alice", "hunter22")
+	alice.drainFor(300 * time.Millisecond)
+
+	alice.send("use admin-console\r\n")
+	// Main menu of admin-console: 1) Mail 2) Admin (admin sees both).
+	alice.expect("Mail", 5*time.Second)
+	alice.expect("Admin", 5*time.Second)
+	alice.send("2\r\n") // Admin
+	alice.expect("admin console", 5*time.Second)
+
+	// --- 1. Users: promote bob to builder. Create bob first via auth
+	//        store so we have a non-admin target.
+	if _, err := srv.authS.Create(context.Background(),
+		"bob", "hunter22", auth.AccessPlayer); err != nil {
+		t.Fatalf("Create bob: %v", err)
+	}
+	alice.send("1\r\n") // Users
+	alice.expect("admin — Users", 5*time.Second)
+	// Sorted by username: alice (1), bob (2).
+	alice.send("2\r\n")
+	alice.expect("Username:    bob", 5*time.Second)
+	// Player view: 1) Promote to builder, 2) Promote to admin.
+	alice.send("1\r\n")
+	alice.drainFor(200 * time.Millisecond)
+	bob, err := srv.authS.GetByUsername(context.Background(), "bob")
+	if err != nil {
+		t.Fatalf("GetByUsername bob: %v", err)
+	}
+	if bob.AccessLevel != auth.AccessBuilder {
+		t.Errorf("after promote: bob level = %q, want builder", bob.AccessLevel)
+	}
+	alice.send("B\r\n") // back to Users list
+	alice.send("B\r\n") // back to admin console
+
+	// --- 2. Mail: broadcast a system message.
+	alice.send("2\r\n") // Mail
+	alice.expect("Broadcast", 5*time.Second)
+	alice.send("1\r\n") // Broadcast
+	alice.expect("Subject:", 5*time.Second)
+	alice.send("system notice\r\n")
+	alice.expect(".>", 5*time.Second)
+	alice.send("Reboot at midnight.\r\n")
+	alice.send(".\r\n")
+	alice.drainFor(200 * time.Millisecond)
+	box, _ := srv.mailSvc.Inbox(context.Background(), bob.ID)
+	if len(box) != 1 || box[0].Subject != "system notice" {
+		t.Errorf("bob inbox after broadcast = %+v, want 1 msg subject 'system notice'", box)
+	}
+	alice.send("B\r\n") // back to admin console
+
+	// --- 3. Boards: create one in the (only) local network. The board
+	//        menu skips the network prompt because only "local" exists.
+	alice.send("3\r\n") // Boards
+	alice.expect("admin — Boards — local", 5*time.Second)
+	alice.send("C\r\n")
+	alice.expect("Slug:", 5*time.Second)
+	alice.send("notices\r\n")
+	alice.expect("Name:", 5*time.Second)
+	alice.send("Notices\r\n")
+	alice.expect(".>", 5*time.Second)
+	alice.send("Admin announcements.\r\n")
+	alice.send(".\r\n")
+	alice.drainFor(200 * time.Millisecond)
+	if _, err := srv.boardSvc.GetBoard(context.Background(), "notices"); err != nil {
+		t.Errorf("expected board 'notices' to exist: %v", err)
+	}
+	alice.send("B\r\n") // back from boards list to admin console
+
+	// --- 4. Files: create an area.
+	alice.send("4\r\n") // Files
+	alice.expect("admin — Files — Areas", 5*time.Second)
+	alice.send("C\r\n")
+	alice.expect("Slug:", 5*time.Second)
+	alice.send("releases\r\n")
+	alice.expect("Description:", 5*time.Second)
+	alice.send("Release builds.\r\n")
+	alice.drainFor(200 * time.Millisecond)
+	if _, err := srv.fileSvc.GetArea(context.Background(), "releases"); err != nil {
+		t.Errorf("expected area 'releases' to exist: %v", err)
+	}
+	alice.send("B\r\n") // back from areas list to admin console
+
+	// --- 5. Objects: view an existing seed object.
+	alice.send("5\r\n") // Objects
+	alice.expect("admin — Objects", 5*time.Second)
+	// Seed objects sorted by slug: coffee-cup (1), datapad (2), keycard (3).
+	alice.send("3\r\n") // keycard
+	alice.expect("keycard", 5*time.Second)
+	alice.send("B\r\n") // back to objects list
+	alice.send("B\r\n") // back to admin console
+
+	// --- 6. Rooms: edit the lobby description.
+	alice.send("6\r\n") // Rooms
+	alice.expect("admin — Rooms", 5*time.Second)
+	// Rooms sorted by slug: corridor (1), lobby (2), server-room (3).
+	alice.send("2\r\n") // lobby
+	alice.expect("Slug:    lobby", 5*time.Second)
+	alice.send("E\r\n")
+	alice.expect(".>", 5*time.Second)
+	alice.send("Replaced by admin menu.\r\n")
+	alice.send(".\r\n")
+	alice.drainFor(200 * time.Millisecond)
+	r, _ := srv.worldW.RoomBySlug("lobby")
+	if !strings.Contains(r.Description, "Replaced by admin menu") {
+		t.Errorf("lobby description not updated: %q", r.Description)
+	}
+	alice.send("B\r\n") // back to rooms list
+	alice.send("B\r\n") // back to admin console
+
+	// --- 7. FTN networks: the bootstrap left only "local"; nothing to
+	//        switch to. Just verify the screen renders.
+	alice.send("7\r\n") // FTN networks
+	alice.expect("local", 5*time.Second)
+	alice.send("B\r\n") // back to admin console
+
+	// --- 8. System: edit MOTD.
+	alice.send("8\r\n") // System
+	alice.expect("admin — System", 5*time.Second)
+	alice.send("E\r\n")
+	alice.expect(".>", 5*time.Second)
+	alice.send("Welcome to the Sprawl.\r\n")
+	alice.send(".\r\n")
+	alice.drainFor(200 * time.Millisecond)
+	if got := srv.wapi.GetMOTD(); got != "Welcome to the Sprawl." {
+		t.Errorf("MOTD after edit = %q, want %q", got, "Welcome to the Sprawl.")
+	}
+	alice.send("B\r\n") // back to admin console
+
+	alice.send("B\r\n") // back to main menu of the engagement
+	alice.send("Q\r\n") // disengage
+	alice.send("quit\r\n")
+}
+
+// TestAdminMenu_nonAdminCannotSeeEntry confirms that a non-admin player
+// engaging the same admin-console object sees only the Mail entry — the
+// Admin entry is filtered out and numbering stays contiguous (no gap).
+func TestAdminMenu_nonAdminCannotSeeEntry(t *testing.T) {
+	srv := startMenuEngageServer(t)
+	// alice is the first account → admin. To get a non-admin we need
+	// a second account, so create alice first to consume the
+	// first-account-is-admin slot, then create bob the same way.
+	alice := dialClient(t, srv)
+	alice.loginNew("alice", "hunter22")
+	alice.drainFor(200 * time.Millisecond)
+	alice.send("quit\r\n")
+	alice.drainFor(200 * time.Millisecond)
+
+	bob := dialClient(t, srv)
+	bob.loginNew("bob", "hunter22")
+	bob.drainFor(200 * time.Millisecond)
+	bob.send("use admin-console\r\n")
+	// Wait for the main menu frame to settle.
+	bob.expect("Mail", 5*time.Second)
+	bob.expect("Quit", 5*time.Second)
+	bob.drainFor(200 * time.Millisecond)
+	out := bob.string()
+	// The Admin entry should be absent for a non-admin participant, and
+	// Mail should be selectable as "1)".
+	if strings.Contains(out, "Admin") {
+		t.Errorf("non-admin saw Admin entry: %s", out)
+	}
+	// There should be exactly one numbered row before the Quit row,
+	// i.e. "1) Mail" — Boards/Admin do not appear.
+	if !strings.Contains(out, "1)") {
+		t.Errorf("expected numbered entry '1)' in menu: %s", out)
+	}
+	bob.send("Q\r\n")
 	bob.send("quit\r\n")
 }

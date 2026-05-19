@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vaelen/wintermute/internal/auth"
+	"github.com/vaelen/wintermute/internal/world"
 	"github.com/vaelen/wintermute/internal/world/engage"
 )
 
@@ -150,4 +152,72 @@ func TestHandler_OnOpen_emitsClearScreen(t *testing.T) {
 
 func TestHandler_implementsEngageHandler(t *testing.T) {
 	var _ engage.Handler = NewHandler(newMenuHost(nil), nil)
+}
+
+func TestHandler_adminEntry_hiddenFromNonAdmin(t *testing.T) {
+	var buf strings.Builder
+	h := NewHandler(newMenuHost([]engage.MenuEntry{
+		{Feature: engage.FeatureMail},
+		{Feature: engage.FeatureAdmin},
+		{Feature: engage.FeatureBoards},
+	}), nil)
+	h.SetDeps(&engage.TerminalDeps{
+		AccountFor: func(_ world.ObjectID) (*auth.Account, error) {
+			return &auth.Account{ID: 1, Username: "alice", AccessLevel: auth.AccessPlayer}, nil
+		},
+	})
+	h.OnOpen(newMenuParticipant(&buf))
+	out := buf.String()
+	if strings.Contains(out, "admin console") || strings.Contains(strings.ToLower(out), "admin") {
+		t.Errorf("non-admin should not see Admin entry: %q", out)
+	}
+	if !strings.Contains(out, "1) Mail") && !strings.Contains(out, "1)  Mail") {
+		t.Errorf("Mail should be numbered 1 for non-admin: %q", out)
+	}
+	if !strings.Contains(out, "2) Message Boards") && !strings.Contains(out, "2)  Message Boards") {
+		t.Errorf("Boards should be numbered 2 (admin gap closed) for non-admin: %q", out)
+	}
+}
+
+func TestHandler_adminEntry_visibleToAdmin(t *testing.T) {
+	var buf strings.Builder
+	h := NewHandler(newMenuHost([]engage.MenuEntry{
+		{Feature: engage.FeatureMail},
+		{Feature: engage.FeatureAdmin},
+	}), nil)
+	h.SetDeps(&engage.TerminalDeps{
+		AccountFor: func(_ world.ObjectID) (*auth.Account, error) {
+			return &auth.Account{ID: 1, Username: "root", AccessLevel: auth.AccessAdmin}, nil
+		},
+	})
+	h.OnOpen(newMenuParticipant(&buf))
+	out := buf.String()
+	if !strings.Contains(out, "Admin") {
+		t.Errorf("admin should see Admin entry: %q", out)
+	}
+}
+
+func TestHandler_adminEntry_pressingNumberOnNonAdminGoesToBoardsNotAdmin(t *testing.T) {
+	// Numbering after filtering: 1) Mail, 2) Boards. Pressing 2 must
+	// open Boards (the entry that took the admin slot), not panic on
+	// the filtered-out admin entry.
+	var buf strings.Builder
+	h := NewHandler(newMenuHost([]engage.MenuEntry{
+		{Feature: engage.FeatureMail},
+		{Feature: engage.FeatureAdmin},
+		{Feature: engage.FeatureBoards},
+	}), nil)
+	h.SetDeps(&engage.TerminalDeps{
+		AccountFor: func(_ world.ObjectID) (*auth.Account, error) {
+			return &auth.Account{ID: 1, Username: "alice", AccessLevel: auth.AccessPlayer}, nil
+		},
+	})
+	p := newMenuParticipant(&buf)
+	h.OnOpen(p)
+	buf.Reset()
+	h.Handle(p, "2")
+	out := buf.String()
+	if !strings.Contains(out, "Boards") {
+		t.Errorf("pressing 2 should open Boards submenu: %q", out)
+	}
 }

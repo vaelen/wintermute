@@ -13,13 +13,15 @@ import (
 // the "menu" key (see MenuEntry).
 const KindMenuTerminal = "menu_terminal"
 
-// Feature names accepted in a MenuEntry. The set is closed in M6.3; new
-// feature kinds are added by registering an entry here and a submenu shim
-// under internal/world/engage/menu/feature.
+// Feature names accepted in a MenuEntry. The set is closed; new feature
+// kinds are added by registering an entry here and a submenu shim as a
+// flat `feature_<name>.go` file in internal/world/engage/menu (alongside
+// feature_mail.go, feature_boards.go, feature_files.go, feature_admin.go).
 const (
 	FeatureMail   = "mail"
 	FeatureBoards = "boards"
 	FeatureFiles  = "files"
+	FeatureAdmin  = "admin"
 )
 
 // MenuEntry is one row of an object's menu configuration. Feature picks
@@ -36,7 +38,7 @@ type MenuEntry struct {
 func ValidateMenu(entries []MenuEntry) error {
 	for i, e := range entries {
 		switch e.Feature {
-		case FeatureMail, FeatureBoards:
+		case FeatureMail, FeatureBoards, FeatureAdmin:
 			if e.Area != "" {
 				return fmt.Errorf("menu[%d]: feature %q does not accept area", i, e.Feature)
 			}

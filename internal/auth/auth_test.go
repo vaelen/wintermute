@@ -226,6 +226,98 @@ func TestCount(t *testing.T) {
 	}
 }
 
+func TestGetByUsername_returnsAccount(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	created, err := s.Create(ctx, "alice", "hunter2", AccessPlayer)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := s.GetByUsername(ctx, "alice")
+	if err != nil {
+		t.Fatalf("GetByUsername: %v", err)
+	}
+	if got.ID != created.ID || got.Username != "alice" {
+		t.Errorf("GetByUsername = %+v, want id=%d username=alice", got, created.ID)
+	}
+}
+
+func TestGetByUsername_notFound(t *testing.T) {
+	s := newStore(t)
+	_, err := s.GetByUsername(context.Background(), "ghost")
+	if !errors.Is(err, ErrAccountNotFound) {
+		t.Errorf("GetByUsername(ghost) err = %v, want ErrAccountNotFound", err)
+	}
+}
+
+func TestListAccounts_returnsAllOrderedByUsername(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	for _, name := range []string{"charlie", "alice", "bob"} {
+		if _, err := s.Create(ctx, name, "hunter2", AccessPlayer); err != nil {
+			t.Fatalf("Create %s: %v", name, err)
+		}
+	}
+	got, err := s.ListAccounts(ctx)
+	if err != nil {
+		t.Fatalf("ListAccounts: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("ListAccounts returned %d, want 3", len(got))
+	}
+	want := []string{"alice", "bob", "charlie"}
+	for i, name := range want {
+		if got[i].Username != name {
+			t.Errorf("ListAccounts[%d].Username = %q, want %q", i, got[i].Username, name)
+		}
+	}
+}
+
+func TestSetAccessLevel_promoteAndDemote(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	acc, err := s.Create(ctx, "alice", "hunter2", AccessPlayer)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.SetAccessLevel(ctx, acc.ID, AccessBuilder); err != nil {
+		t.Fatalf("SetAccessLevel builder: %v", err)
+	}
+	got, err := s.GetByID(ctx, acc.ID)
+	if err != nil {
+		t.Fatalf("GetByID after promote: %v", err)
+	}
+	if got.AccessLevel != AccessBuilder {
+		t.Errorf("AccessLevel after promote = %q, want builder", got.AccessLevel)
+	}
+	if err := s.SetAccessLevel(ctx, acc.ID, AccessPlayer); err != nil {
+		t.Fatalf("SetAccessLevel back to player: %v", err)
+	}
+	got, err = s.GetByID(ctx, acc.ID)
+	if err != nil {
+		t.Fatalf("GetByID after demote: %v", err)
+	}
+	if got.AccessLevel != AccessPlayer {
+		t.Errorf("AccessLevel after demote = %q, want player", got.AccessLevel)
+	}
+}
+
+func TestSetAccessLevel_rejectsUnknownLevel(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	acc, _ := s.Create(ctx, "alice", "hunter2", AccessPlayer)
+	if err := s.SetAccessLevel(ctx, acc.ID, AccessLevel("emperor")); err == nil {
+		t.Error("expected error for unknown access level")
+	}
+}
+
+func TestSetAccessLevel_unknownAccount(t *testing.T) {
+	s := newStore(t)
+	if err := s.SetAccessLevel(context.Background(), 99999, AccessBuilder); !errors.Is(err, ErrAccountNotFound) {
+		t.Errorf("SetAccessLevel on unknown id err = %v, want ErrAccountNotFound", err)
+	}
+}
+
 func TestValidUsername(t *testing.T) {
 	cases := []struct {
 		u  string

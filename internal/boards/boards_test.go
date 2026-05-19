@@ -375,3 +375,120 @@ func TestDeleteBoard_OK(t *testing.T) {
 		t.Errorf("DeleteBoard: %v", err)
 	}
 }
+
+func TestSetReadMinLevel_persists(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	if _, err := e.svc.CreateBoard(ctx, CreateBoardSpec{Slug: "g", Name: "G", NetworkSlug: "local"}); err != nil {
+		t.Fatalf("CreateBoard: %v", err)
+	}
+	if err := e.svc.SetReadMinLevel(ctx, "g", LevelBuilder); err != nil {
+		t.Fatalf("SetReadMinLevel: %v", err)
+	}
+	b, _ := e.svc.GetBoard(ctx, "g")
+	if b.ReadMinLevel != LevelBuilder {
+		t.Errorf("ReadMinLevel = %d, want %d", b.ReadMinLevel, LevelBuilder)
+	}
+}
+
+func TestSetPostMinLevel_persists(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	_, _ = e.svc.CreateBoard(ctx, CreateBoardSpec{Slug: "g", Name: "G", NetworkSlug: "local"})
+	if err := e.svc.SetPostMinLevel(ctx, "g", LevelAdmin); err != nil {
+		t.Fatalf("SetPostMinLevel: %v", err)
+	}
+	b, _ := e.svc.GetBoard(ctx, "g")
+	if b.PostMinLevel != LevelAdmin {
+		t.Errorf("PostMinLevel = %d, want %d", b.PostMinLevel, LevelAdmin)
+	}
+}
+
+func TestSetAdminMinLevel_persists(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	_, _ = e.svc.CreateBoard(ctx, CreateBoardSpec{Slug: "g", Name: "G", NetworkSlug: "local"})
+	if err := e.svc.SetAdminMinLevel(ctx, "g", LevelBuilder); err != nil {
+		t.Fatalf("SetAdminMinLevel: %v", err)
+	}
+	b, _ := e.svc.GetBoard(ctx, "g")
+	if b.AdminMinLevel != LevelBuilder {
+		t.Errorf("AdminMinLevel = %d, want %d", b.AdminMinLevel, LevelBuilder)
+	}
+}
+
+func TestSetAreaTag_setAndClear(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	_, _ = e.svc.CreateBoard(ctx, CreateBoardSpec{Slug: "g", Name: "G", NetworkSlug: "fsxnet"})
+	if err := e.svc.SetAreaTag(ctx, "g", "FSX.GENERAL"); err != nil {
+		t.Fatalf("SetAreaTag set: %v", err)
+	}
+	b, _ := e.svc.GetBoard(ctx, "g")
+	if !b.AreaTag.Valid || b.AreaTag.String != "FSX.GENERAL" {
+		t.Errorf("AreaTag = %+v, want FSX.GENERAL", b.AreaTag)
+	}
+	if err := e.svc.SetAreaTag(ctx, "g", ""); err != nil {
+		t.Fatalf("SetAreaTag clear: %v", err)
+	}
+	b, _ = e.svc.GetBoard(ctx, "g")
+	if b.AreaTag.Valid {
+		t.Errorf("AreaTag after clear = %+v, want NULL", b.AreaTag)
+	}
+}
+
+func TestSetters_unknownBoard(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	if err := e.svc.SetReadMinLevel(ctx, "no-such", LevelBuilder); !errors.Is(err, ErrNotFound) {
+		t.Errorf("SetReadMinLevel ghost = %v, want ErrNotFound", err)
+	}
+}
+
+func TestListByNetwork_returnsAllRegardlessOfACL(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	// Two boards in local (one admin-only), one in fsxnet.
+	_, _ = e.svc.CreateBoard(ctx, CreateBoardSpec{
+		Slug: "general", Name: "General", NetworkSlug: "local",
+	})
+	_, _ = e.svc.CreateBoard(ctx, CreateBoardSpec{
+		Slug: "ops", Name: "Ops", NetworkSlug: "local",
+		ReadMinLevel: LevelAdmin, PostMinLevel: LevelAdmin, AdminMinLevel: LevelAdmin,
+	})
+	_, _ = e.svc.CreateBoard(ctx, CreateBoardSpec{
+		Slug: "fsx-general", Name: "FSX General", NetworkSlug: "fsxnet",
+	})
+
+	localBoards, err := e.svc.ListByNetwork(ctx, "local")
+	if err != nil {
+		t.Fatalf("ListByNetwork local: %v", err)
+	}
+	if len(localBoards) != 2 {
+		t.Fatalf("ListByNetwork local returned %d, want 2", len(localBoards))
+	}
+	// The ACL-restricted "ops" must appear in the admin listing.
+	gotSlugs := map[string]bool{}
+	for _, b := range localBoards {
+		gotSlugs[b.Slug] = true
+	}
+	if !gotSlugs["general"] || !gotSlugs["ops"] {
+		t.Errorf("ListByNetwork missing boards: %v", gotSlugs)
+	}
+
+	fsxBoards, err := e.svc.ListByNetwork(ctx, "fsxnet")
+	if err != nil {
+		t.Fatalf("ListByNetwork fsxnet: %v", err)
+	}
+	if len(fsxBoards) != 1 || fsxBoards[0].Slug != "fsx-general" {
+		t.Errorf("ListByNetwork fsxnet = %+v, want [fsx-general]", fsxBoards)
+	}
+}
+
+func TestListByNetwork_unknownNetwork(t *testing.T) {
+	e := setup(t)
+	_, err := e.svc.ListByNetwork(context.Background(), "no-such-net")
+	if !errors.Is(err, ErrUnknownNetwork) {
+		t.Errorf("ListByNetwork ghost = %v, want ErrUnknownNetwork", err)
+	}
+}

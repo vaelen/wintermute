@@ -652,3 +652,41 @@ func TestSayObserverInvokedAfterBroadcast(t *testing.T) {
 
 func join(parts []string) string  { return strings.Join(parts, "") }
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+func TestListRooms_returnsSeedRoomsSortedBySlug(t *testing.T) {
+	w, _, _ := newTestWorld(t)
+	rooms := w.ListRooms()
+	if len(rooms) < 3 {
+		t.Fatalf("ListRooms = %d rooms, want at least 3", len(rooms))
+	}
+	wantOrder := []string{"corridor", "lobby", "server-room"}
+	for i, want := range wantOrder {
+		if rooms[i].Slug != want {
+			t.Errorf("rooms[%d].Slug = %q, want %q", i, rooms[i].Slug, want)
+		}
+	}
+}
+
+func TestListObjects_returnsSeedObjectsSortedBySlug(t *testing.T) {
+	w, _, _ := newTestWorld(t)
+	objs := w.ListObjects()
+	// At least the three seed items (keycard, coffee-cup, datapad).
+	slugs := map[string]bool{}
+	for _, o := range objs {
+		slugs[o.Slug] = true
+	}
+	for _, want := range []string{"keycard", "coffee-cup", "datapad"} {
+		if !slugs[want] {
+			t.Errorf("ListObjects missing %q (got slugs %v)", want, slugs)
+		}
+	}
+	// Order: sorted by slug ascending. Find the three seed items and
+	// verify their relative ordering.
+	idx := map[string]int{}
+	for i, o := range objs {
+		idx[o.Slug] = i
+	}
+	if !(idx["coffee-cup"] < idx["datapad"] && idx["datapad"] < idx["keycard"]) {
+		t.Errorf("ListObjects not sorted by slug: %v", objs)
+	}
+}

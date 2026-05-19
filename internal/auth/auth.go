@@ -234,6 +234,72 @@ func (s *Store) GetByID(ctx context.Context, id int64) (*Account, error) {
 	return scanAccount(row.Scan)
 }
 
+// GetByUsername returns the account row with the given username.
+func (s *Store) GetByUsername(ctx context.Context, username string) (*Account, error) {
+	row := s.db.Read().QueryRowContext(ctx,
+		`SELECT id, username, access_level, created_at, last_login_at,
+		        terminal_encoding, terminal_width, terminal_height,
+		        terminal_color, terminal_dec_lines
+		   FROM accounts WHERE username = ?`,
+		username,
+	)
+	return scanAccount(row.Scan)
+}
+
+// ListAccounts returns every account ordered by username, ascending.
+func (s *Store) ListAccounts(ctx context.Context) ([]Account, error) {
+	rows, err := s.db.Read().QueryContext(ctx,
+		`SELECT id, username, access_level, created_at, last_login_at,
+		        terminal_encoding, terminal_width, terminal_height,
+		        terminal_color, terminal_dec_lines
+		   FROM accounts ORDER BY username ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("auth: list: %w", err)
+	}
+	defer rows.Close()
+	var out []Account
+	for rows.Next() {
+		acc, err := scanAccount(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *acc)
+	}
+	return out, rows.Err()
+}
+
+// SetAccessLevel updates the access level for the given account. Returns
+// ErrAccountNotFound if no row matches id. Rejects unknown level values
+// at the application layer; the underlying column is text so the DB
+// would happily accept an invented level otherwise.
+func (s *Store) SetAccessLevel(ctx context.Context, id int64, level AccessLevel) error {
+	switch level {
+	case AccessAdmin, AccessBuilder, AccessPlayer:
+	default:
+		return fmt.Errorf("auth: SetAccessLevel: unknown level %q", level)
+	}
+	var affected int64
+	err := s.db.Write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE accounts SET access_level = ? WHERE id = ?`,
+			string(level), id,
+		)
+		if err != nil {
+			return err
+		}
+		affected, err = res.RowsAffected()
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("auth: SetAccessLevel: %w", err)
+	}
+	if affected == 0 {
+		return ErrAccountNotFound
+	}
+	return nil
+}
+
 // scanFunc is the signature of *sql.Row.Scan / *sql.Rows.Scan.
 type scanFunc func(dest ...any) error
 
