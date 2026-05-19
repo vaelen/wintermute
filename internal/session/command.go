@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vaelen/wintermute/internal/term"
 	"github.com/vaelen/wintermute/internal/world"
@@ -24,6 +25,10 @@ var defaultMetaCommands = []string{
 	// movement directions — auto-disengage happens inside cmdMove
 	"n", "north", "s", "south", "e", "east", "w", "west",
 	"u", "up", "d", "down", "in", "out", "go",
+	// terminal capability tuning works mid-engagement so a player can
+	// resize / re-encode without disengaging. Width changes trigger a
+	// live re-render via the engage.Resizer hook (see reconfigure).
+	"terminal",
 }
 
 // commandLoop runs the post-login input loop. The line is first offered to
@@ -154,12 +159,16 @@ func (h *Handler) attachToWorld(ctx context.Context, s *Session) *worldcmd.Handl
 	s.playerID = playerID
 
 	pres := &world.Presence{
-		PlayerID:  playerID,
-		Account:   s.account,
-		Write:     s.writeString,
-		Log:       s.log,
-		SessionID: s.id,
+		PlayerID:   playerID,
+		Account:    s.account,
+		Write:      s.writeString,
+		Log:        s.log,
+		SessionID:  s.id,
+		TermWidth:  s.caps.Width,
+		TermHeight: s.caps.Height,
+		TermType:   s.caps.TermType,
 	}
+	s.presence = pres
 	if _, err := h.World.Attach(pres); err != nil {
 		if err == world.ErrAlreadyAttached {
 			h.World.Detach(playerID, world.DisconnectDropped)
@@ -248,6 +257,8 @@ func (h *Handler) cmdTerminal(ctx context.Context, s *Session, args string) {
 		h.terminalSetLines(ctx, s, rest)
 	case "echo":
 		h.terminalSetEcho(s, rest)
+	case "detect":
+		h.terminalDetect(ctx, s)
 	default:
 		_ = s.writef("Unknown 'terminal' subcommand: %q. Try 'help'.\r\n", sub)
 	}
@@ -271,14 +282,20 @@ func (h *Handler) printTerminalStatus(s *Session) {
 	if s.echoOn() {
 		echoStr = "on"
 	}
+	termTypeStr := c.TermType
+	if termTypeStr == "" {
+		termTypeStr = "(not reported)"
+	}
 	_ = s.writef("Terminal settings:\r\n"+
 		"  encoding : %s\r\n"+
 		"  size     : %d x %d\r\n"+
+		"  type     : %s\r\n"+
 		"  color    : %s\r\n"+
 		"  lines    : %s\r\n"+
 		"  echo     : %s\r\n"+
 		"  telnet   : %s\r\n",
-		c.Encoding, c.Width, c.Height, colorStr, linesStr, echoStr, telnetStr)
+		c.Encoding, c.Width, c.Height, termTypeStr,
+		colorStr, linesStr, echoStr, telnetStr)
 }
 
 func (h *Handler) terminalSetEncoding(ctx context.Context, s *Session, arg string) {
@@ -327,6 +344,44 @@ func (h *Handler) terminalSetColor(ctx context.Context, s *Session, arg string) 
 		state = "on"
 	}
 	_ = s.writef("Color: %s.\r\n", state)
+}
+
+// terminalDetect re-runs terminal capability detection. For telnet
+// sessions it asks the client to re-report TTYPE (NAWS is push-based
+// so c.State() already reflects the latest value) and reconfigures
+// the encoder + Presence + active engagement once the reply arrives.
+//
+// For non-telnet sessions, ANSI-based detection (Secondary DA,
+// XTVERSION, CSI 18 t, cursor-position fallback for size) is planned
+// in milestone M6.5; until then the command prints a "coming soon"
+// placeholder rather than silently doing nothing.
+func (h *Handler) terminalDetect(ctx context.Context, s *Session) {
+	if !s.caps.Telnet {
+		_ = s.writeString(
+			"Terminal detection over plain TCP is not yet supported. " +
+				"Coming soon — see docs/milestones/06.5.\r\n")
+		return
+	}
+	_ = s.writeString("Detecting terminal...\r\n")
+	s.tc.RequestTTYPE()
+	// Wait for the TTYPE reply. The conn parser updates state.TermType
+	// inline as bytes arrive; one second gives a comfortable margin
+	// for slow links and busy CI runners while still feeling
+	// interactive for the local case.
+	time.Sleep(1 * time.Second)
+	st := s.tc.State()
+
+	next := s.enc.Capabilities()
+	next.TermType = st.TermType
+	if st.Width > 0 {
+		next.Width = st.Width
+	}
+	if st.Height > 0 {
+		next.Height = st.Height
+	}
+	h.reconfigure(ctx, s, next)
+	_ = s.writef("Detection complete: type=%q size=%dx%d.\r\n",
+		st.TermType, st.Width, st.Height)
 }
 
 func (h *Handler) terminalSetEcho(s *Session, arg string) {
@@ -386,6 +441,22 @@ func parseOnOff(s string) (bool, bool) {
 // mutex (see Session.reconfigureEncoder).
 func (h *Handler) reconfigure(ctx context.Context, s *Session, next term.Capabilities) {
 	s.reconfigureEncoder(next)
+	// Propagate the new dimensions to the world-side Presence and to
+	// any active engagement that implements engage.Resizer. Without
+	// this, `terminal width N` would land on the session caps but
+	// neither the current nor any subsequent engagement in the same
+	// session would observe the change (Presence is otherwise built
+	// once at attach time).
+	if s.presence != nil {
+		s.presence.TermWidth = next.Width
+		s.presence.TermHeight = next.Height
+		s.presence.TermType = next.TermType
+	}
+	if eng := s.Engagement(); eng != nil {
+		if r, ok := eng.Handler.(engage.Resizer); ok {
+			r.Resize(next.Width, next.Height)
+		}
+	}
 	if err := h.savePrefs(ctx, s); err != nil {
 		s.log.Warn("save prefs failed", "err", err)
 	}

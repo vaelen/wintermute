@@ -31,6 +31,7 @@ type Handler struct {
 	mu          sync.Mutex
 	state       state
 	width       int
+	height      int
 	disengage   func()
 	participant *engage.Participant
 }
@@ -66,11 +67,55 @@ func (h *Handler) SetDisengage(fn func()) {
 }
 
 // SetWidth overrides the frame width. Values outside [MinWidth, MaxWidth]
-// are clamped at render time.
+// are clamped at render time. A non-positive argument is ignored.
 func (h *Handler) SetWidth(w int) {
+	if w <= 0 {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.width = w
+}
+
+// SetHeight records the negotiated terminal height. M6.3 does not yet
+// consume the value at render time; the field is plumbed so future
+// height-sensitive views (paged thread, the M6.4 admin menu) can read
+// it without another wire-up pass. Non-positive values are ignored.
+func (h *Handler) SetHeight(n int) {
+	if n <= 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.height = n
+}
+
+// Resize implements engage.Resizer. It updates the stored dimensions
+// for any future render and, if a participant is currently attached,
+// re-renders the active frame so the player sees the new size right
+// away. Either argument may be 0 to mean "no change on this axis".
+//
+// The dimension write happens under h.mu, then the lock is released
+// before calling redraw (which re-acquires h.mu to read the current
+// state). A concurrent Handle that transitions state between the
+// unlock and the redraw will be reflected in the redrawn frame — see
+// the "Snapshot semantics" note on engage.Resizer. The behaviour is
+// the right one for this handler (you always want to see the latest
+// state at the new size), but anything more elaborate should think
+// twice before relying on a state-vs-size happens-before order.
+func (h *Handler) Resize(width, height int) {
+	h.mu.Lock()
+	if width > 0 {
+		h.width = width
+	}
+	if height > 0 {
+		h.height = height
+	}
+	p := h.participant
+	h.mu.Unlock()
+	if p != nil {
+		h.redraw(p)
+	}
 }
 
 // OnOpen renders the initial frame and stashes the participant for

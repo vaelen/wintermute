@@ -99,6 +99,26 @@ type Presence struct {
 	// on disconnect.
 	SessionID string
 
+	// TermWidth is the negotiated terminal width in cells, snapshotted
+	// from the session's term.Capabilities at attach time. May be 0
+	// when the client did not negotiate NAWS; callers must clamp /
+	// fall back accordingly. Mid-session resize lands here via
+	// session.reconfigure.
+	TermWidth int
+
+	// TermHeight is the negotiated terminal height in cells. Available
+	// for use by height-sensitive views. Same NAWS / 0-fallback /
+	// reconfigure semantics as TermWidth.
+	TermHeight int
+
+	// TermType is the raw TTYPE string the client reported via telnet
+	// (e.g. "xterm-256color", "vt100"). Empty when no TTYPE was
+	// negotiated. Per-session only — not persisted across reconnects.
+	// Informational: capability gating should prefer the booleans on
+	// term.Capabilities (ANSI, Color, DECLineDrawing) over substring
+	// matching this string.
+	TermType string
+
 	// detached is set when the world unregisters this presence (clean
 	// logout or force-detach to make room for a new login). Mutations
 	// refuse to operate on a detached presence; the session command loop
