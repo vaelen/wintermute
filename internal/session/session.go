@@ -64,6 +64,12 @@ type Session struct {
 	// engMu.
 	engagement *engage.Engagement
 	engMu      sync.Mutex
+
+	// presence is the world-side handle for this session, set after
+	// attachToWorld. Used by reconfigure() to propagate live capability
+	// changes (terminal width/height) without having to plumb the
+	// pointer through worldcmd. Mutated only from the session goroutine.
+	presence *world.Presence
 }
 
 // newSession constructs a Session given an already-accepted connection

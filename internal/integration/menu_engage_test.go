@@ -197,9 +197,8 @@ func startMenuEngageServer(t *testing.T) *testServer {
 		case engage.KindMenuTerminal:
 			mh := menu.NewHandler(host, closeBroadcast)
 			mh.SetDeps(deps)
-			if presence.TermWidth > 0 {
-				mh.SetWidth(presence.TermWidth)
-			}
+			mh.SetWidth(presence.TermWidth)
+			mh.SetHeight(presence.TermHeight)
 			mh.SetDisengage(func() {
 				if sb != nil {
 					engage.CloseForSession(engageReg, sb, engage.CloseVoluntary)
@@ -378,6 +377,102 @@ func TestMenuEngagement_rendersAtNAWSWidth(t *testing.T) {
 
 	alice.send("Q\r\n")
 	alice.send("quit\r\n")
+}
+
+// TestMenuEngagement_liveResize covers the `terminal width N` command
+// taking effect mid-engagement: the menu handler should pick up the
+// new size and re-render the current frame, and any subsequent
+// engagement in the same session should also use the new value.
+func TestMenuEngagement_liveResize(t *testing.T) {
+	srv := startMenuEngageServer(t)
+	alice := dialClient(t, srv)
+	// Negotiate NAWS at 72x24 so the first menu render is 72 wide.
+	naws := []byte{
+		255, 251, 31,
+		255, 250, 31, 0, 72, 0, 24, 255, 240,
+	}
+	if _, err := alice.conn.Write(naws); err != nil {
+		t.Fatalf("write NAWS: %v", err)
+	}
+	alice.expect("PRESS ENTER TO BEGIN", 5*time.Second)
+	alice.send("\r\n")
+	alice.expect("TERMINAL TYPE:", 5*time.Second)
+	alice.send("u\r\n")
+	alice.expect("Username", 5*time.Second)
+	alice.send("new\r\n")
+	alice.expect("Choose a username", 5*time.Second)
+	alice.send("alice\r\n")
+	alice.expect("Choose a password", 5*time.Second)
+	alice.send("hunter22\r\n")
+	alice.expect("Account \"alice\" created", 5*time.Second)
+	alice.expect("Username", 5*time.Second)
+	alice.send("alice\r\n")
+	alice.expect("Password", 5*time.Second)
+	alice.send("hunter22\r\n")
+	alice.expect("Welcome, alice", 5*time.Second)
+	alice.expect(">", 5*time.Second)
+	alice.drainFor(300 * time.Millisecond)
+
+	// First engagement at NAWS width 72.
+	alice.send("use kiosk\r\n")
+	alice.expect("┌", 5*time.Second)
+	alice.expect("┐", 5*time.Second)
+	if got := frameWidth(t, alice.string(), 1); got != 72 {
+		t.Fatalf("first frame width = %d, want 72", got)
+	}
+
+	// Resize mid-engagement. The Resize hook redraws the current frame
+	// *before* terminalSetSize writes its "Terminal width set to N"
+	// confirmation, so the redrawn frame appears earlier in the output
+	// than the confirmation. Use the global buffer (not the cursor)
+	// and measure the most recent top border once both have arrived.
+	alice.send("terminal width 50\r\n")
+	alice.expect("Terminal width set to 50", 5*time.Second)
+	alice.drainFor(200 * time.Millisecond)
+	if got := lastFrameWidth(t, alice.string()); got != 50 {
+		t.Errorf("frame width after resize = %d, want 50; unread:\n%s",
+			got, alice.unread())
+	}
+
+	alice.send("Q\r\n")
+	alice.send("quit\r\n")
+}
+
+// frameWidth returns the rune width of the Nth top-border line (1-indexed)
+// found in s. Fails the test if there are fewer than n borders.
+func frameWidth(t *testing.T, s string, n int) int {
+	t.Helper()
+	offset := 0
+	for i := 0; i < n; i++ {
+		idx := strings.Index(s[offset:], "┌")
+		if idx < 0 {
+			t.Fatalf("frameWidth: only found %d top borders, want %d", i, n)
+		}
+		offset += idx
+		if i == n-1 {
+			end := strings.Index(s[offset:], "\r\n")
+			if end < 0 {
+				t.Fatalf("frameWidth: top border has no CRLF")
+			}
+			return utf8.RuneCountInString(s[offset : offset+end])
+		}
+		offset += len("┌")
+	}
+	return 0
+}
+
+// lastFrameWidth returns the rune width of the final top-border line in s.
+func lastFrameWidth(t *testing.T, s string) int {
+	t.Helper()
+	idx := strings.LastIndex(s, "┌")
+	if idx < 0 {
+		t.Fatalf("lastFrameWidth: no top borders in output")
+	}
+	end := strings.Index(s[idx:], "\r\n")
+	if end < 0 {
+		t.Fatalf("lastFrameWidth: top border has no CRLF")
+	}
+	return utf8.RuneCountInString(s[idx : idx+end])
 }
 
 // TestMenuEngagement_endToEnd verifies the acceptance scenario:

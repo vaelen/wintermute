@@ -87,6 +87,19 @@ type Handler interface {
 	Handle(p *Participant, line string)
 }
 
+// Resizer is an optional capability handlers may implement to react to
+// mid-engagement terminal-size changes. When a player runs
+// `terminal width N` or `terminal height N`, the session calls Resize
+// on the active engagement's handler (if it satisfies this interface)
+// with the new dimensions. Either argument may be 0 if the
+// corresponding axis is not configured; implementations should treat 0
+// as "unchanged" rather than "go to 0". Implementations that re-render
+// frames should do so synchronously from Resize so the player sees the
+// new size immediately.
+type Resizer interface {
+	Resize(width, height int)
+}
+
 // Engagement is a live, in-memory interaction. Capacity is 1 in M5.7;
 // the slice shape allows >1 without a type change.
 type Engagement struct {

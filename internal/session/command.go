@@ -24,6 +24,10 @@ var defaultMetaCommands = []string{
 	// movement directions — auto-disengage happens inside cmdMove
 	"n", "north", "s", "south", "e", "east", "w", "west",
 	"u", "up", "d", "down", "in", "out", "go",
+	// terminal capability tuning works mid-engagement so a player can
+	// resize / re-encode without disengaging. Width changes trigger a
+	// live re-render via the engage.Resizer hook (see reconfigure).
+	"terminal",
 }
 
 // commandLoop runs the post-login input loop. The line is first offered to
@@ -162,6 +166,7 @@ func (h *Handler) attachToWorld(ctx context.Context, s *Session) *worldcmd.Handl
 		TermWidth:  s.caps.Width,
 		TermHeight: s.caps.Height,
 	}
+	s.presence = pres
 	if _, err := h.World.Attach(pres); err != nil {
 		if err == world.ErrAlreadyAttached {
 			h.World.Detach(playerID, world.DisconnectDropped)
@@ -388,6 +393,21 @@ func parseOnOff(s string) (bool, bool) {
 // mutex (see Session.reconfigureEncoder).
 func (h *Handler) reconfigure(ctx context.Context, s *Session, next term.Capabilities) {
 	s.reconfigureEncoder(next)
+	// Propagate the new dimensions to the world-side Presence and to
+	// any active engagement that implements engage.Resizer. Without
+	// this, `terminal width N` would land on the session caps but
+	// neither the current nor any subsequent engagement in the same
+	// session would observe the change (Presence is otherwise built
+	// once at attach time).
+	if s.presence != nil {
+		s.presence.TermWidth = next.Width
+		s.presence.TermHeight = next.Height
+	}
+	if eng := s.Engagement(); eng != nil {
+		if r, ok := eng.Handler.(engage.Resizer); ok {
+			r.Resize(next.Width, next.Height)
+		}
+	}
 	if err := h.savePrefs(ctx, s); err != nil {
 		s.log.Warn("save prefs failed", "err", err)
 	}
