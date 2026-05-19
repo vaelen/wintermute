@@ -13,9 +13,11 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/boards"
@@ -195,6 +197,9 @@ func startMenuEngageServer(t *testing.T) *testServer {
 		case engage.KindMenuTerminal:
 			mh := menu.NewHandler(host, closeBroadcast)
 			mh.SetDeps(deps)
+			if presence.TermWidth > 0 {
+				mh.SetWidth(presence.TermWidth)
+			}
 			mh.SetDisengage(func() {
 				if sb != nil {
 					engage.CloseForSession(engageReg, sb, engage.CloseVoluntary)
@@ -306,6 +311,73 @@ func startMenuEngageServer(t *testing.T) *testServer {
 	}
 	t.Cleanup(srv.close)
 	return srv
+}
+
+// TestMenuEngagement_rendersAtNAWSWidth verifies that the menu handler
+// is sized from the client's NAWS-reported terminal width rather than
+// always falling back to menu.DefaultWidth. The plumbing path under
+// test: telnet conn captures NAWS → session.attachToWorld copies into
+// Presence.TermWidth → engageOpen's KindMenuTerminal arm calls
+// menu.Handler.SetWidth before the first render.
+func TestMenuEngagement_rendersAtNAWSWidth(t *testing.T) {
+	srv := startMenuEngageServer(t)
+	alice := dialClient(t, srv)
+	// Send IAC WILL NAWS, then IAC SB NAWS 0 72 0 24 IAC SE.
+	// Telnet bytes: IAC=255 WILL=251 SB=250 SE=240; NAWS option=31.
+	naws := []byte{
+		255, 251, 31, // IAC WILL NAWS
+		255, 250, 31, 0, 72, 0, 24, 255, 240, // IAC SB NAWS 0 72 0 24 IAC SE
+	}
+	if _, err := alice.conn.Write(naws); err != nil {
+		t.Fatalf("write NAWS: %v", err)
+	}
+	// Telnet-mode sessions skip the ENABLE ECHO prompt (handler.go gates
+	// it on !hints.Telnet), so the standard loginNew helper diverges
+	// here. Inline the rest of the flow.
+	alice.expect("PRESS ENTER TO BEGIN", 5*time.Second)
+	alice.send("\r\n")
+	alice.expect("TERMINAL TYPE:", 5*time.Second)
+	alice.send("u\r\n")
+	alice.expect("Username", 5*time.Second)
+	alice.send("new\r\n")
+	alice.expect("Choose a username", 5*time.Second)
+	alice.send("alice\r\n")
+	alice.expect("Choose a password", 5*time.Second)
+	alice.send("hunter22\r\n")
+	alice.expect("Account \"alice\" created", 5*time.Second)
+	alice.expect("Username", 5*time.Second)
+	alice.send("alice\r\n")
+	alice.expect("Password", 5*time.Second)
+	alice.send("hunter22\r\n")
+	alice.expect("Welcome, alice", 5*time.Second)
+	alice.expect(">", 5*time.Second)
+	alice.drainFor(300 * time.Millisecond)
+
+	alice.send("use kiosk\r\n")
+	// Wait for the main menu's top border to arrive.
+	alice.expect("┌", 5*time.Second)
+	alice.expect("┐", 5*time.Second)
+
+	// Find the first rendered top border in everything seen so far and
+	// measure its rune width.
+	out := alice.string()
+	startIdx := strings.Index(out, "┌")
+	if startIdx < 0 {
+		t.Fatalf("no top border in output: %q", out)
+	}
+	tail := out[startIdx:]
+	endIdx := strings.Index(tail, "\r\n")
+	if endIdx < 0 {
+		t.Fatalf("top border has no CRLF: %q", tail)
+	}
+	topLine := tail[:endIdx]
+	gotWidth := utf8.RuneCountInString(topLine)
+	if gotWidth != 72 {
+		t.Errorf("menu frame width = %d, want 72; line = %q", gotWidth, topLine)
+	}
+
+	alice.send("Q\r\n")
+	alice.send("quit\r\n")
 }
 
 // TestMenuEngagement_endToEnd verifies the acceptance scenario:

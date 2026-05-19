@@ -99,6 +99,15 @@ type Presence struct {
 	// on disconnect.
 	SessionID string
 
+	// TermWidth and TermHeight are the negotiated terminal dimensions
+	// in cells, snapshotted from the session's term.Capabilities at
+	// attach time. Either may be 0 when the client did not negotiate
+	// NAWS; callers must clamp / fall back accordingly. Mid-session
+	// resize is not tracked — the values reflect dimensions at the
+	// moment Attach was called.
+	TermWidth  int
+	TermHeight int
+
 	// detached is set when the world unregisters this presence (clean
 	// logout or force-detach to make room for a new login). Mutations
 	// refuse to operate on a detached presence; the session command loop

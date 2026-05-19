@@ -154,11 +154,13 @@ func (h *Handler) attachToWorld(ctx context.Context, s *Session) *worldcmd.Handl
 	s.playerID = playerID
 
 	pres := &world.Presence{
-		PlayerID:  playerID,
-		Account:   s.account,
-		Write:     s.writeString,
-		Log:       s.log,
-		SessionID: s.id,
+		PlayerID:   playerID,
+		Account:    s.account,
+		Write:      s.writeString,
+		Log:        s.log,
+		SessionID:  s.id,
+		TermWidth:  s.caps.Width,
+		TermHeight: s.caps.Height,
 	}
 	if _, err := h.World.Attach(pres); err != nil {
 		if err == world.ErrAlreadyAttached {

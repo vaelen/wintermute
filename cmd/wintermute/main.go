@@ -198,6 +198,12 @@ func run(cfgPath string) error {
 		case engage.KindMenuTerminal:
 			mh := menu.NewHandler(host, closeBroadcast)
 			mh.SetDeps(buildTerminalDeps(ctx, w, authStore, mailSvc, boardsSvc, filesSvc, cfg))
+			// Size the frame to the client's negotiated terminal width.
+			// Clients without NAWS (TermWidth == 0) keep menu.DefaultWidth;
+			// the renderer clamps to [MinWidth, MaxWidth] on render.
+			if presence.TermWidth > 0 {
+				mh.SetWidth(presence.TermWidth)
+			}
 			mh.SetDisengage(func() {
 				if sb != nil {
 					engage.CloseForSession(engageReg, sb, engage.CloseVoluntary)
