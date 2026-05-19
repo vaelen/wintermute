@@ -74,8 +74,12 @@ const (
 
 	minUsernameLen = 2
 	maxUsernameLen = 32
-	minPasswordLen = 6
 )
+
+// MinPasswordLen is the minimum length enforced by Create and
+// ChangePassword. Exported so the forced-change prompt in session can
+// render a length hint without duplicating the constant.
+const MinPasswordLen = 6
 
 // Store is the auth-layer view of the accounts table.
 type Store struct {
@@ -116,7 +120,7 @@ func (s *Store) Create(ctx context.Context, username, password string, level Acc
 	if !validUsername(username) {
 		return nil, ErrInvalidUsername
 	}
-	if len(password) < minPasswordLen {
+	if len(password) < MinPasswordLen {
 		return nil, ErrPasswordTooShort
 	}
 	hash, err := hashPassword(password)
@@ -154,20 +158,35 @@ func (s *Store) Create(ctx context.Context, username, password string, level Acc
 	return acc, nil
 }
 
+// LoginResult is what Login returns on success. MustChangePassword is
+// true when the credential that matched was a reset token rather than
+// the stored password — the caller is expected to gate the session on
+// a forced password-change flow before any further interaction.
+type LoginResult struct {
+	Account            *Account
+	MustChangePassword bool
+}
+
 // Login verifies the password and returns the account on success.
 // Returns ErrInvalidCredentials for both unknown users and bad passwords,
-// to avoid leaking which is which.
-func (s *Store) Login(ctx context.Context, username, password string) (*Account, error) {
+// to avoid leaking which is which. If the password is wrong but an
+// outstanding reset token matches (and has not expired), the login
+// succeeds with MustChangePassword=true and the reset row is left in
+// place — only a successful ChangePassword clears it.
+func (s *Store) Login(ctx context.Context, username, password string) (*LoginResult, error) {
 	var (
-		id          int64
-		hash        string
-		accessLevel string
+		id             int64
+		hash           string
+		accessLevel    string
+		resetHash      sql.NullString
+		resetExpiresAt sql.NullInt64
 	)
 	row := s.db.Read().QueryRowContext(ctx,
-		`SELECT id, password_hash, access_level FROM accounts WHERE username = ?`,
+		`SELECT id, password_hash, access_level, reset_hash, reset_expires_at
+		   FROM accounts WHERE username = ?`,
 		username,
 	)
-	if err := row.Scan(&id, &hash, &accessLevel); err != nil {
+	if err := row.Scan(&id, &hash, &accessLevel, &resetHash, &resetExpiresAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Run a dummy verify so timing leaks less about whether the
 			// user exists. The result is discarded.
@@ -180,10 +199,39 @@ func (s *Store) Login(ctx context.Context, username, password string) (*Account,
 	if err != nil {
 		return nil, fmt.Errorf("auth: verify: %w", err)
 	}
-	if !ok {
+	if ok {
+		acc, err := s.GetByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return &LoginResult{Account: acc}, nil
+	}
+	// Password mismatch: try the reset token, if any. The dummy verify
+	// on the unknown-user path above already burns one hash; the reset
+	// path burns a second. Both branches do at most two argon2 calls
+	// per attempt, so the timing differential between them is bounded.
+	if !resetHash.Valid || !resetExpiresAt.Valid {
 		return nil, ErrInvalidCredentials
 	}
-	return s.GetByID(ctx, id)
+	if time.Now().Unix() > resetExpiresAt.Int64 {
+		return nil, ErrInvalidCredentials
+	}
+	canon := normalizeResetToken(password)
+	if canon == "" {
+		return nil, ErrInvalidCredentials
+	}
+	tokenOK, err := verifyPassword(resetHash.String, canon)
+	if err != nil {
+		return nil, fmt.Errorf("auth: verify reset: %w", err)
+	}
+	if !tokenOK {
+		return nil, ErrInvalidCredentials
+	}
+	acc, err := s.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &LoginResult{Account: acc, MustChangePassword: true}, nil
 }
 
 // Touch updates last_login_at for the given account.

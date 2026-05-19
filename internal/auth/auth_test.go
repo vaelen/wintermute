@@ -74,8 +74,11 @@ func TestCreateAndLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	if got.ID != acc.ID {
-		t.Errorf("Login ID = %d, want %d", got.ID, acc.ID)
+	if got.Account.ID != acc.ID {
+		t.Errorf("Login ID = %d, want %d", got.Account.ID, acc.ID)
+	}
+	if got.MustChangePassword {
+		t.Errorf("MustChangePassword = true after password login")
 	}
 }
 

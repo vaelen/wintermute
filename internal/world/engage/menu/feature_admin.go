@@ -186,49 +186,63 @@ func (s adminUserView) render(h *Handler, _ *engage.Participant) string {
 		Row{Label: "Height:      " + intPtrOrDash(acc.TerminalHeight)},
 		Row{Blank: true},
 	)
-	for i, t := range userViewTransitions(acc.AccessLevel) {
+	for i, a := range userViewActions(acc.AccessLevel) {
 		rows = append(rows, Row{
 			Selector: fmt.Sprintf("%d)", i+1),
-			Label:    t.label,
+			Label:    a.label,
 		})
 	}
 	rows = append(rows, Row{Selector: "B)", Label: "Back"}, Row{Blank: true})
 	return frame(h, "admin — User", rows) + "Select: "
 }
 
-// userViewTransition is one (label, target-level) pair offered on the
-// user-view screen. The set varies by the target's current level so we
-// never render a transition that's a no-op.
-type userViewTransition struct {
+// userViewActionKind tags an admin-menu action on the user-view screen.
+type userViewActionKind int
+
+const (
+	userActionSetTier userViewActionKind = iota
+	userActionResetPassword
+)
+
+// userViewAction is one entry rendered on the user-view screen. Tier
+// transitions carry the target level; the reset-password action ignores
+// level and is dispatched purely by kind.
+type userViewAction struct {
 	label string
+	kind  userViewActionKind
 	level auth.AccessLevel
 }
 
-// userViewTransitions returns the access-level changes the admin can
-// apply to a target at the given current level. Numbered selectors are
-// used in the rendered menu (not single letters) to avoid colliding
+// userViewActions returns the ordered list of actions an admin may take
+// on a target at the given current level. Tier transitions come first
+// so their selector indices stay stable as features are added below.
+// Numbered selectors are used (not single letters) to avoid colliding
 // with pagination keys in the parent users-list state — N/P move
 // between pages there; reflex-typing "p" should never escalate a
 // target to admin one screen deeper.
-func userViewTransitions(current auth.AccessLevel) []userViewTransition {
+func userViewActions(current auth.AccessLevel) []userViewAction {
+	var tiers []userViewAction
 	switch current {
 	case auth.AccessPlayer:
-		return []userViewTransition{
-			{"Promote to builder", auth.AccessBuilder},
-			{"Promote to admin", auth.AccessAdmin},
+		tiers = []userViewAction{
+			{"Promote to builder", userActionSetTier, auth.AccessBuilder},
+			{"Promote to admin", userActionSetTier, auth.AccessAdmin},
 		}
 	case auth.AccessBuilder:
-		return []userViewTransition{
-			{"Demote to player", auth.AccessPlayer},
-			{"Promote to admin", auth.AccessAdmin},
+		tiers = []userViewAction{
+			{"Demote to player", userActionSetTier, auth.AccessPlayer},
+			{"Promote to admin", userActionSetTier, auth.AccessAdmin},
 		}
 	case auth.AccessAdmin:
-		return []userViewTransition{
-			{"Demote to player", auth.AccessPlayer},
-			{"Demote to builder", auth.AccessBuilder},
+		tiers = []userViewAction{
+			{"Demote to player", userActionSetTier, auth.AccessPlayer},
+			{"Demote to builder", userActionSetTier, auth.AccessBuilder},
 		}
 	}
-	return nil
+	return append(tiers, userViewAction{
+		label: "Reset password",
+		kind:  userActionResetPassword,
+	})
 }
 
 func (s adminUserView) handle(h *Handler, p *engage.Participant, line string) {
@@ -251,30 +265,129 @@ func (s adminUserView) handle(h *Handler, p *engage.Participant, line string) {
 		h.redraw(p)
 		return
 	}
+	actions := userViewActions(target.AccessLevel)
+	n, perr := strconv.Atoi(low)
+	if perr != nil || n < 1 || n > len(actions) {
+		h.redraw(p)
+		return
+	}
+	action := actions[n-1]
 	actor, _ := h.accountFor(p)
 	if actor != nil && actor.ID == target.ID {
 		h.redraw(p)
-		_ = p.Write("Cannot change your own access level. Ask another admin.\r\n")
+		switch action.kind {
+		case userActionResetPassword:
+			_ = p.Write("Cannot reset your own password. Ask another admin.\r\n")
+		default:
+			_ = p.Write("Cannot change your own access level. Ask another admin.\r\n")
+		}
 		return
 	}
-	choices := userViewTransitions(target.AccessLevel)
-	n, perr := strconv.Atoi(low)
-	if perr != nil || n < 1 || n > len(choices) {
+	switch action.kind {
+	case userActionSetTier:
+		if action.level == target.AccessLevel {
+			h.redraw(p)
+			return
+		}
+		if err := d.Auth.SetAccessLevel(h.ctx(), target.ID, action.level); err != nil {
+			_ = p.Write(fmt.Sprintf("error: %v\r\n", err))
+			h.redraw(p)
+			return
+		}
+		adminAudit(h, p, "set_access_level", target.Username, "level", string(action.level))
+		h.redraw(p)
+	case userActionResetPassword:
+		s.issueReset(h, p, target)
+	}
+}
+
+// issueReset generates a fresh password-reset token for target, sends
+// the audit mail (best-effort), and transitions to the reveal screen
+// that shows the plaintext once. The plaintext is never echoed into
+// the audit log or the mail body — only the admin's terminal sees it.
+func (adminUserView) issueReset(h *Handler, p *engage.Participant, target *auth.Account) {
+	d := getDeps(h)
+	if d == nil || d.Auth == nil {
 		h.redraw(p)
 		return
 	}
-	newLevel := choices[n-1].level
-	if newLevel == target.AccessLevel {
-		h.redraw(p)
+	token, err := d.Auth.IssueReset(h.ctx(), target.ID, auth.ResetTokenTTL)
+	if err != nil {
+		_ = p.Write(fmt.Sprintf("Reset failed: %v\r\n", err))
 		return
 	}
-	if err := d.Auth.SetAccessLevel(h.ctx(), target.ID, newLevel); err != nil {
-		_ = p.Write(fmt.Sprintf("error: %v\r\n", err))
-		h.redraw(p)
+	actor, _ := h.accountFor(p)
+	actorName := ""
+	if actor != nil {
+		actorName = actor.Username
+	}
+	adminAudit(h, p, "password_reset_issued", target.Username,
+		"expires_at", time.Now().Add(auth.ResetTokenTTL).Unix())
+	// Best-effort audit mail. A missing or failing mail service must
+	// not block the issuance — the admin still sees the token on
+	// screen and can relay it out of band.
+	if d.Mail != nil {
+		subject := fmt.Sprintf("Password reset by %s", coalesce(actorName, "an administrator"))
+		body := fmt.Sprintf(
+			"An administrator (%s) has issued a one-time password reset for your account.\r\n"+
+				"The token is valid for %d hours; if you did not request this, contact an administrator immediately.\r\n",
+			coalesce(actorName, "unknown"),
+			int(auth.ResetTokenTTL/time.Hour),
+		)
+		if _, mailErr := d.Mail.SendFromSystem(h.ctx(), target.Username, subject, body); mailErr != nil && d.Logger != nil {
+			d.Logger.Warn("password_reset_mail_failed",
+				"actor", actorName, "target", target.Username, "err", mailErr)
+		}
+	}
+	h.transition(p, adminUserResetIssued{id: target.ID, username: target.Username, token: token})
+}
+
+// adminUserResetIssued reveals a freshly issued reset token to the
+// admin. The plaintext is held in memory only for the lifetime of this
+// state; navigating back to the user view drops it.
+type adminUserResetIssued struct {
+	id       int64
+	username string
+	token    string
+}
+
+func (s adminUserResetIssued) render(h *Handler, _ *engage.Participant) string {
+	rows := []Row{
+		{Blank: true},
+		{Label: "Password reset issued for " + s.username + "."},
+		{Blank: true},
+		{Label: "One-time token (valid " + strconv.Itoa(int(auth.ResetTokenTTL/time.Hour)) + " hours):"},
+		{Label: "    " + s.token},
+		{Blank: true},
+		{Label: "Relay this to the user out of band. It will not be shown again,"},
+		{Label: "and a notification mail has been sent (no token in the body)."},
+		{Blank: true},
+		{Selector: "B)", Label: "Back"},
+		{Blank: true},
+	}
+	return frame(h, "admin — User — Reset", rows) + "Select: "
+}
+
+func (s adminUserResetIssued) handle(h *Handler, p *engage.Participant, line string) {
+	low := strings.ToLower(strings.TrimSpace(line))
+	switch low {
+	case "", "b", "back", "..":
+		h.transition(p, adminUserView{id: s.id})
 		return
 	}
-	adminAudit(h, p, "set_access_level", target.Username, "level", string(newLevel))
 	h.redraw(p)
+}
+
+// coalesce returns the first non-empty argument, or "" if all are empty.
+// Local helper for assembling mail subjects/bodies when the actor name
+// may legitimately be unset (test paths without an authenticated admin).
+func coalesce(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

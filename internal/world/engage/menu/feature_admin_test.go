@@ -6,9 +6,11 @@ package menu
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"io"
 	"log/slog"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -254,6 +256,83 @@ func TestAdmin_users_selfPromote_refused(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "Cannot change your own access level") {
 		t.Errorf("expected self-change refusal message: %s", buf.String())
+	}
+}
+
+func TestAdmin_users_resetPassword_issuesTokenAndMail(t *testing.T) {
+	f := setupAdmin(t)
+	h := newAdminHandler(t, f, nil)
+	p, buf := enterAdmin(t, h)
+	h.Handle(p, "1") // Users
+	buf.Reset()
+	h.Handle(p, "1") // alice
+	if !strings.Contains(buf.String(), "Reset password") {
+		t.Fatalf("user view missing Reset password action: %s", buf.String())
+	}
+	buf.Reset()
+	// Alice is a player: 1) Promote to builder, 2) Promote to admin,
+	// 3) Reset password. Pick 3.
+	h.Handle(p, "3")
+	out := buf.String()
+	if !strings.Contains(out, "Password reset issued for alice") {
+		t.Errorf("reveal screen missing summary: %s", out)
+	}
+	// The token is four hyphen-joined lowercase words; we don't pin the
+	// value, just the shape. Verify it appears on screen.
+	if !regexp.MustCompile(`[a-z]+-[a-z]+-[a-z]+-[a-z]+`).MatchString(out) {
+		t.Errorf("reveal screen missing four-word token: %s", out)
+	}
+	// Audit logged.
+	if !strings.Contains(f.audit.String(), "action=password_reset_issued") {
+		t.Errorf("audit log missing password_reset_issued: %s", f.audit.String())
+	}
+	if !strings.Contains(f.audit.String(), "target=alice") {
+		t.Errorf("audit log missing target=alice: %s", f.audit.String())
+	}
+	// Alice received a system mail; the token must NOT appear in the body.
+	box, err := f.mail.Inbox(context.Background(), f.player.ID)
+	if err != nil {
+		t.Fatalf("Inbox: %v", err)
+	}
+	if len(box) != 1 {
+		t.Fatalf("len(inbox) = %d, want 1", len(box))
+	}
+	msg, err := f.mail.Read(context.Background(), box[0].ID, f.player.ID)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if !strings.Contains(msg.Subject, "Password reset by root") {
+		t.Errorf("subject = %q, want it to mention root", msg.Subject)
+	}
+	for _, word := range regexp.MustCompile(`([a-z]+-[a-z]+-[a-z]+-[a-z]+)`).FindStringSubmatch(out) {
+		if strings.Contains(msg.Body, word) {
+			t.Errorf("mail body leaked token %q: %s", word, msg.Body)
+		}
+	}
+}
+
+func TestAdmin_users_resetPassword_selfRefused(t *testing.T) {
+	f := setupAdmin(t)
+	h := newAdminHandler(t, f, nil)
+	p, buf := enterAdmin(t, h)
+	h.Handle(p, "1") // Users
+	h.Handle(p, "2") // root
+	buf.Reset()
+	// Admin view: 1) Demote to player, 2) Demote to builder,
+	// 3) Reset password. Pick 3 against self.
+	h.Handle(p, "3")
+	if !strings.Contains(buf.String(), "Cannot reset your own password") {
+		t.Errorf("expected self-reset refusal: %s", buf.String())
+	}
+	got, _ := f.auth.GetByID(context.Background(), f.admin.ID)
+	// Confirm no reset row was written for root.
+	var resetHash sql.NullString
+	if err := f.db.Read().QueryRowContext(context.Background(),
+		`SELECT reset_hash FROM accounts WHERE id = ?`, got.ID).Scan(&resetHash); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if resetHash.Valid {
+		t.Errorf("self-reset wrote a reset_hash; expected NULL")
 	}
 }
 
