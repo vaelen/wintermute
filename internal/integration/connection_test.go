@@ -241,10 +241,11 @@ func TestRawTCPFullFlow(t *testing.T) {
 
 	// Verify the account was created and saved prefs reflect the latest
 	// terminal command (ascii + DEC lines on).
-	acc, err := srv.authS.Login(context.Background(), "alice", "hunter2")
+	res, err := srv.authS.Login(context.Background(), "alice", "hunter2")
 	if err != nil {
 		t.Fatalf("post-test login: %v", err)
 	}
+	acc := res.Account
 	if acc.TerminalEncoding == nil || *acc.TerminalEncoding != "ascii" {
 		t.Errorf("TerminalEncoding = %v, want ascii", acc.TerminalEncoding)
 	}

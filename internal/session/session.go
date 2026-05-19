@@ -39,6 +39,12 @@ type Session struct {
 	auth    *auth.Store
 	world   *world.World
 
+	// mustChangePassword is set by login() when the credential that
+	// matched was a reset token rather than the stored password. When
+	// true, Handle gates the post-login flow on forcePasswordChange
+	// before any normal interaction starts.
+	mustChangePassword bool
+
 	// writeMu serializes writes to the connection. The world layer may
 	// invoke our writeString callback from a goroutine that is not the
 	// session goroutine (e.g. when another player broadcasts into the

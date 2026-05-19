@@ -229,6 +229,20 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 		s.log.Warn("save prefs failed", "err", err)
 	}
 
+	// --- Forced password change (post-reset redemption) -------------------
+	// Runs before MOTD so a redeemed reset cannot bypass the prompt by
+	// disconnecting and reconnecting (the reset row is still intact and
+	// the same flow re-fires). Prefs and saved-prefs application stay
+	// above this so the prompts render in the user's chosen encoding.
+	if s.mustChangePassword {
+		if err := h.forcePasswordChange(ctx, s); err != nil {
+			if !errors.Is(err, io.EOF) {
+				s.log.Info("forced password change failed", "err", err)
+			}
+			return
+		}
+	}
+
 	// --- MOTD -------------------------------------------------------------
 	if h.MOTD != "" {
 		_ = s.writeString(h.MOTD + "\r\n")

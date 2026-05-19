@@ -53,7 +53,7 @@ func (h *Handler) login(ctx context.Context, s *Session) error {
 		// Newline after password (we suppressed echo, so the client never saw one).
 		_ = s.writeString("\r\n")
 
-		acc, err := s.auth.Login(ctx, username, password)
+		res, err := s.auth.Login(ctx, username, password)
 		if err != nil {
 			if errors.Is(err, auth.ErrInvalidCredentials) {
 				_ = s.writeString("Invalid username or password.\r\n")
@@ -61,12 +61,13 @@ func (h *Handler) login(ctx context.Context, s *Session) error {
 			}
 			return err
 		}
-		if err := s.auth.Touch(ctx, acc.ID); err != nil {
+		if err := s.auth.Touch(ctx, res.Account.ID); err != nil {
 			s.log.Warn("touch failed", "err", err)
 		}
-		s.account = acc
-		s.log = s.log.With("user", acc.Username)
-		_ = s.writef("\r\nWelcome, %s.\r\n", acc.Username)
+		s.account = res.Account
+		s.mustChangePassword = res.MustChangePassword
+		s.log = s.log.With("user", res.Account.Username)
+		_ = s.writef("\r\nWelcome, %s.\r\n", res.Account.Username)
 		return nil
 	}
 }
@@ -101,6 +102,67 @@ func (h *Handler) createAccount(ctx context.Context, s *Session) error {
 	}
 	_ = s.writef("Account %q created.\r\n", username)
 	return nil
+}
+
+// forcePasswordChange runs the minimal sub-flow that gates a session
+// whose login succeeded via a reset token. The user is prompted twice
+// for a new password (length-validated, matching-required); on success
+// auth.ChangePassword updates the row and clears the reset_hash /
+// reset_expires_at columns. Disconnect or repeated failure returns an
+// error so Handle can close the session — the reset row stays intact
+// so the user can retry next login until expiry.
+func (h *Handler) forcePasswordChange(ctx context.Context, s *Session) error {
+	if s.account == nil {
+		return errors.New("session: forcePasswordChange: no account")
+	}
+	_ = s.writeString("\r\nA password reset is outstanding for this account.\r\n")
+	_ = s.writeString("Please choose a new password before continuing.\r\n\r\n")
+	for {
+		first, err := h.promptPassword(s, "New password: ")
+		if err != nil {
+			return err
+		}
+		if len(first) < auth.MinPasswordLen {
+			_ = s.writef("Password must be at least %d characters.\r\n\r\n", auth.MinPasswordLen)
+			continue
+		}
+		second, err := h.promptPassword(s, "Confirm new password: ")
+		if err != nil {
+			return err
+		}
+		if first != second {
+			_ = s.writeString("Passwords do not match. Try again.\r\n\r\n")
+			continue
+		}
+		if err := s.auth.ChangePassword(ctx, s.account.ID, first); err != nil {
+			if errors.Is(err, auth.ErrPasswordTooShort) {
+				_ = s.writef("Password must be at least %d characters.\r\n\r\n", auth.MinPasswordLen)
+				continue
+			}
+			return err
+		}
+		s.mustChangePassword = false
+		s.log.Info("password_reset_redeemed", "actor", s.account.Username)
+		_ = s.writeString("\r\nPassword updated. Continuing.\r\n")
+		return nil
+	}
+}
+
+// promptPassword writes the prompt, suppresses client echo, reads a
+// line, and restores the prior echo state. Empty input is returned as
+// "" so the caller's length check fires the same way as for a short
+// password. A read error with no buffered data is propagated.
+func (h *Handler) promptPassword(s *Session, prompt string) (string, error) {
+	_ = s.writeString(prompt)
+	prevEcho := s.echoOn()
+	_ = s.setEcho(true)
+	line, err := s.readLine()
+	_ = s.setEcho(!prevEcho)
+	_ = s.writeString("\r\n")
+	if err != nil && line == "" {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
 }
 
 // savePrefs writes the session's current Capabilities back to the

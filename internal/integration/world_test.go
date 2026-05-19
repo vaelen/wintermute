@@ -129,6 +129,26 @@ func (c *client) string() string {
 	return c.seen.String()
 }
 
+// loginExisting runs the pre-prompt + encoding flow and logs into an
+// already-created account with the given credentials. Returns once the
+// "Welcome, <username>." line is seen — the caller is then responsible
+// for any further sub-flow (e.g. forced password change) before the
+// first prompt.
+func (c *client) loginExisting(username, password string) {
+	c.t.Helper()
+	c.expect("PRESS ENTER TO BEGIN", 5*time.Second)
+	c.send("\r\n")
+	c.expect("ENABLE ECHO", 5*time.Second)
+	c.send("\r\n")
+	c.expect("TERMINAL TYPE:", 5*time.Second)
+	c.send("u\r\n")
+	c.expect("Username", 5*time.Second)
+	c.send(username + "\r\n")
+	c.expect("Password", 5*time.Second)
+	c.send(password + "\r\n")
+	c.expect("Welcome, "+username, 5*time.Second)
+}
+
 // loginNew runs the new-account flow up to the post-login prompt, choosing
 // UTF-8 at the encoding prompt.
 func (c *client) loginNew(username, password string) {
