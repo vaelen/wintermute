@@ -173,6 +173,11 @@ type LoginResult struct {
 // outstanding reset token matches (and has not expired), the login
 // succeeds with MustChangePassword=true and the reset row is left in
 // place — only a successful ChangePassword clears it.
+//
+// All invalid-credential paths — unknown user, known-no-reset,
+// known-with-expired-reset, known-with-wrong-token — run exactly two
+// argon2 verifies, so request timing does not distinguish "does this
+// user exist?" from "does this user have an outstanding reset?".
 func (s *Store) Login(ctx context.Context, username, password string) (*LoginResult, error) {
 	var (
 		id             int64
@@ -186,52 +191,54 @@ func (s *Store) Login(ctx context.Context, username, password string) (*LoginRes
 		   FROM accounts WHERE username = ?`,
 		username,
 	)
+	knownUser := true
 	if err := row.Scan(&id, &hash, &accessLevel, &resetHash, &resetExpiresAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// Run a dummy verify so timing leaks less about whether the
-			// user exists. The result is discarded.
-			_, _ = verifyPassword(dummyHash, password)
-			return nil, ErrInvalidCredentials
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("auth: login: %w", err)
 		}
-		return nil, fmt.Errorf("auth: login: %w", err)
+		knownUser = false
+		hash = dummyHash
 	}
-	ok, err := verifyPassword(hash, password)
+	passOK, err := verifyPassword(hash, password)
 	if err != nil {
 		return nil, fmt.Errorf("auth: verify: %w", err)
 	}
-	if ok {
+	if passOK && knownUser {
 		acc, err := s.GetByID(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		return &LoginResult{Account: acc}, nil
 	}
-	// Password mismatch: try the reset token, if any. The dummy verify
-	// on the unknown-user path above already burns one hash; the reset
-	// path burns a second. Both branches do at most two argon2 calls
-	// per attempt, so the timing differential between them is bounded.
-	if !resetHash.Valid || !resetExpiresAt.Valid {
-		return nil, ErrInvalidCredentials
+	// All remaining paths (unknown user, wrong password, expired reset,
+	// canon-empty, wrong-token) run a second verify against either the
+	// real reset hash or the dummy hash, so the argon2 call count is
+	// constant per request.
+	resetEligible := knownUser &&
+		resetHash.Valid && resetExpiresAt.Valid &&
+		time.Now().Unix() <= resetExpiresAt.Int64
+	tokenTarget := dummyHash
+	tokenInput := password
+	if resetEligible {
+		if canon := normalizeResetToken(password); canon != "" {
+			tokenTarget = resetHash.String
+			tokenInput = canon
+		} else {
+			resetEligible = false
+		}
 	}
-	if time.Now().Unix() > resetExpiresAt.Int64 {
-		return nil, ErrInvalidCredentials
-	}
-	canon := normalizeResetToken(password)
-	if canon == "" {
-		return nil, ErrInvalidCredentials
-	}
-	tokenOK, err := verifyPassword(resetHash.String, canon)
+	tokenOK, err := verifyPassword(tokenTarget, tokenInput)
 	if err != nil {
 		return nil, fmt.Errorf("auth: verify reset: %w", err)
 	}
-	if !tokenOK {
-		return nil, ErrInvalidCredentials
+	if resetEligible && tokenOK {
+		acc, err := s.GetByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		return &LoginResult{Account: acc, MustChangePassword: true}, nil
 	}
-	acc, err := s.GetByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	return &LoginResult{Account: acc, MustChangePassword: true}, nil
+	return nil, ErrInvalidCredentials
 }
 
 // Touch updates last_login_at for the given account.

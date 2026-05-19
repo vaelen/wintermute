@@ -610,8 +610,12 @@ func TestAdminMenu_endToEnd(t *testing.T) {
 	// Sorted by username: alice (1), bob (2).
 	alice.send("2\r\n")
 	alice.expect("Username:    bob", 5*time.Second)
-	// Player view: 1) Promote to builder, 2) Promote to admin.
+	// User view: 1) Set access level, 2) Reset password. Open the
+	// access-level submenu.
 	alice.send("1\r\n")
+	alice.expect("Set access level", 5*time.Second)
+	// Submenu: 1) Player [current], 2) Builder, 3) Admin. Pick 2.
+	alice.send("2\r\n")
 	alice.drainFor(200 * time.Millisecond)
 	bob, err := srv.authS.GetByUsername(context.Background(), "bob")
 	if err != nil {
@@ -752,9 +756,8 @@ func TestAdminMenu_passwordReset_endToEnd(t *testing.T) {
 	// Sorted: alice (1), bob (2).
 	alice.send("2\r\n")
 	alice.expect("Username:    bob", 5*time.Second)
-	// Player view actions: 1) Promote to builder, 2) Promote to admin,
-	// 3) Reset password.
-	alice.send("3\r\n")
+	// User view actions: 1) Set access level, 2) Reset password.
+	alice.send("2\r\n")
 	alice.expect("Password reset issued for bob", 5*time.Second)
 	alice.expect("Relay this to the user", 5*time.Second)
 	alice.drainFor(200 * time.Millisecond)
@@ -841,16 +844,17 @@ func TestAdminMenu_passwordReset_endToEnd(t *testing.T) {
 }
 
 // extractResetToken pulls the four-word token off the reset-issued
-// admin screen. The reveal line is rendered as `│    token       │`
-// inside the frame between the "One-time token" header and the "Relay
-// this" instruction. Returns "" if no token is found.
+// admin screen. The reveal renders the frame, then the token on a
+// plain line (so a narrow terminal cannot truncate it), then the
+// "Relay this" instructions. We scan the segment between the frame's
+// bottom border ("└") and "Relay this".
 func extractResetToken(t *testing.T, output string) string {
 	t.Helper()
-	start := strings.Index(output, "One-time token")
-	if start < 0 {
+	frameEnd := strings.LastIndex(output, "└")
+	if frameEnd < 0 {
 		return ""
 	}
-	tail := output[start:]
+	tail := output[frameEnd:]
 	end := strings.Index(tail, "Relay this")
 	if end > 0 {
 		tail = tail[:end]

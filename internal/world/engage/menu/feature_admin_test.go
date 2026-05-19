@@ -215,9 +215,17 @@ func TestAdmin_users_promote_changesAccessLevel(t *testing.T) {
 		t.Fatalf("did not land on alice's view: %s", buf.String())
 	}
 	buf.Reset()
-	// Player view offers numbered transitions: 1) Promote to builder,
-	// 2) Promote to admin. Pick 1.
+	// User view: 1) Set access level, 2) Reset password. Open the
+	// access-level submenu.
 	h.Handle(p, "1")
+	if !strings.Contains(buf.String(), "Set access level") {
+		t.Fatalf("did not land on Set access level submenu: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "[current]") {
+		t.Errorf("submenu missing [current] marker: %s", buf.String())
+	}
+	// Submenu: 1) Player [current], 2) Builder, 3) Admin. Pick 2.
+	h.Handle(p, "2")
 	got, err := f.auth.GetByID(context.Background(), f.player.ID)
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)
@@ -233,6 +241,25 @@ func TestAdmin_users_promote_changesAccessLevel(t *testing.T) {
 	}
 }
 
+func TestAdmin_users_setAccessLevel_sameLevelNoOp(t *testing.T) {
+	f := setupAdmin(t)
+	h := newAdminHandler(t, f, nil)
+	p, _ := enterAdmin(t, h)
+	h.Handle(p, "1") // Users
+	h.Handle(p, "1") // alice (player)
+	h.Handle(p, "1") // Set access level
+	// Picking the level the target already holds must not log an audit
+	// or change the row.
+	h.Handle(p, "1") // Player [current]
+	if strings.Contains(f.audit.String(), "action=set_access_level") {
+		t.Errorf("no-op pick wrote an audit row: %s", f.audit.String())
+	}
+	got, _ := f.auth.GetByID(context.Background(), f.player.ID)
+	if got.AccessLevel != auth.AccessPlayer {
+		t.Errorf("AccessLevel = %q, want player", got.AccessLevel)
+	}
+}
+
 func TestAdmin_users_selfPromote_refused(t *testing.T) {
 	f := setupAdmin(t)
 	h := newAdminHandler(t, f, nil)
@@ -244,9 +271,8 @@ func TestAdmin_users_selfPromote_refused(t *testing.T) {
 		t.Fatalf("did not land on root's view: %s", buf.String())
 	}
 	buf.Reset()
-	// Admin view offers 1) Demote to player, 2) Demote to builder. Pick
-	// 2 to try and demote yourself — should be refused.
-	h.Handle(p, "2")
+	// User view: 1) Set access level (refused on self).
+	h.Handle(p, "1")
 	got, err := f.auth.GetByID(context.Background(), f.admin.ID)
 	if err != nil {
 		t.Fatalf("GetByID: %v", err)
@@ -270,16 +296,22 @@ func TestAdmin_users_resetPassword_issuesTokenAndMail(t *testing.T) {
 		t.Fatalf("user view missing Reset password action: %s", buf.String())
 	}
 	buf.Reset()
-	// Alice is a player: 1) Promote to builder, 2) Promote to admin,
-	// 3) Reset password. Pick 3.
-	h.Handle(p, "3")
+	// User view: 1) Set access level, 2) Reset password. Pick 2.
+	h.Handle(p, "2")
 	out := buf.String()
 	if !strings.Contains(out, "Password reset issued for alice") {
 		t.Errorf("reveal screen missing summary: %s", out)
 	}
+	// The reveal screen claims mail was sent (mailSent=true on this
+	// fixture, which wires a real Mail service).
+	if !strings.Contains(out, "A notification mail has also been sent") {
+		t.Errorf("reveal screen missing mail-sent confirmation: %s", out)
+	}
 	// The token is four hyphen-joined lowercase words; we don't pin the
-	// value, just the shape. Verify it appears on screen.
-	if !regexp.MustCompile(`[a-z]+-[a-z]+-[a-z]+-[a-z]+`).MatchString(out) {
+	// value, just the shape. Capture it for the token-leak check below.
+	tokenRe := regexp.MustCompile(`[a-z]+-[a-z]+-[a-z]+-[a-z]+`)
+	token := tokenRe.FindString(out)
+	if token == "" {
 		t.Errorf("reveal screen missing four-word token: %s", out)
 	}
 	// Audit logged.
@@ -289,7 +321,10 @@ func TestAdmin_users_resetPassword_issuesTokenAndMail(t *testing.T) {
 	if !strings.Contains(f.audit.String(), "target=alice") {
 		t.Errorf("audit log missing target=alice: %s", f.audit.String())
 	}
-	// Alice received a system mail; the token must NOT appear in the body.
+	// Alice received a system mail; the token must NOT appear in the body —
+	// neither as the full hyphenated string nor as any of its constituent
+	// words. The per-word check guards against a future refactor that
+	// might happen to break apart the token in the mail body.
 	box, err := f.mail.Inbox(context.Background(), f.player.ID)
 	if err != nil {
 		t.Fatalf("Inbox: %v", err)
@@ -304,9 +339,12 @@ func TestAdmin_users_resetPassword_issuesTokenAndMail(t *testing.T) {
 	if !strings.Contains(msg.Subject, "Password reset by root") {
 		t.Errorf("subject = %q, want it to mention root", msg.Subject)
 	}
-	for _, word := range regexp.MustCompile(`([a-z]+-[a-z]+-[a-z]+-[a-z]+)`).FindStringSubmatch(out) {
+	if strings.Contains(msg.Body, token) {
+		t.Errorf("mail body leaked full token %q: %s", token, msg.Body)
+	}
+	for _, word := range strings.Split(token, "-") {
 		if strings.Contains(msg.Body, word) {
-			t.Errorf("mail body leaked token %q: %s", word, msg.Body)
+			t.Errorf("mail body leaked token word %q: %s", word, msg.Body)
 		}
 	}
 }
@@ -318,9 +356,9 @@ func TestAdmin_users_resetPassword_selfRefused(t *testing.T) {
 	h.Handle(p, "1") // Users
 	h.Handle(p, "2") // root
 	buf.Reset()
-	// Admin view: 1) Demote to player, 2) Demote to builder,
-	// 3) Reset password. Pick 3 against self.
-	h.Handle(p, "3")
+	// User view: 1) Set access level, 2) Reset password. Pick 2 against
+	// self — should be refused.
+	h.Handle(p, "2")
 	if !strings.Contains(buf.String(), "Cannot reset your own password") {
 		t.Errorf("expected self-reset refusal: %s", buf.String())
 	}

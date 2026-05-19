@@ -186,7 +186,7 @@ func (s adminUserView) render(h *Handler, _ *engage.Participant) string {
 		Row{Label: "Height:      " + intPtrOrDash(acc.TerminalHeight)},
 		Row{Blank: true},
 	)
-	for i, a := range userViewActions(acc.AccessLevel) {
+	for i, a := range userViewActions() {
 		rows = append(rows, Row{
 			Selector: fmt.Sprintf("%d)", i+1),
 			Label:    a.label,
@@ -197,52 +197,35 @@ func (s adminUserView) render(h *Handler, _ *engage.Participant) string {
 }
 
 // userViewActionKind tags an admin-menu action on the user-view screen.
+// The selector → kind mapping is constant (does not depend on the
+// target's current state) so a concurrent admin's change can't flip
+// what the typed number means while the menu is on screen.
 type userViewActionKind int
 
 const (
-	userActionSetTier userViewActionKind = iota
+	userActionSetAccessLevel userViewActionKind = iota
 	userActionResetPassword
 )
 
-// userViewAction is one entry rendered on the user-view screen. Tier
-// transitions carry the target level; the reset-password action ignores
-// level and is dispatched purely by kind.
+// userViewAction is one entry rendered on the user-view screen.
 type userViewAction struct {
 	label string
 	kind  userViewActionKind
-	level auth.AccessLevel
 }
 
-// userViewActions returns the ordered list of actions an admin may take
-// on a target at the given current level. Tier transitions come first
-// so their selector indices stay stable as features are added below.
-// Numbered selectors are used (not single letters) to avoid colliding
-// with pagination keys in the parent users-list state — N/P move
-// between pages there; reflex-typing "p" should never escalate a
-// target to admin one screen deeper.
-func userViewActions(current auth.AccessLevel) []userViewAction {
-	var tiers []userViewAction
-	switch current {
-	case auth.AccessPlayer:
-		tiers = []userViewAction{
-			{"Promote to builder", userActionSetTier, auth.AccessBuilder},
-			{"Promote to admin", userActionSetTier, auth.AccessAdmin},
-		}
-	case auth.AccessBuilder:
-		tiers = []userViewAction{
-			{"Demote to player", userActionSetTier, auth.AccessPlayer},
-			{"Promote to admin", userActionSetTier, auth.AccessAdmin},
-		}
-	case auth.AccessAdmin:
-		tiers = []userViewAction{
-			{"Demote to player", userActionSetTier, auth.AccessPlayer},
-			{"Demote to builder", userActionSetTier, auth.AccessBuilder},
-		}
+// userViewActions returns the actions an admin may take on a target.
+// The list is fixed — opening "Set access level" leads to a submenu
+// whose own indices are stable, so an in-flight admin keystroke can
+// never be re-resolved to a different action because another admin
+// changed the target's level mid-render. Numbered selectors are used
+// (not single letters) to avoid colliding with pagination keys in the
+// parent users-list state — N/P move between pages there; reflex-typing
+// "p" should never escalate a target to admin one screen deeper.
+func userViewActions() []userViewAction {
+	return []userViewAction{
+		{label: "Set access level", kind: userActionSetAccessLevel},
+		{label: "Reset password", kind: userActionResetPassword},
 	}
-	return append(tiers, userViewAction{
-		label: "Reset password",
-		kind:  userActionResetPassword,
-	})
 }
 
 func (s adminUserView) handle(h *Handler, p *engage.Participant, line string) {
@@ -265,7 +248,7 @@ func (s adminUserView) handle(h *Handler, p *engage.Participant, line string) {
 		h.redraw(p)
 		return
 	}
-	actions := userViewActions(target.AccessLevel)
+	actions := userViewActions()
 	n, perr := strconv.Atoi(low)
 	if perr != nil || n < 1 || n > len(actions) {
 		h.redraw(p)
@@ -284,36 +267,137 @@ func (s adminUserView) handle(h *Handler, p *engage.Participant, line string) {
 		return
 	}
 	switch action.kind {
-	case userActionSetTier:
-		if action.level == target.AccessLevel {
-			h.redraw(p)
-			return
-		}
-		if err := d.Auth.SetAccessLevel(h.ctx(), target.ID, action.level); err != nil {
-			_ = p.Write(fmt.Sprintf("error: %v\r\n", err))
-			h.redraw(p)
-			return
-		}
-		adminAudit(h, p, "set_access_level", target.Username, "level", string(action.level))
-		h.redraw(p)
+	case userActionSetAccessLevel:
+		h.transition(p, adminUserSetAccessLevel{id: target.ID})
 	case userActionResetPassword:
 		s.issueReset(h, p, target)
 	}
+}
+
+// adminUserSetAccessLevel renders the three access levels with a
+// `[current]` marker on whichever one the target is on. The selector
+// → level mapping is fixed (1 → Player, 2 → Builder, 3 → Admin) so a
+// concurrent change by another admin cannot flip what the typed number
+// means. Picking the level the target already holds redraws silently
+// rather than emitting an audit row.
+type adminUserSetAccessLevel struct{ id int64 }
+
+// accessLevelChoices is the fixed-index list of levels offered on the
+// Set access level submenu. The order here IS the rendered order and
+// must stay stable across releases.
+var accessLevelChoices = []auth.AccessLevel{
+	auth.AccessPlayer,
+	auth.AccessBuilder,
+	auth.AccessAdmin,
+}
+
+func (s adminUserSetAccessLevel) render(h *Handler, _ *engage.Participant) string {
+	d := getDeps(h)
+	rows := []Row{{Blank: true}}
+	if d == nil || d.Auth == nil {
+		rows = append(rows,
+			Row{Label: "(auth service unavailable)"},
+			Row{Blank: true},
+			Row{Selector: "B)", Label: "Back"},
+			Row{Blank: true},
+		)
+		return frame(h, "admin — User — Set access level", rows)
+	}
+	target, err := d.Auth.GetByID(h.ctx(), s.id)
+	if err != nil {
+		rows = append(rows,
+			Row{Label: "(unable to load: " + err.Error() + ")"},
+			Row{Blank: true},
+			Row{Selector: "B)", Label: "Back"},
+			Row{Blank: true},
+		)
+		return frame(h, "admin — User — Set access level", rows)
+	}
+	rows = append(rows,
+		Row{Label: "Target: " + target.Username},
+		Row{Blank: true},
+	)
+	for i, lvl := range accessLevelChoices {
+		label := string(lvl)
+		if lvl == target.AccessLevel {
+			label += "    [current]"
+		}
+		rows = append(rows, Row{
+			Selector: fmt.Sprintf("%d)", i+1),
+			Label:    label,
+		})
+	}
+	rows = append(rows,
+		Row{Blank: true},
+		Row{Selector: "B)", Label: "Back"},
+		Row{Blank: true},
+	)
+	return frame(h, "admin — User — Set access level", rows) + "Select: "
+}
+
+func (s adminUserSetAccessLevel) handle(h *Handler, p *engage.Participant, line string) {
+	low := strings.ToLower(strings.TrimSpace(line))
+	switch low {
+	case "":
+		h.redraw(p)
+		return
+	case "b", "back", "..":
+		h.transition(p, adminUserView{id: s.id})
+		return
+	}
+	n, perr := strconv.Atoi(low)
+	if perr != nil || n < 1 || n > len(accessLevelChoices) {
+		h.redraw(p)
+		return
+	}
+	d := getDeps(h)
+	if d == nil || d.Auth == nil {
+		h.redraw(p)
+		return
+	}
+	target, err := d.Auth.GetByID(h.ctx(), s.id)
+	if err != nil {
+		h.redraw(p)
+		return
+	}
+	actor, _ := h.accountFor(p)
+	if actor != nil && actor.ID == target.ID {
+		h.redraw(p)
+		_ = p.Write("Cannot change your own access level. Ask another admin.\r\n")
+		return
+	}
+	newLevel := accessLevelChoices[n-1]
+	if newLevel == target.AccessLevel {
+		h.redraw(p)
+		return
+	}
+	if err := d.Auth.SetAccessLevel(h.ctx(), target.ID, newLevel); err != nil {
+		_ = p.Write(fmt.Sprintf("error: %v\r\n", err))
+		h.redraw(p)
+		return
+	}
+	adminAudit(h, p, "set_access_level", target.Username, "level", string(newLevel))
+	h.transition(p, adminUserView{id: s.id})
 }
 
 // issueReset generates a fresh password-reset token for target, sends
 // the audit mail (best-effort), and transitions to the reveal screen
 // that shows the plaintext once. The plaintext is never echoed into
 // the audit log or the mail body — only the admin's terminal sees it.
+// The reveal state records whether the mail actually delivered so the
+// confirmation row reflects ground truth rather than the optimistic
+// "mail sent" line we used to print unconditionally.
 func (adminUserView) issueReset(h *Handler, p *engage.Participant, target *auth.Account) {
 	d := getDeps(h)
 	if d == nil || d.Auth == nil {
+		_ = p.Write("Reset failed: auth service unavailable.\r\n")
 		h.redraw(p)
 		return
 	}
 	token, err := d.Auth.IssueReset(h.ctx(), target.ID, auth.ResetTokenTTL)
 	if err != nil {
 		_ = p.Write(fmt.Sprintf("Reset failed: %v\r\n", err))
+		h.redraw(p)
 		return
 	}
 	actor, _ := h.accountFor(p)
@@ -325,7 +409,9 @@ func (adminUserView) issueReset(h *Handler, p *engage.Participant, target *auth.
 		"expires_at", time.Now().Add(auth.ResetTokenTTL).Unix())
 	// Best-effort audit mail. A missing or failing mail service must
 	// not block the issuance — the admin still sees the token on
-	// screen and can relay it out of band.
+	// screen and can relay it out of band. mailSent reflects actual
+	// delivery so the reveal screen never overclaims.
+	mailSent := false
 	if d.Mail != nil {
 		subject := fmt.Sprintf("Password reset by %s", coalesce(actorName, "an administrator"))
 		body := fmt.Sprintf(
@@ -334,38 +420,67 @@ func (adminUserView) issueReset(h *Handler, p *engage.Participant, target *auth.
 			coalesce(actorName, "unknown"),
 			int(auth.ResetTokenTTL/time.Hour),
 		)
-		if _, mailErr := d.Mail.SendFromSystem(h.ctx(), target.Username, subject, body); mailErr != nil && d.Logger != nil {
-			d.Logger.Warn("password_reset_mail_failed",
-				"actor", actorName, "target", target.Username, "err", mailErr)
+		if _, mailErr := d.Mail.SendFromSystem(h.ctx(), target.Username, subject, body); mailErr != nil {
+			if d.Logger != nil {
+				d.Logger.Warn("password_reset_mail_failed",
+					"actor", actorName, "target", target.Username, "err", mailErr)
+			}
+		} else {
+			mailSent = true
 		}
 	}
-	h.transition(p, adminUserResetIssued{id: target.ID, username: target.Username, token: token})
+	h.transition(p, adminUserResetIssued{
+		id: target.ID, username: target.Username, token: token, mailSent: mailSent,
+	})
 }
 
 // adminUserResetIssued reveals a freshly issued reset token to the
 // admin. The plaintext is held in memory only for the lifetime of this
-// state; navigating back to the user view drops it.
+// state; navigating back to the user view drops it. mailSent gates
+// the "a notification mail has also been sent" line so the screen
+// does not claim a notification was sent when mail is unconfigured or
+// the send failed.
 type adminUserResetIssued struct {
 	id       int64
 	username string
 	token    string
+	mailSent bool
 }
 
 func (s adminUserResetIssued) render(h *Handler, _ *engage.Participant) string {
+	// The token line is rendered OUTSIDE the frame so a narrow terminal
+	// cannot truncate it. Four EFF "long" words plus three hyphens can
+	// be up to ~39 characters; with the frame's leading indent and
+	// right margin that exceeds the interior width on a 40-column
+	// terminal, and renderRow would silently chop letters off the end.
+	// Tokens are the one piece of output the admin absolutely must
+	// receive intact, so we sidestep the frame for that one line.
+	hours := strconv.Itoa(int(auth.ResetTokenTTL / time.Hour))
 	rows := []Row{
 		{Blank: true},
 		{Label: "Password reset issued for " + s.username + "."},
 		{Blank: true},
-		{Label: "One-time token (valid " + strconv.Itoa(int(auth.ResetTokenTTL/time.Hour)) + " hours):"},
-		{Label: "    " + s.token},
-		{Blank: true},
-		{Label: "Relay this to the user out of band. It will not be shown again,"},
-		{Label: "and a notification mail has been sent (no token in the body)."},
+		{Label: "Token (valid " + hours + " hours) is shown below."},
 		{Blank: true},
 		{Selector: "B)", Label: "Back"},
 		{Blank: true},
 	}
-	return frame(h, "admin — User — Reset", rows) + "Select: "
+	var b strings.Builder
+	b.WriteString(Frame{
+		Width: h.width0(),
+		Title: "admin — User — Reset",
+		Rows:  rows,
+	}.String())
+	b.WriteString("\r\n    ")
+	b.WriteString(s.token)
+	b.WriteString("\r\n\r\nRelay this to the user out of band. It will not be shown again.\r\n")
+	if s.mailSent {
+		b.WriteString("A notification mail has also been sent (no token in the body).\r\n")
+	} else {
+		b.WriteString("No notification mail was sent — deliver the token yourself.\r\n")
+	}
+	b.WriteString("\r\nSelect: ")
+	return b.String()
 }
 
 func (s adminUserResetIssued) handle(h *Handler, p *engage.Participant, line string) {
