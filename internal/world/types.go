@@ -99,12 +99,16 @@ type Presence struct {
 	// on disconnect.
 	SessionID string
 
-	// TermWidth and TermHeight are the negotiated terminal dimensions
-	// in cells, snapshotted from the session's term.Capabilities at
-	// attach time. Either may be 0 when the client did not negotiate
-	// NAWS; callers must clamp / fall back accordingly. Mid-session
-	// resize lands here via session.reconfigure.
-	TermWidth  int
+	// TermWidth is the negotiated terminal width in cells, snapshotted
+	// from the session's term.Capabilities at attach time. May be 0
+	// when the client did not negotiate NAWS; callers must clamp /
+	// fall back accordingly. Mid-session resize lands here via
+	// session.reconfigure.
+	TermWidth int
+
+	// TermHeight is the negotiated terminal height in cells. Available
+	// for use by height-sensitive views. Same NAWS / 0-fallback /
+	// reconfigure semantics as TermWidth.
 	TermHeight int
 
 	// TermType is the raw TTYPE string the client reported via telnet

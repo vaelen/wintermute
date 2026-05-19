@@ -321,8 +321,14 @@ func startMenuEngageServer(t *testing.T) *testServer {
 func TestMenuEngagement_rendersAtNAWSWidth(t *testing.T) {
 	srv := startMenuEngageServer(t)
 	alice := dialClient(t, srv)
-	// Send IAC WILL NAWS, then IAC SB NAWS 0 72 0 24 IAC SE.
-	// Telnet bytes: IAC=255 WILL=251 SB=250 SE=240; NAWS option=31.
+	// Wait for the PRESS ENTER prompt so the server has sent its
+	// initial IAC DO NAWS offer before we reply with WILL/SB — per
+	// RFC 1073 §5 the subnegotiation is only meaningful after the
+	// DO/WILL handshake.
+	alice.expect("PRESS ENTER TO BEGIN", 5*time.Second)
+	// IAC=255 WILL=251 SB=250 SE=240; NAWS option=31. Send WILL+SB
+	// concatenated with the Enter keystroke so the conn parser
+	// consumes the IAC sequences before readRawUntilNewline returns.
 	naws := []byte{
 		255, 251, 31, // IAC WILL NAWS
 		255, 250, 31, 0, 72, 0, 24, 255, 240, // IAC SB NAWS 0 72 0 24 IAC SE
@@ -330,10 +336,6 @@ func TestMenuEngagement_rendersAtNAWSWidth(t *testing.T) {
 	if _, err := alice.conn.Write(naws); err != nil {
 		t.Fatalf("write NAWS: %v", err)
 	}
-	// Telnet-mode sessions skip the ENABLE ECHO prompt (handler.go gates
-	// it on !hints.Telnet), so the standard loginNew helper diverges
-	// here. Inline the rest of the flow.
-	alice.expect("PRESS ENTER TO BEGIN", 5*time.Second)
 	alice.send("\r\n")
 	alice.expect("TERMINAL TYPE:", 5*time.Second)
 	alice.send("u\r\n")
@@ -386,7 +388,9 @@ func TestMenuEngagement_rendersAtNAWSWidth(t *testing.T) {
 func TestMenuEngagement_liveResize(t *testing.T) {
 	srv := startMenuEngageServer(t)
 	alice := dialClient(t, srv)
-	// Negotiate NAWS at 72x24 so the first menu render is 72 wide.
+	// Wait for the server's initial offers (IAC DO NAWS arrives just
+	// before the press-enter banner) before replying with WILL/SB.
+	alice.expect("PRESS ENTER TO BEGIN", 5*time.Second)
 	naws := []byte{
 		255, 251, 31,
 		255, 250, 31, 0, 72, 0, 24, 255, 240,
@@ -394,7 +398,6 @@ func TestMenuEngagement_liveResize(t *testing.T) {
 	if _, err := alice.conn.Write(naws); err != nil {
 		t.Fatalf("write NAWS: %v", err)
 	}
-	alice.expect("PRESS ENTER TO BEGIN", 5*time.Second)
 	alice.send("\r\n")
 	alice.expect("TERMINAL TYPE:", 5*time.Second)
 	alice.send("u\r\n")

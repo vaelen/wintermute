@@ -364,10 +364,11 @@ func (h *Handler) terminalDetect(ctx context.Context, s *Session) {
 	}
 	_ = s.writeString("Detecting terminal...\r\n")
 	s.tc.RequestTTYPE()
-	// Brief wait for the reply. The conn parser updates state.TermType
-	// inline as bytes arrive; 200ms covers typical client round-trips
-	// without making the command feel sluggish.
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the TTYPE reply. The conn parser updates state.TermType
+	// inline as bytes arrive; one second gives a comfortable margin
+	// for slow links and busy CI runners while still feeling
+	// interactive for the local case.
+	time.Sleep(1 * time.Second)
 	st := s.tc.State()
 
 	next := s.enc.Capabilities()

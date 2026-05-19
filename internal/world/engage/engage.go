@@ -96,6 +96,16 @@ type Handler interface {
 // as "unchanged" rather than "go to 0". Implementations that re-render
 // frames should do so synchronously from Resize so the player sees the
 // new size immediately.
+//
+// Snapshot semantics: a redraw triggered from Resize renders whatever
+// state Handle has installed by the time the redraw actually runs, not
+// the state observed inside Resize. Implementations holding a mutex
+// across the dimension update may not safely hold it across the redraw
+// (since redraw typically needs the same lock to read state), so a
+// Handle call racing with Resize can interleave a state transition
+// between the size update and the redraw. The redraw always reflects
+// the latest state — which is the correct outcome for menu-style
+// handlers but worth knowing for anything more elaborate.
 type Resizer interface {
 	Resize(width, height int)
 }

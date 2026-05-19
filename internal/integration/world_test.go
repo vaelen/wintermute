@@ -165,10 +165,10 @@ func TestTerminalStatus_showsNegotiatedTermType(t *testing.T) {
 	srv := startServer(t)
 	c := dialClient(t, srv)
 
-	// Client side of TTYPE: agree to send, then deliver "xterm-256color"
-	// in response to the server's request. The server sends DO TTYPE on
-	// connect and SB TTYPE SEND right after seeing WILL TTYPE, so the
-	// IS reply is safe to send immediately after WILL.
+	// Wait for the server's initial IAC DO TTYPE (which precedes the
+	// press-enter banner) before sending WILL + SB IS — per RFC 1091
+	// SB IS is meaningful only after the DO/WILL agreement.
+	c.expect("PRESS ENTER TO BEGIN", 5*time.Second)
 	// IAC=255 WILL=251 SB=250 SE=240; TTYPE option=24; IS=0.
 	tt := []byte{
 		255, 251, 24, // IAC WILL TTYPE
@@ -180,7 +180,6 @@ func TestTerminalStatus_showsNegotiatedTermType(t *testing.T) {
 		t.Fatalf("write TTYPE: %v", err)
 	}
 	// Telnet sessions skip ENABLE ECHO; inline the login flow.
-	c.expect("PRESS ENTER TO BEGIN", 5*time.Second)
 	c.send("\r\n")
 	c.expect("TERMINAL TYPE:", 5*time.Second)
 	c.send("u\r\n")
@@ -214,7 +213,9 @@ func TestTerminalDetect_telnet_sendsTTYPERequest(t *testing.T) {
 	srv := startServer(t)
 	c := dialClient(t, srv)
 
-	// Establish telnet mode and the initial TTYPE value.
+	// Wait for the server's DO TTYPE (sent with the initial offers, just
+	// before the press-enter banner) before replying with WILL + SB IS.
+	c.expect("PRESS ENTER TO BEGIN", 5*time.Second)
 	tt := []byte{
 		255, 251, 24, // IAC WILL TTYPE
 		255, 250, 24, 0, 'v', 't', '1', '0', '0', 255, 240, // IAC SB TTYPE IS "vt100" IAC SE
@@ -222,7 +223,6 @@ func TestTerminalDetect_telnet_sendsTTYPERequest(t *testing.T) {
 	if _, err := c.conn.Write(tt); err != nil {
 		t.Fatalf("write TTYPE: %v", err)
 	}
-	c.expect("PRESS ENTER TO BEGIN", 5*time.Second)
 	c.send("\r\n")
 	c.expect("TERMINAL TYPE:", 5*time.Second)
 	c.send("u\r\n")
@@ -248,7 +248,7 @@ func TestTerminalDetect_telnet_sendsTTYPERequest(t *testing.T) {
 	c.drainFor(300 * time.Millisecond)
 
 	want := []byte{255, 250, 24, 1, 255, 240}
-	if !bytesContain(c.string(), want) {
+	if !bytes.Contains([]byte(c.string()), want) {
 		t.Errorf("did not see IAC SB TTYPE SEND IAC SE in stream; got:\n%s",
 			c.string())
 	}
@@ -268,29 +268,6 @@ func TestTerminalDetect_nonTelnet_printsComingSoon(t *testing.T) {
 	c.send("terminal detect\r\n")
 	c.expect("Coming soon", 5*time.Second)
 	c.send("quit\r\n")
-}
-
-// bytesContain reports whether the byte sequence b appears in s. Used
-// by detect tests to assert IAC sequences arrived in the raw stream
-// (the test client isn't a real telnet client, so control bytes are
-// observable as data).
-func bytesContain(s string, b []byte) bool {
-	if len(b) == 0 {
-		return true
-	}
-	for i := 0; i+len(b) <= len(s); i++ {
-		match := true
-		for j := range b {
-			if s[i+j] != b[j] {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
 }
 
 func TestNewAccountSpawnsInLobbyAndCanLook(t *testing.T) {

@@ -74,6 +74,10 @@ type Conn struct {
 	state      State
 	serverEcho bool
 	negotiated bool
+	// ttypeAgreed records whether the remote has sent WILL TTYPE. Set
+	// once on the first WILL TTYPE we see and never cleared. Gates
+	// RequestTTYPE so we don't push SB SEND to clients that declined.
+	ttypeAgreed bool
 	// offerEcho remembers whether the engine WANTS echo to be on for
 	// telnet sessions. Used to auto-enable serverEcho the first time
 	// the remote is observed speaking telnet. After that, callers can
@@ -127,6 +131,12 @@ func (c *Conn) Negotiated() bool {
 // needs no analogous helper — c.State() already reflects whatever
 // width/height the client last sent.
 func (c *Conn) RequestTTYPE() {
+	c.smu.Lock()
+	agreed := c.ttypeAgreed
+	c.smu.Unlock()
+	if !agreed {
+		return
+	}
 	c.send(cmdIAC, cmdSB, optTTYPE, ttypeSEND, cmdIAC, cmdSE)
 }
 
@@ -458,7 +468,11 @@ func (c *Conn) echoByte(b byte) {
 func (c *Conn) handleWILL(opt byte) {
 	switch opt {
 	case optTTYPE:
-		// Client agreed to send TTYPE. Request the value.
+		// Client agreed to send TTYPE. Record the agreement (so
+		// RequestTTYPE can gate on it later) and request the value.
+		c.smu.Lock()
+		c.ttypeAgreed = true
+		c.smu.Unlock()
 		c.send(cmdIAC, cmdSB, optTTYPE, ttypeSEND, cmdIAC, cmdSE)
 	case optNAWS, optSGA:
 		// Client offers; we accept silently (we already DO'd them).

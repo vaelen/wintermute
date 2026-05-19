@@ -94,6 +94,15 @@ func (h *Handler) SetHeight(n int) {
 // for any future render and, if a participant is currently attached,
 // re-renders the active frame so the player sees the new size right
 // away. Either argument may be 0 to mean "no change on this axis".
+//
+// The dimension write happens under h.mu, then the lock is released
+// before calling redraw (which re-acquires h.mu to read the current
+// state). A concurrent Handle that transitions state between the
+// unlock and the redraw will be reflected in the redrawn frame — see
+// the "Snapshot semantics" note on engage.Resizer. The behaviour is
+// the right one for this handler (you always want to see the latest
+// state at the new size), but anything more elaborate should think
+// twice before relying on a state-vs-size happens-before order.
 func (h *Handler) Resize(width, height int) {
 	h.mu.Lock()
 	if width > 0 {
