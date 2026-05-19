@@ -166,6 +166,7 @@ github.com/vaelen/go-zmodem
 | 06.2 | Admin Lua: files + Dropbox + mail-on-upload | File-area concept + default `dropbox`; admin Lua for files; upload-complete delivered as system mail; `@cleanup-files` | 06, 06.1          | S      | not started |
 | 06.3 | Menu-driven engagement interface     | Reusable line-drawing menu handler (mail/boards/files entries opt-in per object); ASCII fallback for non-UTF-8         | 05.7, 06, 06.2    | M      | not started |
 | 06.4 | Menu-driven admin interface          | Admin entry in the M6.3 menu, gated by admin level + per-object opt-in; users/mail/boards/files/objects/rooms/networks | 06.1, 06.2, 06.3  | M      | not started |
+| 06.4.1 | Password reset via admin           | Admin-issued one-time word-list tokens, 48h TTL, forced password change on redemption; adds the Reset Password action to the admin menu | 06.4             | S      | not started |
 | 07   | Semi-autonomous NPC loop             | Event bus, tick goroutines, two-tier routing, budget enforcement, tool execution                                       | 04, 05            | L      | not started |
 | 08   | Player-tier scripting                | Sandboxed Lua, instruction/memory budgets, ACL-restricted world API                                                    | 05                | M      | not started |
 | 09   | X/Y/ZModem spinoff libraries         | Three MIT-licensed Go modules, engine integration                                                                      | 06                | L      | not started |
@@ -178,7 +179,7 @@ github.com/vaelen/go-zmodem
 01 ── 02 ── 03 ── 04 ──┐
  │     │     │         ├── 07
  │     │     └── 05 ───┤
- │     │           │   └── 05.7 ── 06 ── 06.1 ── 06.2 ── 06.3 ── 06.4
+ │     │           │   └── 05.7 ── 06 ── 06.1 ── 06.2 ── 06.3 ── 06.4 ── 06.4.1
  │     │           │                                      │
  │     │           │                                      └── 09
  │     │           └── 08
@@ -266,6 +267,7 @@ This is a side project, not a sprint. Expected pacing:
 - M6.1 + M6.2: a weekend each (admin Lua wraps existing services).
 - M6.3: 1–2 weeks (the menu renderer + state machine is the bulk).
 - M6.4: 1 week (each admin subsection is small once the M6.3 framework exists).
+- M6.4.1: a weekend (small auth/migration + login-flow change, mostly tests).
 - M7: 2–3 weeks (event bus + budgets + tool invocation is the trickiest milestone).
 - M8: 1–2 weeks.
 - M9: 1 week per protocol, run as three separate open-source releases.
