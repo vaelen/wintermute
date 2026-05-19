@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vaelen/wintermute/internal/term"
 	"github.com/vaelen/wintermute/internal/world"
@@ -256,6 +257,8 @@ func (h *Handler) cmdTerminal(ctx context.Context, s *Session, args string) {
 		h.terminalSetLines(ctx, s, rest)
 	case "echo":
 		h.terminalSetEcho(s, rest)
+	case "detect":
+		h.terminalDetect(ctx, s)
 	default:
 		_ = s.writef("Unknown 'terminal' subcommand: %q. Try 'help'.\r\n", sub)
 	}
@@ -341,6 +344,43 @@ func (h *Handler) terminalSetColor(ctx context.Context, s *Session, arg string) 
 		state = "on"
 	}
 	_ = s.writef("Color: %s.\r\n", state)
+}
+
+// terminalDetect re-runs terminal capability detection. For telnet
+// sessions it asks the client to re-report TTYPE (NAWS is push-based
+// so c.State() already reflects the latest value) and reconfigures
+// the encoder + Presence + active engagement once the reply arrives.
+//
+// For non-telnet sessions, ANSI-based detection (Secondary DA,
+// XTVERSION, CSI 18 t, cursor-position fallback for size) is planned
+// in milestone M6.5; until then the command prints a "coming soon"
+// placeholder rather than silently doing nothing.
+func (h *Handler) terminalDetect(ctx context.Context, s *Session) {
+	if !s.caps.Telnet {
+		_ = s.writeString(
+			"Terminal detection over plain TCP is not yet supported. " +
+				"Coming soon — see docs/milestones/06.5.\r\n")
+		return
+	}
+	_ = s.writeString("Detecting terminal...\r\n")
+	s.tc.RequestTTYPE()
+	// Brief wait for the reply. The conn parser updates state.TermType
+	// inline as bytes arrive; 200ms covers typical client round-trips
+	// without making the command feel sluggish.
+	time.Sleep(200 * time.Millisecond)
+	st := s.tc.State()
+
+	next := s.enc.Capabilities()
+	next.TermType = st.TermType
+	if st.Width > 0 {
+		next.Width = st.Width
+	}
+	if st.Height > 0 {
+		next.Height = st.Height
+	}
+	h.reconfigure(ctx, s, next)
+	_ = s.writef("Detection complete: type=%q size=%dx%d.\r\n",
+		st.TermType, st.Width, st.Height)
 }
 
 func (h *Handler) terminalSetEcho(s *Session, arg string) {

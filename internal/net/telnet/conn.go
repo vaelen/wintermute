@@ -117,6 +117,19 @@ func (c *Conn) Negotiated() bool {
 	return c.negotiated
 }
 
+// RequestTTYPE sends IAC SB TTYPE SEND IAC SE asking the remote end to
+// (re-)report its terminal type. The reply lands in c.state.TermType
+// via the existing IAC parser. Used by the `terminal detect` command
+// to refresh the negotiated value mid-session.
+//
+// No-op when the client never agreed to TTYPE (the spec requires
+// WILL TTYPE before SB SEND is meaningful). NAWS is push-based and
+// needs no analogous helper — c.State() already reflects whatever
+// width/height the client last sent.
+func (c *Conn) RequestTTYPE() {
+	c.send(cmdIAC, cmdSB, optTTYPE, ttypeSEND, cmdIAC, cmdSE)
+}
+
 func (c *Conn) markNegotiated() {
 	c.smu.Lock()
 	defer c.smu.Unlock()

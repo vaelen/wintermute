@@ -204,6 +204,95 @@ func TestTerminalStatus_showsNegotiatedTermType(t *testing.T) {
 	c.send("quit\r\n")
 }
 
+// TestTerminalDetect_telnet verifies that running `terminal detect`
+// on a telnet-mode session re-requests TTYPE from the client. We
+// don't need to assert the post-detect status here — the contract
+// for this PR is "send the request and reconfigure with whatever
+// comes back". The presence of the IAC SB TTYPE SEND IAC SE bytes
+// in the inbound stream proves the wire side of the request.
+func TestTerminalDetect_telnet_sendsTTYPERequest(t *testing.T) {
+	srv := startServer(t)
+	c := dialClient(t, srv)
+
+	// Establish telnet mode and the initial TTYPE value.
+	tt := []byte{
+		255, 251, 24, // IAC WILL TTYPE
+		255, 250, 24, 0, 'v', 't', '1', '0', '0', 255, 240, // IAC SB TTYPE IS "vt100" IAC SE
+	}
+	if _, err := c.conn.Write(tt); err != nil {
+		t.Fatalf("write TTYPE: %v", err)
+	}
+	c.expect("PRESS ENTER TO BEGIN", 5*time.Second)
+	c.send("\r\n")
+	c.expect("TERMINAL TYPE:", 5*time.Second)
+	c.send("u\r\n")
+	c.expect("Username", 5*time.Second)
+	c.send("new\r\n")
+	c.expect("Choose a username", 5*time.Second)
+	c.send("alice\r\n")
+	c.expect("Choose a password", 5*time.Second)
+	c.send("hunter22\r\n")
+	c.expect("Account \"alice\" created", 5*time.Second)
+	c.expect("Username", 5*time.Second)
+	c.send("alice\r\n")
+	c.expect("Password", 5*time.Second)
+	c.send("hunter22\r\n")
+	c.expect("Welcome, alice", 5*time.Second)
+	c.expect(">", 5*time.Second)
+	c.drainFor(200 * time.Millisecond)
+
+	// Run detect. Server should send IAC SB TTYPE SEND IAC SE
+	// (bytes 255 250 24 1 255 240) to the client.
+	c.send("terminal detect\r\n")
+	c.expect("Detecting", 5*time.Second)
+	c.drainFor(300 * time.Millisecond)
+
+	want := []byte{255, 250, 24, 1, 255, 240}
+	if !bytesContain(c.string(), want) {
+		t.Errorf("did not see IAC SB TTYPE SEND IAC SE in stream; got:\n%s",
+			c.string())
+	}
+
+	c.send("quit\r\n")
+}
+
+// TestTerminalDetect_nonTelnet_printsComingSoon covers the deferred
+// case: a plain TCP connection that never negotiates TTYPE / NAWS
+// gets a friendly placeholder pointing at the upcoming ANSI-based
+// detection rather than a silent no-op.
+func TestTerminalDetect_nonTelnet_printsComingSoon(t *testing.T) {
+	srv := startServer(t)
+	c := dialClient(t, srv)
+	c.loginNew("alice", "hunter22")
+	c.drainFor(200 * time.Millisecond)
+	c.send("terminal detect\r\n")
+	c.expect("Coming soon", 5*time.Second)
+	c.send("quit\r\n")
+}
+
+// bytesContain reports whether the byte sequence b appears in s. Used
+// by detect tests to assert IAC sequences arrived in the raw stream
+// (the test client isn't a real telnet client, so control bytes are
+// observable as data).
+func bytesContain(s string, b []byte) bool {
+	if len(b) == 0 {
+		return true
+	}
+	for i := 0; i+len(b) <= len(s); i++ {
+		match := true
+		for j := range b {
+			if s[i+j] != b[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
 func TestNewAccountSpawnsInLobbyAndCanLook(t *testing.T) {
 	srv := startServer(t)
 	c := dialClient(t, srv)
