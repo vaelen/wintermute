@@ -34,9 +34,19 @@ INSERT INTO object_locations(object_id, room_id, holder_id) VALUES
      (SELECT id FROM rooms   WHERE slug='lobby'),
      NULL);
 
+-- The menu entries live in object_engage.policy as JSON under the
+-- "menu" key (see internal/world/engage/menu.go policyJSON). Without
+-- this the menu_terminal handler renders only the implicit "Q) Quit"
+-- row and the kiosk has nothing useful to do. Mail / Boards / Admin
+-- are flat features; Files needs an "area" pointing at a row in
+-- file_areas — we wire it to the seeded "dropbox" area from 0016.
+-- Admin is included because the menu's visibleMenu filter strips it
+-- out automatically for non-admin participants, so listing it here
+-- is the right surface for the kiosk's admin users without exposing
+-- it to the general public.
 INSERT INTO object_engage
     (object_id, kind, engage_verbs, disengage_verbs,
-     enter_msg, present_msg, exit_msg)
+     enter_msg, present_msg, exit_msg, policy)
 VALUES (
     (SELECT id FROM objects WHERE slug='lobby-kiosk'),
     'menu_terminal',
@@ -44,5 +54,11 @@ VALUES (
     '["step back", "leave", "exit"]',
     '{{player}} steps up to {{host}}.',
     'at {{host}}',
-    '{{player}} steps back from {{host}}.'
+    '{{player}} steps back from {{host}}.',
+    '{"menu":['
+      ||'{"feature":"mail"},'
+      ||'{"feature":"boards"},'
+      ||'{"feature":"files","area":"dropbox"},'
+      ||'{"feature":"admin"}'
+    ||']}'
 );

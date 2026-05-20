@@ -391,9 +391,13 @@ func TestEngageTerminal_enterBroadcastBeforePrompt(t *testing.T) {
 }
 
 // TestEngageKiosk_seededAsMenu confirms the new mail-and-news kiosk
-// in the lobby uses the menu_terminal handler — engaging it should
-// render a framed BBS menu (with B/Q navigation built in) rather
-// than the free-form "terminal>" prompt.
+// in the lobby uses the menu_terminal handler AND has a usable menu.
+// Engaging it should render a framed BBS menu with Mail / Boards /
+// Files entries (the kiosk's seeded menu config in policy JSON) and
+// the implicit Q) Quit footer. The bug this guards against is the
+// initial 0023 migration shipping the row with kind=menu_terminal
+// but no `menu` key in policy — the handler rendered only "Q) Quit"
+// because visibleMenu(host) was an empty slice.
 func TestEngageKiosk_seededAsMenu(t *testing.T) {
 	srv := startEngageServer(t)
 	alice := dialClient(t, srv)
@@ -407,6 +411,16 @@ func TestEngageKiosk_seededAsMenu(t *testing.T) {
 	alice.expect("Select:", 5*time.Second)
 	if got := alice.string(); strings.Contains(got, "terminal> ") {
 		t.Errorf("kiosk should be a menu, not a free-form terminal:\n%s", got)
+	}
+
+	// Every public-facing menu feature seeded in migration 0023 must
+	// be visible in the rendered frame. Admin is intentionally not
+	// checked here — visibleMenu strips it for non-admin participants.
+	got := alice.string()
+	for _, label := range []string{"Mail", "Boards", "Files"} {
+		if !strings.Contains(got, label) {
+			t.Errorf("expected %q in kiosk menu frame; got:\n%s", label, got)
+		}
 	}
 
 	// "step back" is one of the disengage verbs we seeded for the kiosk.
