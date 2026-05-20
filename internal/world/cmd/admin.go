@@ -8,11 +8,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vaelen/wintermute/internal/auth"
 	scriptlua "github.com/vaelen/wintermute/internal/script/lua"
+	"github.com/vaelen/wintermute/internal/security"
 	"github.com/vaelen/wintermute/internal/world"
 	worldapi "github.com/vaelen/wintermute/internal/world/api"
 )
@@ -618,3 +622,302 @@ func lineCount(s string) int {
 // world is imported in admin.go for the worldapi types declared in this
 // package; keep this reference alive so go imports does not strip it.
 var _ = world.RoomID(0)
+
+// ---------------------------------------------------------------------------
+// M6.6 security @-commands.
+
+// cmdUsernameDeny dispatches @username-deny subcommands. admin-only.
+func (h *Handler) cmdUsernameDeny(ctx context.Context, rest string) Outcome {
+	if outcome, ok := h.requireAdmin(false); !ok {
+		return outcome
+	}
+	be := h.adminBackend()
+	if be == nil || be.API == nil || be.API.Security == nil {
+		return OutcomeUnknown
+	}
+	sub, rest := splitCmd(rest)
+	switch strings.ToLower(sub) {
+	case "add":
+		name, rest := splitCmd(rest)
+		if name == "" {
+			_ = h.Presence.Write("Usage: @username-deny add <name> [reason]\r\n")
+			return OutcomeContinue
+		}
+		reason := strings.TrimSpace(stripQuotes(rest))
+		actor := h.actorID()
+		var addedBy *int64
+		if actor > 0 {
+			addedBy = &actor
+		}
+		if err := be.API.Security.DisallowUsername(ctx, name, reason, addedBy); err != nil {
+			_ = h.Presence.Write(formatSecurityErr(err))
+			return OutcomeContinue
+		}
+		h.adminAuditCmd("username_deny_add", name, "reason", reason)
+		_ = h.Presence.Write("Added \"" + name + "\" to the disallow list.\r\n")
+	case "remove", "rm":
+		name := strings.TrimSpace(rest)
+		if name == "" {
+			_ = h.Presence.Write("Usage: @username-deny remove <name>\r\n")
+			return OutcomeContinue
+		}
+		if err := be.API.Security.AllowUsername(ctx, name); err != nil {
+			_ = h.Presence.Write(formatSecurityErr(err))
+			return OutcomeContinue
+		}
+		h.adminAuditCmd("username_deny_remove", name)
+		_ = h.Presence.Write("Removed \"" + name + "\" from the disallow list.\r\n")
+	case "list", "":
+		rows, err := be.API.Security.ListDisallowed(ctx)
+		if err != nil {
+			_ = h.Presence.Write(formatSecurityErr(err))
+			return OutcomeContinue
+		}
+		if len(rows) == 0 {
+			_ = h.Presence.Write("(disallow list is empty)\r\n")
+			return OutcomeContinue
+		}
+		_ = h.Presence.Write(fmt.Sprintf("%-24s  %s\r\n", "name", "reason"))
+		for _, r := range rows {
+			_ = h.Presence.Write(fmt.Sprintf("%-24s  %s\r\n", r.Username, r.Reason))
+		}
+	default:
+		_ = h.Presence.Write("Usage: @username-deny add|remove|list [args]\r\n")
+	}
+	return OutcomeContinue
+}
+
+// cmdUsernameHistory dispatches @username-history subcommands. admin-only.
+func (h *Handler) cmdUsernameHistory(ctx context.Context, rest string) Outcome {
+	if outcome, ok := h.requireAdmin(false); !ok {
+		return outcome
+	}
+	be := h.adminBackend()
+	if be == nil || be.API == nil || be.API.Security == nil {
+		return OutcomeUnknown
+	}
+	sub, rest := splitCmd(rest)
+	switch strings.ToLower(sub) {
+	case "list", "":
+		target := strings.TrimSpace(rest)
+		var accountID int64
+		if target != "" && !strings.EqualFold(target, "all") {
+			acc, err := be.API.Accts.GetByUsername(ctx, target)
+			if err != nil {
+				_ = h.Presence.Write("error: account not found: " + target + "\r\n")
+				return OutcomeContinue
+			}
+			accountID = acc.ID
+		}
+		rows, err := be.API.Security.ListUsernameHistory(ctx, accountID)
+		if err != nil {
+			_ = h.Presence.Write(formatSecurityErr(err))
+			return OutcomeContinue
+		}
+		if len(rows) == 0 {
+			_ = h.Presence.Write("(username history is empty)\r\n")
+			return OutcomeContinue
+		}
+		_ = h.Presence.Write(fmt.Sprintf("%-20s  %-20s  %s\r\n", "old", "renamed_to", "renamed_at"))
+		for _, r := range rows {
+			when := time.Unix(r.RenamedAt, 0).UTC().Format("2006-01-02 15:04")
+			_ = h.Presence.Write(fmt.Sprintf("%-20s  %-20s  %s\r\n", r.OldUsername, r.RenamedTo, when))
+		}
+	case "release":
+		name := strings.TrimSpace(rest)
+		if name == "" {
+			_ = h.Presence.Write("Usage: @username-history release <name>\r\n")
+			return OutcomeContinue
+		}
+		if err := be.API.Security.ReleaseUsernameHistory(ctx, name); err != nil {
+			_ = h.Presence.Write(formatSecurityErr(err))
+			return OutcomeContinue
+		}
+		h.adminAuditCmd("username_history_release", name)
+		_ = h.Presence.Write("Released \"" + name + "\" from the username-history reservation.\r\n")
+	default:
+		_ = h.Presence.Write("Usage: @username-history list [user|all] | release <name>\r\n")
+	}
+	return OutcomeContinue
+}
+
+// cmdIPDeny dispatches @ip-deny subcommands. admin-only.
+func (h *Handler) cmdIPDeny(ctx context.Context, rest string) Outcome {
+	if outcome, ok := h.requireAdmin(false); !ok {
+		return outcome
+	}
+	be := h.adminBackend()
+	if be == nil || be.API == nil || be.API.Security == nil {
+		return OutcomeUnknown
+	}
+	sub, rest := splitCmd(rest)
+	switch strings.ToLower(sub) {
+	case "add":
+		ipStr, rest := splitCmd(rest)
+		addr, err := netip.ParseAddr(ipStr)
+		if err != nil {
+			_ = h.Presence.Write("error: invalid IP: " + ipStr + "\r\n")
+			return OutcomeContinue
+		}
+		kind, rest := splitCmd(rest)
+		actor := h.actorID()
+		var addedBy *int64
+		if actor > 0 {
+			addedBy = &actor
+		}
+		switch strings.ToLower(kind) {
+		case "permanent", "perm", "p":
+			reason := strings.TrimSpace(stripQuotes(rest))
+			if err := be.API.Security.AddPermanentDeny(ctx, addr, addedBy, reason); err != nil {
+				_ = h.Presence.Write(formatSecurityErr(err))
+				return OutcomeContinue
+			}
+			h.adminAuditCmd("ip_deny_add", addr.String(), "kind", "permanent", "reason", reason)
+			_ = h.Presence.Write("Added permanent deny for " + addr.String() + ".\r\n")
+		case "temp", "t", "":
+			ttlStr, rest := splitCmd(rest)
+			ttl := time.Duration(0)
+			if ttlStr != "" {
+				n, perr := strconv.Atoi(ttlStr)
+				if perr != nil || n < 0 {
+					_ = h.Presence.Write("error: invalid ttl seconds: " + ttlStr + "\r\n")
+					return OutcomeContinue
+				}
+				ttl = time.Duration(n) * time.Second
+			}
+			reason := strings.TrimSpace(stripQuotes(rest))
+			if err := be.API.Security.AddTempDeny(ctx, addr, ttl, addedBy, reason); err != nil {
+				_ = h.Presence.Write(formatSecurityErr(err))
+				return OutcomeContinue
+			}
+			h.adminAuditCmd("ip_deny_add", addr.String(), "kind", "temp", "ttl", int(ttl.Seconds()), "reason", reason)
+			_ = h.Presence.Write("Added temp deny for " + addr.String() + ".\r\n")
+		default:
+			_ = h.Presence.Write("Usage: @ip-deny add <ip> [permanent|temp <seconds>] [reason]\r\n")
+		}
+	case "remove", "rm":
+		ipStr := strings.TrimSpace(rest)
+		addr, err := netip.ParseAddr(ipStr)
+		if err != nil {
+			_ = h.Presence.Write("error: invalid IP: " + ipStr + "\r\n")
+			return OutcomeContinue
+		}
+		if err := be.API.Security.RemoveDeny(ctx, addr); err != nil {
+			_ = h.Presence.Write(formatSecurityErr(err))
+			return OutcomeContinue
+		}
+		h.adminAuditCmd("ip_deny_remove", addr.String())
+		_ = h.Presence.Write("Removed deny for " + addr.String() + ".\r\n")
+	case "flush-temp", "flush":
+		n, err := be.API.Security.FlushTempDenials(ctx)
+		if err != nil {
+			_ = h.Presence.Write(formatSecurityErr(err))
+			return OutcomeContinue
+		}
+		h.adminAuditCmd("ip_deny_flush_temp", "*", "count", n)
+		_ = h.Presence.Write(fmt.Sprintf("Flushed %d temporary deny(s).\r\n", n))
+	case "list", "":
+		filter := strings.ToLower(strings.TrimSpace(rest))
+		rows := be.API.Security.ListDenials()
+		if len(rows) == 0 {
+			_ = h.Presence.Write("(deny list is empty)\r\n")
+			return OutcomeContinue
+		}
+		_ = h.Presence.Write(fmt.Sprintf("%-6s  %-15s  %-19s  %s\r\n", "kind", "ip", "expires", "reason"))
+		for _, r := range rows {
+			marker := "[T]"
+			when := ""
+			if r.Permanent() {
+				marker = "[P]"
+				when = "—"
+			} else {
+				when = r.ExpiresAt.Format("2006-01-02 15:04:05")
+			}
+			if filter == "permanent" && !r.Permanent() {
+				continue
+			}
+			if filter == "temp" && r.Permanent() {
+				continue
+			}
+			_ = h.Presence.Write(fmt.Sprintf("%-6s  %-15s  %-19s  %s\r\n", marker, r.IP.String(), when, r.Reason))
+		}
+	default:
+		_ = h.Presence.Write("Usage: @ip-deny add|remove|list|flush-temp [args]\r\n")
+	}
+	return OutcomeContinue
+}
+
+// cmdRename implements @rename <user> <newname>. admin-only.
+func (h *Handler) cmdRename(ctx context.Context, rest string) Outcome {
+	if outcome, ok := h.requireAdmin(false); !ok {
+		return outcome
+	}
+	be := h.adminBackend()
+	if be == nil || be.API == nil {
+		return OutcomeUnknown
+	}
+	cur, rest := splitCmd(rest)
+	newName := strings.TrimSpace(rest)
+	if cur == "" || newName == "" {
+		_ = h.Presence.Write("Usage: @rename <user> <newname>\r\n")
+		return OutcomeContinue
+	}
+	if err := be.API.RenameAccount(ctx, cur, newName, h.actorID()); err != nil {
+		_ = h.Presence.Write(formatAdminError(err))
+		return OutcomeContinue
+	}
+	h.adminAuditCmd("rename_account", cur, "new", newName)
+	_ = h.Presence.Write("Renamed " + cur + " → " + newName + ".\r\n")
+	return OutcomeContinue
+}
+
+// actorID returns the calling admin's account id, or 0 when unknown
+// (test paths without a presence). Used to fill the added_by /
+// renamed_by columns of audit rows.
+func (h *Handler) actorID() int64 {
+	if h.Presence == nil || h.Presence.Account == nil {
+		return 0
+	}
+	return h.Presence.Account.ID
+}
+
+// adminAuditCmd emits one structured slog line per admin-mutation
+// @-command, mirroring adminAudit in the menu package so external
+// tooling sees the same event names regardless of entry point.
+func (h *Handler) adminAuditCmd(action, target string, args ...any) {
+	be := h.adminBackend()
+	if be == nil || be.API == nil || be.API.Logger == nil {
+		return
+	}
+	actor := ""
+	if h.Presence != nil && h.Presence.Account != nil {
+		actor = h.Presence.Account.Username
+	}
+	fields := []any{"actor", actor, "action", action, "target", target}
+	fields = append(fields, args...)
+	be.API.Logger.Info("admin_audit", fields...)
+}
+
+// formatSecurityErr renders a security.Service error as a one-line
+// admin message. Recognises the package's sentinel errors so the user
+// sees a stable message rather than the wrapped Go form.
+func formatSecurityErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	switch {
+	case errors.Is(err, security.ErrUsernameDisallowed):
+		return "error: username is disallowed\r\n"
+	case errors.Is(err, security.ErrUsernameReserved):
+		return "error: username is reserved by username_history\r\n"
+	case errors.Is(err, security.ErrDisallowReservedKeyword):
+		return "error: cannot disallow the account-create keyword\r\n"
+	case errors.Is(err, security.ErrDisallowExistingAccount):
+		return "error: name collides with an existing account — rename or delete the account first\r\n"
+	case errors.Is(err, security.ErrAlreadyDisallowed):
+		return "error: username is already on the disallow list\r\n"
+	case errors.Is(err, security.ErrIPNotFound):
+		return "error: IP is not on the deny list\r\n"
+	}
+	return "error: " + err.Error() + "\r\n"
+}

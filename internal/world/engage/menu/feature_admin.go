@@ -37,6 +37,7 @@ var adminMainEntries = []struct {
 	{"Rooms", adminRooms{}},
 	{"FTN networks", adminFTN{}},
 	{"System", adminSystem{}},
+	{"Security", adminSecurity{}},
 }
 
 func (adminMain) render(h *Handler, _ *engage.Participant) string {
@@ -205,6 +206,8 @@ type userViewActionKind int
 const (
 	userActionSetAccessLevel userViewActionKind = iota
 	userActionResetPassword
+	userActionRename
+	userActionShowHistory
 )
 
 // userViewAction is one entry rendered on the user-view screen.
@@ -225,6 +228,8 @@ func userViewActions() []userViewAction {
 	return []userViewAction{
 		{label: "Set access level", kind: userActionSetAccessLevel},
 		{label: "Reset password", kind: userActionResetPassword},
+		{label: "Rename", kind: userActionRename},
+		{label: "Show history", kind: userActionShowHistory},
 	}
 }
 
@@ -257,20 +262,31 @@ func (s adminUserView) handle(h *Handler, p *engage.Participant, line string) {
 	action := actions[n-1]
 	actor, _ := h.accountFor(p)
 	if actor != nil && actor.ID == target.ID {
-		h.redraw(p)
 		switch action.kind {
 		case userActionResetPassword:
+			h.redraw(p)
 			_ = p.Write("Cannot reset your own password. Ask another admin.\r\n")
-		default:
+			return
+		case userActionSetAccessLevel:
+			h.redraw(p)
 			_ = p.Write("Cannot change your own access level. Ask another admin.\r\n")
+			return
+		case userActionRename:
+			h.redraw(p)
+			_ = p.Write("Cannot rename your own account. Ask another admin.\r\n")
+			return
 		}
-		return
+		// userActionShowHistory: harmless on self, fall through.
 	}
 	switch action.kind {
 	case userActionSetAccessLevel:
 		h.transition(p, adminUserSetAccessLevel{id: target.ID})
 	case userActionResetPassword:
 		s.issueReset(h, p, target)
+	case userActionRename:
+		h.transition(p, adminUserRename{id: target.ID})
+	case userActionShowHistory:
+		h.transition(p, adminUserHistory{id: target.ID})
 	}
 }
 

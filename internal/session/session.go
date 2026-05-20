@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sync"
 
 	"github.com/vaelen/wintermute/internal/auth"
@@ -91,6 +92,23 @@ func newSession(conn net.Conn, a *auth.Store, w *world.World, log *slog.Logger, 
 		world:   w,
 		history: readline.NewHistory(historySize),
 	}
+}
+
+// remoteIP returns the connection's remote address parsed as a netip.Addr.
+// Returns the zero value when the conn.RemoteAddr() form is not a TCP
+// address (test harnesses, unix-socket transports). Used by the M6.6
+// hardening hooks; nil-safe handling of the zero value is required at
+// every call site.
+func (s *Session) remoteIP() netip.Addr {
+	tcp, ok := s.conn.RemoteAddr().(*net.TCPAddr)
+	if !ok {
+		return netip.Addr{}
+	}
+	addr, ok := netip.AddrFromSlice(tcp.IP)
+	if !ok {
+		return netip.Addr{}
+	}
+	return addr.Unmap()
 }
 
 // reader returns the session's byte source — always the telnet Conn,

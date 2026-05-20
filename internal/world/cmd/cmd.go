@@ -174,6 +174,14 @@ func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
 		outcome = h.cmdCleanupFiles(ctx)
 	case "@edit":
 		outcome = h.cmdEdit(ctx, rest)
+	case "@username-deny":
+		outcome = h.cmdUsernameDeny(ctx, rest)
+	case "@username-history":
+		outcome = h.cmdUsernameHistory(ctx, rest)
+	case "@ip-deny":
+		outcome = h.cmdIPDeny(ctx, rest)
+	case "@rename":
+		outcome = h.cmdRename(ctx, rest)
 	case "@help":
 		outcome = h.cmdAtHelp()
 	default:
@@ -431,9 +439,21 @@ func (h *Handler) adminHelpLines() []string {
 		"",
 		"Sessions (admin):",
 		"  @boot <username> [message]              — force-disconnect a user",
+		"  @rename <user> <newname>                — rename an account",
 		"",
 		"Files (admin):",
 		"  @cleanup-files                          — reap expired tokens and orphan blobs",
+		"",
+		"Security (admin):",
+		"  @username-deny add <name> [reason]      — disallow a username",
+		"  @username-deny remove <name>            — allow a previously-disallowed name",
+		"  @username-deny list                     — show the disallow list",
+		"  @username-history list [user|all]       — show prior rename history",
+		"  @username-history release <name>        — free an old name for re-use",
+		"  @ip-deny add <ip> [permanent|temp <s>] [reason] — add IP deny",
+		"  @ip-deny remove <ip>                    — drop an IP deny",
+		"  @ip-deny list [permanent|temp]          — list IP denials",
+		"  @ip-deny flush-temp                     — drop every temporary IP deny",
 		"",
 		"Help:",
 		"  @help                                   — same as help, listed for discoverability",

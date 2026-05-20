@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -20,6 +21,27 @@ import (
 	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
 	"github.com/vaelen/wintermute/internal/world/engage"
 )
+
+// LoginGuard is the M6.6 hook the login flow consults. nil-safe: every
+// session created without one falls back to the pre-M6.6 behaviour.
+//
+// CheckUsername runs after the username prompt; returning a non-nil
+// error (specifically auth.ErrUsernameDisallowed) causes login() to
+// drop the connection silently via ErrSilentDrop. RecordFailedPassword
+// is called on every auth.ErrInvalidCredentials and returns true when
+// the per-IP threshold has just been crossed — again, login() drops
+// silently in that case.
+type LoginGuard interface {
+	CheckUsername(ctx context.Context, ip netip.Addr, name string) error
+	RecordFailedPassword(ctx context.Context, ip netip.Addr) bool
+}
+
+// ErrSilentDrop is returned by login() when M6.6 hardening decides
+// the connection should be closed without rendering any further output
+// (disallowed username, failed-password threshold crossed). Handle
+// recognises it and returns without logging at Info — the security
+// service has already emitted the structured "ip flagged" line.
+var ErrSilentDrop = errors.New("session: silent drop")
 
 // Handler holds the dependencies a connection handler needs. One Handler
 // is created at engine startup and reused for every accepted connection.
@@ -52,6 +74,11 @@ type Handler struct {
 	// written to the session verbatim. Used in M6 to print the
 	// unread-mail count.
 	PostMOTD func(ctx context.Context, acc *auth.Account) string
+
+	// LoginGuard, if non-nil, gates the username and failed-password
+	// paths against the M6.6 security service. nil disables the
+	// hardening hooks (tests, pre-M6.6 milestones).
+	LoginGuard LoginGuard
 }
 
 // DefaultHandler returns a Handler with sensible defaults wired in.
@@ -226,7 +253,13 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 
 	// --- Login ------------------------------------------------------------
 	if err := h.login(ctx, s); err != nil {
-		if !errors.Is(err, io.EOF) {
+		switch {
+		case errors.Is(err, ErrSilentDrop):
+			// The security service has already logged the flag/deny line.
+			// Nothing more to say.
+		case errors.Is(err, io.EOF):
+			// Disconnect during login — uninteresting.
+		default:
 			s.log.Info("login failed", "err", err)
 		}
 		return
