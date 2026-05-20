@@ -231,6 +231,13 @@ func (s *Session) readLine() (string, error) {
 // sessions, and pre-login phases keep their existing byte-for-byte
 // semantics. ErrInterrupt is translated into an empty line; the caller
 // is expected to print a fresh prompt and continue.
+//
+// While the editor is active the telnet wrapper's per-byte auto-echo
+// is suppressed: the editor's own redraw is the *only* source of
+// visible output, so leaving auto-echo on would double every keystroke
+// and desync the editor's cursor model from the screen (the "TTTTT..."
+// pattern). Echo state is restored to whatever it was before the call
+// the moment ReadLine returns.
 func (s *Session) readLineEditing() (string, error) {
 	if !s.shouldUseEditor() {
 		return s.readLine()
@@ -238,6 +245,14 @@ func (s *Session) readLineEditing() (string, error) {
 	if s.in == nil {
 		s.in = bufio.NewReader(s.reader())
 	}
+	// shouldUseEditor already required echoOn() == true, so prevEcho
+	// is unconditionally true here. setEcho(true) suppresses telnet's
+	// per-byte echo for the duration of the editor frame; the deferred
+	// restore puts us back into server-echo mode for the command loop
+	// outside the editor.
+	prevEcho := s.echoOn()
+	_ = s.setEcho(true)
+	defer func() { _ = s.setEcho(!prevEcho) }()
 	// Pass &writeMu so the editor's per-frame emits are serialized
 	// with world broadcasts going through writeString. Without it
 	// the two goroutines would race on enc.inGraphics and interleave
