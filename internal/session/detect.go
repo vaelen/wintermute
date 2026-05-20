@@ -11,10 +11,14 @@ import (
 )
 
 // detectDrainTimeout bounds how long runDetect waits for probe replies
-// when it is NOT bracketed by a press-enter read. The value balances
-// "long enough for a slow link to respond" against "short enough not to
-// feel laggy" in the command-loop `terminal detect` path.
-const detectDrainTimeout = 250 * time.Millisecond
+// when it is NOT bracketed by a press-enter read. Sized for the worst
+// real-world client: a 2400 bps dialup terminal (≈ 300 bytes/sec) on a
+// re-issued TTYPE round-trip — see CLAUDE.md. ANSI probes alone would
+// be comfortable in 250 ms locally, but the TTYPE re-request matters
+// more (it's the slowest reply we wait for) and matches the prior
+// M6.3.1 telnet-only `terminal detect` budget. The command is
+// human-triggered so 1 s remains responsive.
+const detectDrainTimeout = 1 * time.Second
 
 // runDetect emits the "Detecting terminal type..." banner, sends every
 // ANSI probe in term.AllProbes(), optionally re-requests TTYPE on
@@ -28,16 +32,35 @@ const detectDrainTimeout = 250 * time.Millisecond
 // TO BEGIN" prompt and use the user's Enter keystroke as the wait
 // signal. See Handle for the login path.
 func (h *Handler) runDetect(s *Session) term.DetectHints {
-	_ = s.writeString("Detecting terminal type...\r\n")
-	_, _ = s.writer().Write(term.AllProbes())
-	if s.tc != nil && s.tc.Negotiated() {
-		s.tc.RequestTTYPE()
-	}
+	s.writeDetectionProbes()
 	raw := s.drainRaw(detectDrainTimeout)
 	hints := term.DetectHints{}
 	term.ScanProbeReplies(raw, &hints)
 	h.mergeTelnetState(s, &hints)
 	return hints
+}
+
+// writeDetectionProbes emits the "Detecting terminal type..." banner,
+// every byte of term.AllProbes(), and a telnet TTYPE re-request (when
+// the conn has negotiated) as one atomic sequence under writeMu. The
+// lock matters post-attach: without it a concurrent room broadcast
+// going through writeString could land between the banner and the
+// probe bytes, putting unrelated text in front of the user just before
+// the detection window opens. The telnet conn's own write mutex
+// protects single Write calls from byte-level interleaving but does
+// not serialize across multiple Writes, which is what writeMu adds.
+func (s *Session) writeDetectionProbes() {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if s.enc != nil {
+		if out, err := s.enc.EncodeOut([]byte("Detecting terminal type...\r\n")); err == nil {
+			_, _ = s.writer().Write(out)
+		}
+	}
+	_, _ = s.writer().Write(term.AllProbes())
+	if s.tc != nil && s.tc.Negotiated() {
+		s.tc.RequestTTYPE()
+	}
 }
 
 // mergeTelnetState folds the telnet conn's current state into hints.

@@ -128,9 +128,10 @@ func (h *Handler) Handle(ctx context.Context, conn net.Conn) {
 	// Telnet status / TTYPE / NAWS hints reflect whatever the conn has
 	// learned by now (initial offers + any negotiation that completed
 	// before / during the press-enter read). TTYPE / NAWS take
-	// precedence over the ANSI-probe equivalents — set them last so
-	// they overwrite anything the scan extracted from a Secondary DA
-	// reply.
+	// precedence over the ANSI-probe equivalents WHEN they have been
+	// negotiated — when the conn has no value (the common non-telnet
+	// case, or a telnet client that declined the option), the scan
+	// result from a Secondary DA / CSI 18 t reply is left intact.
 	hints.Telnet = tc.Negotiated()
 	st := tc.State()
 	if st.TermType != "" {

@@ -29,7 +29,6 @@ type DetectHints struct {
 	// SecondaryDAType is the type code from a Secondary Device
 	// Attributes reply (CSI > t;v;h c). Known codes:
 	//
-	//	  0  -> "vt100"
 	//	  1  -> "vt220"
 	//	 41  -> "xterm"
 	//	 65  -> "vt500"
@@ -38,9 +37,11 @@ type DetectHints struct {
 	//	 84  -> "tmux"
 	//	 85  -> "rxvt-unicode"
 	//
-	// Zero means "no Secondary DA reply observed". A real VT100 also
-	// reports 0, but distinguishing "absent" from "VT100 saying 0" is
-	// not worth the bookkeeping — both fall back to no TermType hint.
+	// Zero is the "no Secondary DA reply observed" sentinel and
+	// produces no TermType hint. A genuine VT100 also reports 0;
+	// distinguishing "absent" from "VT100 saying 0" is not worth the
+	// bookkeeping, so both fall back to no hint and let TTYPE /
+	// XTVERSION / encoding defaults carry the user.
 	SecondaryDAType int
 
 	// XTVersion is the DCS-wrapped name+version string from an
@@ -133,11 +134,14 @@ func (h DetectHints) ResolveHeight() int {
 
 // secondaryDATypeToTermType maps Secondary DA type codes to canonical
 // TermType strings used by the engine. Unknown codes return "" so the
-// caller can keep searching for a better source.
+// caller can keep searching for a better source. Code 0 is reserved as
+// the "no reply" sentinel (see the SecondaryDAType field doc on
+// DetectHints) and is intentionally not mapped — a genuine VT100
+// reporting 0 is indistinguishable from "no Secondary DA reply", and
+// the engine handles that ambiguity by falling back to TTYPE /
+// XTVERSION / encoding defaults rather than guessing "vt100".
 func secondaryDATypeToTermType(t int) string {
 	switch t {
-	case 0:
-		return "vt100"
 	case 1:
 		return "vt220"
 	case 24:
@@ -283,11 +287,18 @@ func AllProbes() []byte {
 	return out
 }
 
-// ScanProbeReplies parses buf for any terminal auto-responses and merges
-// what it finds into h. Existing non-zero / non-empty fields are
-// preserved — first observation wins, so calling ScanProbeReplies more
-// than once is safe (e.g. login calls it on a press-enter read and then
-// later on a follow-up read).
+// ScanProbeReplies parses buf for any terminal auto-responses and
+// merges what it finds into h. Already-populated fields are preserved
+// (first observation wins), so calling ScanProbeReplies more than once
+// is safe — e.g. login calls it on the press-enter read and could
+// repeat on a follow-up read.
+//
+// "Already-populated" is "non-empty" for strings and "non-zero" for
+// ints. SecondaryDAType=0 is intentionally treated as "not set" — a
+// real VT100 reports 0 and is indistinguishable from "no reply", which
+// the engine handles by falling back to TTYPE / XTVERSION / encoding
+// defaults rather than guessing "vt100" (see the SecondaryDAType
+// field doc on DetectHints).
 //
 // Recognised shapes:
 //   - Primary DA:    ESC [ ? <params> c                → sets ANSICapable
