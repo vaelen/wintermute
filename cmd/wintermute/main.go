@@ -269,6 +269,19 @@ func run(cfgPath string) error {
 			DisplayName: displayName,
 			Write:       presence.Write,
 		}
+		// Enter broadcast — sent BEFORE the registry open so the room
+		// announcement lands before the engagement handler's OnOpen
+		// writes its prompt / first menu frame. Without this order the
+		// engaging player sees "terminal> " or the menu frame first and
+		// only then sees "X sits down at the public terminal." appear
+		// underneath, which reads confusingly. Doing the broadcast first
+		// also means BroadcastToRoom can safely use exclusion=0 (everyone
+		// gets the line, including the engaging player) without racing
+		// the handler's prompt output.
+		enter := engage.ExpandTemplate(host.EnterMsg, displayName, hostName) + "\r\n"
+		if loc, locErr := w.LocationOf(host.ObjectID); locErr == nil {
+			w.BroadcastToRoom(loc.RoomID, 0, enter)
+		}
 		var openErr error
 		if sb == nil {
 			// No session binding (test path or unsupported caller): fall back
@@ -281,12 +294,6 @@ func run(cfgPath string) error {
 		}
 		if openErr != nil {
 			return openErr
-		}
-		// Enter broadcast — sent after a successful open.
-		enter := engage.ExpandTemplate(host.EnterMsg, displayName, hostName) + "\r\n"
-		loc, locErr := w.LocationOf(host.ObjectID)
-		if locErr == nil {
-			w.BroadcastToRoom(loc.RoomID, 0, enter)
 		}
 		return nil
 	}

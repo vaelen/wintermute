@@ -377,7 +377,7 @@ func TestSetEngageMenuTerminal_persistsMenuEntries(t *testing.T) {
 	ctx := context.Background()
 
 	id, err := a.CreateObject(ctx, ObjectSpec{
-		Slug: "lobby-kiosk", Name: "Lobby Kiosk",
+		Slug: "test-kiosk", Name: "Test Kiosk",
 		Kind: world.KindItem, RoomSlug: "lobby",
 	})
 	if err != nil {
@@ -388,7 +388,7 @@ func TestSetEngageMenuTerminal_persistsMenuEntries(t *testing.T) {
 		{Feature: engage.FeatureBoards},
 		{Feature: engage.FeatureFiles, Area: "dropbox"},
 	}
-	if err := a.SetEngage(ctx, "lobby-kiosk", SetEngageOpts{
+	if err := a.SetEngage(ctx, "test-kiosk", SetEngageOpts{
 		Kind: engage.KindMenuTerminal,
 		Menu: menu,
 	}); err != nil {

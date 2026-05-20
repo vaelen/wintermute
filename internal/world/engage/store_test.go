@@ -104,7 +104,11 @@ func TestLoadHosts_resolvesTerminalKindDefaults(t *testing.T) {
 	if !stringSlicesEqual(term.EngageVerbs, wantEngage) {
 		t.Errorf("terminal EngageVerbs = %v, want %v", term.EngageVerbs, wantEngage)
 	}
-	wantDisengage := []string{"stand up", "step away"}
+	// Migration 0023 explicitly overrides the kind-default list to
+	// include "leave" and "exit" as well — players were leaning on
+	// those words and got confused when only the kind-defaults
+	// "stand up" / "step away" matched.
+	wantDisengage := []string{"stand up", "step away", "leave", "exit"}
 	if !stringSlicesEqual(term.DisengageVerbs, wantDisengage) {
 		t.Errorf("terminal DisengageVerbs = %v, want %v", term.DisengageVerbs, wantDisengage)
 	}

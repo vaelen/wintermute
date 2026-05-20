@@ -16,31 +16,56 @@ import (
 )
 
 // defaultMetaCommands are world commands that remain available while a
-// session is engaged. Movement commands are included so that wh.Dispatch
-// (which calls cmdMove → closeEngagementIfAny) handles auto-disengage
-// before the move, matching the design in docs/milestones/05.7.
+// session is engaged. Movement and help are intentionally NOT in this
+// list:
+//
+//   - Movement directions used to auto-disengage on use (per the
+//     original M5.7 design) but that behaviour surprised players — at
+//     a terminal, typing `n` looks like a typo, not a deliberate
+//     "stand up and walk out." The engagement dispatcher now
+//     intercepts movement attempts and prints a "disengage first"
+//     notice instead.
+//
+//   - `help` and `?` belong to whichever interface owns the session:
+//     the terminal handler has its own writeHelp listing the actual
+//     terminal commands and disengage verbs, and the menu draws its
+//     options on screen. Routing them up to the world parser was a
+//     bug — it dumped movement/say/who help on top of a player who
+//     was looking at a BBS.
+//
+// `look` and `who` stay so the player can glance at the room without
+// closing the engagement. `terminal` stays because the resize hook
+// re-renders the active engagement (see engage.Resizer).
 var defaultMetaCommands = []string{
-	"look", "l", "who", "help", "?",
-	// movement directions — auto-disengage happens inside cmdMove
-	"n", "north", "s", "south", "e", "east", "w", "west",
-	"u", "up", "d", "down", "in", "out", "go",
-	// terminal capability tuning works mid-engagement so a player can
-	// resize / re-encode without disengaging. Width changes trigger a
-	// live re-render via the engage.Resizer hook (see reconfigure).
-	"terminal",
+	"look", "l", "who", "terminal",
 }
 
-// menuMetaCommands is the subset of defaultMetaCommands that still apply
-// inside a menu_terminal engagement. Menu hosts are modal: their state
-// machine owns every keystroke (numbered selectors, B for Back, Q for
-// Quit, plus per-screen letters like N for Next page and U for "promote
-// to builder"). Routing single-letter movement directions to the world
-// parser there would close the engagement out from under the user.
-// Universal world commands (look/who/help/terminal) stay reachable so
-// the player can still glance at the world or resize their terminal
-// mid-menu.
+// menuMetaCommands is the equivalent allow-list for menu_terminal
+// engagements. The menu state machine owns every keystroke (numbered
+// selectors, B for Back, Q for Quit, plus per-screen letters), so the
+// list is intentionally identical to defaultMetaCommands rather than
+// any broader. Universal world commands (look/who/terminal) stay
+// reachable so the player can glance at the world or resize their
+// terminal mid-menu.
 var menuMetaCommands = []string{
-	"look", "l", "who", "help", "?", "terminal",
+	"look", "l", "who", "terminal",
+}
+
+// movementDirections is every input the world parser would treat as a
+// movement command. Used by the engagement dispatcher to short-circuit
+// movement attempts with a friendlier "disengage first" notice instead
+// of passing them through to the world (which would auto-disengage as
+// a side effect) or to the engagement handler (which would render
+// "command not recognized").
+var movementDirections = map[string]bool{
+	"n": true, "north": true,
+	"s": true, "south": true,
+	"e": true, "east": true,
+	"w": true, "west": true,
+	"u": true, "up": true,
+	"d": true, "down": true,
+	"in": true, "out": true,
+	"go": true,
 }
 
 // commandLoop runs the post-login input loop. The line is first offered to
@@ -105,6 +130,15 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 					if h.EngageRegistry != nil {
 						engage.CloseForSession(h.EngageRegistry, s, engage.CloseVoluntary)
 					}
+					continue
+				}
+				// Movement attempts are explicitly blocked while
+				// engaged. Print the host's disengage hint so the
+				// player knows how to step away first, then drop the
+				// input.
+				cmd, _ := splitCmd(line)
+				if movementDirections[strings.ToLower(cmd)] {
+					_ = s.writeString(movementBlockedNotice(eng.Host) + "\r\n")
 					continue
 				}
 				if !engagementMetaCommand(line, eng) {
@@ -209,6 +243,18 @@ func (h *Handler) detachFromWorld(s *Session, reason world.DisconnectReason) {
 		engage.CloseForSession(h.EngageRegistry, s, engage.CloseDisconnect)
 	}
 	h.World.Detach(s.playerID, reason)
+}
+
+// movementBlockedNotice renders the player-facing message printed when
+// movement is attempted mid-engagement. It names the *first* disengage
+// verb on the host (or falls back to the universal "disengage") so the
+// hint matches whatever the host actually accepts.
+func movementBlockedNotice(host *engage.Host) string {
+	verb := "disengage"
+	if host != nil && len(host.DisengageVerbs) > 0 {
+		verb = host.DisengageVerbs[0]
+	}
+	return "You can't move while engaged. Try `" + verb + "` first."
 }
 
 // engagementMetaCommand reports whether the line's first token should

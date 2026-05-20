@@ -375,14 +375,14 @@ func TestLuaSetEngageTerminal(t *testing.T) {
 func TestLuaSetEngageMenuTerminal_storesMenuEntries(t *testing.T) {
 	pool, wapi, hc := newTestPoolWithEngage(t)
 	id, err := wapi.CreateObject(context.Background(), worldapi.ObjectSpec{
-		Slug: "lobby-kiosk", Name: "Lobby Kiosk",
+		Slug: "test-kiosk", Name: "Test Kiosk",
 		Kind: "item", RoomSlug: "lobby",
 	})
 	if err != nil {
 		t.Fatalf("CreateObject: %v", err)
 	}
 	err = runScript(t, pool, `
-		wintermute.object.set_engage("lobby-kiosk", {
+		wintermute.object.set_engage("test-kiosk", {
 			kind = "menu_terminal",
 			menu = {
 				{ feature = "mail" },
