@@ -66,15 +66,20 @@ func TestDisallowedSeedExcludesExistingAccount(t *testing.T) {
 	// At this point the seed has already run. Manually re-insert "admin"
 	// into accounts and re-execute the protective DELETE clause to
 	// confirm the migration's intent. This is the same test the M6.6
-	// plan calls out at acceptance criterion 11.
-	_, err = db.Read().ExecContext(ctx,
-		`INSERT INTO accounts(username, password_hash, access_level, created_at) VALUES ('admin', 'x', 'admin', strftime('%s','now'))`)
-	if err != nil {
+	// plan calls out at acceptance criterion 11. Writes go through
+	// db.Write so the single-writer invariant holds under -race.
+	if err := db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO accounts(username, password_hash, access_level, created_at) VALUES ('admin', 'x', 'admin', strftime('%s','now'))`)
+		return err
+	}); err != nil {
 		t.Fatalf("insert pre-existing admin: %v", err)
 	}
-	_, err = db.Read().ExecContext(ctx,
-		`DELETE FROM disallowed_usernames WHERE username IN (SELECT username FROM accounts)`)
-	if err != nil {
+	if err := db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`DELETE FROM disallowed_usernames WHERE username IN (SELECT username FROM accounts)`)
+		return err
+	}); err != nil {
 		t.Fatalf("post-seed delete: %v", err)
 	}
 
@@ -126,6 +131,11 @@ func TestDisallowUsername(t *testing.T) {
 		t.Errorf("disallow 'new': want ErrDisallowReservedKeyword, got %v", err)
 	}
 
+	// Duplicate add returns the typed sentinel, not a raw SQLite error.
+	if err := svc.DisallowUsername(ctx, "evilbot", "spam", nil); !errors.Is(err, ErrAlreadyDisallowed) {
+		t.Errorf("duplicate DisallowUsername: want ErrAlreadyDisallowed, got %v", err)
+	}
+
 	// Allow removes the row.
 	if err := svc.AllowUsername(ctx, "evilbot"); err != nil {
 		t.Fatalf("AllowUsername: %v", err)
@@ -136,12 +146,47 @@ func TestDisallowUsername(t *testing.T) {
 	}
 }
 
+func TestRemoveDenyReportsErrIPNotFound(t *testing.T) {
+	svc, _ := newTestService(t, nil)
+	ctx := context.Background()
+	addr := netip.MustParseAddr("10.99.99.99")
+	if err := svc.RemoveDeny(ctx, addr); !errors.Is(err, ErrIPNotFound) {
+		t.Errorf("RemoveDeny on unknown IP: want ErrIPNotFound, got %v", err)
+	}
+}
+
+func TestCleanupExpiredAlwaysGCsAttempts(t *testing.T) {
+	clock := newFakeClock(time.Unix(1_700_000_000, 0))
+	svc, _ := newTestService(t, clock.now)
+	ctx := context.Background()
+	// Drive a few sub-threshold attempts so the tracker has entries
+	// that no later eviction will revisit.
+	for _, s := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"} {
+		svc.RecordFailedPassword(ctx, netip.MustParseAddr(s))
+	}
+	if svc.SnapshotAttempts() == 0 {
+		t.Fatalf("expected attempt tracker to have entries before tick")
+	}
+	// Advance past the window and run the janitor. The DB purge will
+	// find nothing to remove (no temp ip_denials rows here), but the
+	// attempt tracker should still be swept clean.
+	clock.advance(10 * time.Minute)
+	if _, err := svc.EvictExpired(ctx); err != nil {
+		t.Fatalf("EvictExpired: %v", err)
+	}
+	if n := svc.SnapshotAttempts(); n != 0 {
+		t.Errorf("attempt tracker not GC'd on no-DB-rows path; have %d entries", n)
+	}
+}
+
 func TestDisallowConflictWithAccount(t *testing.T) {
 	svc, db := newTestService(t, nil)
 	ctx := context.Background()
-	_, err := db.Read().ExecContext(ctx,
-		`INSERT INTO accounts(username, password_hash, access_level, created_at) VALUES ('alice', 'x', 'player', strftime('%s','now'))`)
-	if err != nil {
+	if err := db.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO accounts(username, password_hash, access_level, created_at) VALUES ('alice', 'x', 'player', strftime('%s','now'))`)
+		return err
+	}); err != nil {
 		t.Fatalf("insert account: %v", err)
 	}
 	if err := svc.DisallowUsername(ctx, "alice", "test", nil); !errors.Is(err, ErrDisallowExistingAccount) {

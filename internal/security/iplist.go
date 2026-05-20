@@ -173,5 +173,6 @@ func purgeExpiredIPDenials(ctx context.Context, tx *sql.Tx, now time.Time) ([]ne
 	return expired, nil
 }
 
-// errIPNotFound is returned by RemoveDeny when the address is unknown.
-var errIPNotFound = errors.New("security: ip not in deny list")
+// ErrIPNotFound is returned by RemoveDeny when the address is unknown.
+// Exported so admin renderers can errors.Is it and print a clean line.
+var ErrIPNotFound = errors.New("security: ip not in deny list")

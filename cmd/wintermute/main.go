@@ -705,6 +705,7 @@ func buildTerminalDeps(
 func terminalDepsWithSecurity(deps *engage.TerminalDeps, secSvc *security.Service, adminAPI *worldapi.API) *engage.TerminalDeps {
 	deps.Security = secSvc
 	deps.RenameAccount = adminAPI.RenameAccount
+	deps.RenameAccountByID = adminAPI.RenameAccountByID
 	return deps
 }
 

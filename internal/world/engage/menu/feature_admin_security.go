@@ -21,7 +21,7 @@ type adminUserRename struct{ id int64 }
 
 func (s adminUserRename) render(h *Handler, _ *engage.Participant) string {
 	d := getDeps(h)
-	if d == nil || d.Auth == nil || d.RenameAccount == nil {
+	if d == nil || d.Auth == nil || d.RenameAccountByID == nil {
 		return frame(h, "admin — User — Rename", []Row{
 			{Blank: true},
 			{Label: "(rename service unavailable)"},
@@ -61,10 +61,15 @@ func (s adminUserRename) handle(h *Handler, p *engage.Participant, line string) 
 		return
 	}
 	d := getDeps(h)
-	if d == nil || d.Auth == nil || d.RenameAccount == nil {
+	if d == nil || d.Auth == nil || d.RenameAccountByID == nil {
 		h.redraw(p)
 		return
 	}
+	// Snapshot the current username for the audit and confirmation
+	// lines, but rename by stable ID. If another admin renames the
+	// same account between this read and the rename, the rename still
+	// targets the correct row; only the displayed "old name" may be
+	// stale, and that's purely cosmetic.
 	target, err := d.Auth.GetByID(h.ctx(), s.id)
 	if err != nil {
 		_ = p.Write(fmt.Sprintf("rename: %v\r\n", err))
@@ -76,7 +81,7 @@ func (s adminUserRename) handle(h *Handler, p *engage.Participant, line string) 
 	if actor != nil {
 		actorID = actor.ID
 	}
-	if err := d.RenameAccount(h.ctx(), target.Username, trimmed, actorID); err != nil {
+	if err := d.RenameAccountByID(h.ctx(), s.id, trimmed, actorID); err != nil {
 		_ = p.Write(fmt.Sprintf("rename: %v\r\n", err))
 		h.redraw(p)
 		return
@@ -783,6 +788,10 @@ func securityErrLine(err error) string {
 		return "error: cannot disallow the account-create keyword\r\n"
 	case errors.Is(err, security.ErrDisallowExistingAccount):
 		return "error: name collides with an existing account\r\n"
+	case errors.Is(err, security.ErrAlreadyDisallowed):
+		return "error: username is already on the disallow list\r\n"
+	case errors.Is(err, security.ErrIPNotFound):
+		return "error: IP is not on the deny list\r\n"
 	case errors.Is(err, auth.ErrUsernameTaken):
 		return "error: username already taken\r\n"
 	case errors.Is(err, auth.ErrInvalidUsername):

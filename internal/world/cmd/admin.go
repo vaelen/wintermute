@@ -914,6 +914,10 @@ func formatSecurityErr(err error) string {
 		return "error: cannot disallow the account-create keyword\r\n"
 	case errors.Is(err, security.ErrDisallowExistingAccount):
 		return "error: name collides with an existing account — rename or delete the account first\r\n"
+	case errors.Is(err, security.ErrAlreadyDisallowed):
+		return "error: username is already on the disallow list\r\n"
+	case errors.Is(err, security.ErrIPNotFound):
+		return "error: IP is not on the deny list\r\n"
 	}
 	return "error: " + err.Error() + "\r\n"
 }

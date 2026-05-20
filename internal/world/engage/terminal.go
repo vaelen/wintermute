@@ -103,8 +103,18 @@ type TerminalDeps struct {
 
 	// RenameAccount wraps API.RenameAccount so the menu can rename
 	// without importing world/api. Optional; nil suppresses the
-	// Rename action on adminUserView.
+	// Rename action on adminUserView. Kept for parity with the
+	// CLI/Lua name-based callers; the menu uses RenameAccountByID
+	// to avoid a TOCTOU window between selector resolution and
+	// rename execution.
 	RenameAccount func(ctx context.Context, currentName, newName string, renamedBy int64) error
+
+	// RenameAccountByID is the TOCTOU-safe rename hook used by the
+	// admin menu. It keys end-to-end on the stable account ID the
+	// menu state already holds, sidestepping the by-name re-resolve
+	// that RenameAccount performs. Optional; nil falls back to
+	// RenameAccount with the displayed username.
+	RenameAccountByID func(ctx context.Context, accountID int64, newName string, renamedBy int64) error
 }
 
 // TerminalHandler is the built-in handler for kind='terminal' hosts.

@@ -331,7 +331,7 @@ func decodeAddedBy(s string) (int64, bool) {
 }
 
 // RemoveDeny deletes the deny entry for addr (both DB and cache).
-// Returns errIPNotFound when no row exists.
+// Returns ErrIPNotFound when no row exists.
 func (s *Service) RemoveDeny(ctx context.Context, addr netip.Addr) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -342,7 +342,7 @@ func (s *Service) RemoveDeny(ctx context.Context, addr netip.Addr) error {
 	).Scan(&one)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return errIPNotFound
+			return ErrIPNotFound
 		}
 		return fmt.Errorf("security: lookup before remove: %w", err)
 	}
@@ -492,6 +492,12 @@ func (s *Service) EvictExpired(ctx context.Context) (int, error) {
 // cleanupExpired performs one janitor pass at the supplied instant.
 // Counts the rows removed; safe to call both at Start (with a stale
 // cache) and from the ticker.
+//
+// The failed-password attempt tracker is GC'd unconditionally on every
+// tick, not only on the branch where the DB purge removed rows. A
+// long-running server with persistent low-volume probers (e.g. 1–4
+// failed attempts inside the window, then quiet) would otherwise leak
+// per-IP slices forever, since lazy eviction never visits them again.
 func (s *Service) cleanupExpired(ctx context.Context, at time.Time) (int, error) {
 	var removed []netip.Addr
 	s.mu.Lock()
@@ -503,6 +509,7 @@ func (s *Service) cleanupExpired(ctx context.Context, at time.Time) (int, error)
 	}); err != nil {
 		return 0, err
 	}
+	_ = s.attempts.gc()
 	if len(removed) == 0 {
 		// Belt-and-suspenders: also walk the cache for expired entries
 		// that may have been added through a different writer (impossible
@@ -516,7 +523,6 @@ func (s *Service) cleanupExpired(ctx context.Context, at time.Time) (int, error)
 	for _, a := range removed {
 		s.cache.remove(a)
 	}
-	_ = s.attempts.gc()
 	return len(removed), nil
 }
 

@@ -35,6 +35,11 @@ var (
 	// ErrDisallowExistingAccount is returned by DisallowUsername when
 	// the requested name matches a current row in accounts.
 	ErrDisallowExistingAccount = errors.New("security: name collides with an existing account")
+	// ErrAlreadyDisallowed is returned by DisallowUsername when the name
+	// is already in the disallowed_usernames table. Lets the admin UI
+	// render a clean "already on the list" message instead of falling
+	// through to a raw SQLite UNIQUE-constraint error.
+	ErrAlreadyDisallowed = errors.New("security: username already disallowed")
 )
 
 // DisallowedUsername is a single row in the disallowed_usernames table.
@@ -48,14 +53,25 @@ type DisallowedUsername struct {
 
 // disallowUsername inserts a name into disallowed_usernames inside tx.
 // Pre-conditions (sentinel keyword, existing-account collision) are
-// checked by the caller; this is the raw insert helper.
+// checked by the caller; this is the raw insert helper. Uses
+// INSERT OR IGNORE + RowsAffected so a duplicate add returns a typed
+// ErrAlreadyDisallowed instead of a raw modernc.org/sqlite UNIQUE
+// constraint error (CLAUDE.md sentinel-error rule).
 func disallowUsername(ctx context.Context, tx *sql.Tx, name, reason string, addedBy *int64) error {
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO disallowed_usernames (username, reason, added_at, added_by)
+	res, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO disallowed_usernames (username, reason, added_at, added_by)
 		 VALUES (?, ?, ?, ?)`,
 		name, reason, time.Now().Unix(), addedBy,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("security: disallow %q: %w", name, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("security: disallow %q rows-affected: %w", name, err)
+	}
+	if n == 0 {
+		return ErrAlreadyDisallowed
 	}
 	return nil
 }

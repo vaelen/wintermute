@@ -58,6 +58,10 @@ func (a *API) SetAccountLevel(ctx context.Context, username, level string) error
 // "duplicate_slug" when newName is taken, "permission_denied" for
 // disallowed names, and "invalid_argument" for everything else
 // (reserved-name, syntax errors).
+//
+// Callers that have a stable account ID in hand should prefer
+// RenameAccountByID — the name-based path re-resolves the account
+// and has a TOCTOU window when two admins act concurrently.
 func (a *API) RenameAccount(ctx context.Context, currentName, newName string, renamedBy int64) error {
 	if a.Accts == nil {
 		return errorf(CodeInternal, "account store not wired")
@@ -69,11 +73,37 @@ func (a *API) RenameAccount(ctx context.Context, currentName, newName string, re
 		}
 		return errorf(CodeInternal, "rename lookup: %v", err)
 	}
+	return a.renameByID(ctx, target.ID, currentName, newName, renamedBy)
+}
+
+// RenameAccountByID is the TOCTOU-safe form for callers that already
+// hold a stable account ID (e.g. the admin menu). The currentName is
+// only used to render not-found errors when the row has been deleted
+// since the menu state was constructed; the rename itself is keyed by
+// ID end-to-end.
+func (a *API) RenameAccountByID(ctx context.Context, accountID int64, newName string, renamedBy int64) error {
+	if a.Accts == nil {
+		return errorf(CodeInternal, "account store not wired")
+	}
+	cur, err := a.Accts.GetByID(ctx, accountID)
+	if err != nil {
+		if errors.Is(err, auth.ErrAccountNotFound) {
+			return notFound("account", "")
+		}
+		return errorf(CodeInternal, "rename lookup: %v", err)
+	}
+	return a.renameByID(ctx, accountID, cur.Username, newName, renamedBy)
+}
+
+// renameByID is the shared rename body that translates auth-layer
+// sentinel errors into the API's stable codes. currentName is purely
+// for not-found context strings.
+func (a *API) renameByID(ctx context.Context, id int64, currentName, newName string, renamedBy int64) error {
 	var actor *int64
 	if renamedBy > 0 {
 		actor = &renamedBy
 	}
-	switch err := a.Accts.Rename(ctx, target.ID, newName, actor); {
+	switch err := a.Accts.Rename(ctx, id, newName, actor); {
 	case err == nil:
 		return nil
 	case errors.Is(err, auth.ErrUsernameTaken):
