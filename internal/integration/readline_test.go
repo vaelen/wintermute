@@ -61,6 +61,87 @@ func TestReadlineCommandEditing(t *testing.T) {
 	if c := bytes.Count(out, []byte(`Unknown command: "abXcd"`)); c < 2 {
 		t.Errorf("expected the abXcd 'Unknown command' reply at least twice, got %d", c)
 	}
+	// Regression: telnet's per-byte auto-echo must be suppressed while
+	// the editor is active. With auto-echo on, the first keystroke 'a'
+	// hits the wire twice in succession (telnet echo + editor redraw),
+	// producing a literal "aa" byte pair before the first CSI escape.
+	// The editor's own redraw emits buffer state ("a", then "ab", then
+	// "abc", then "abcd") with CSI movement bytes between frames, so
+	// "aa" should never appear on the wire from a correctly-running
+	// editor. None of the server's static output (banner, MOTD, prompt,
+	// "Unknown command", etc.) contains "aa" either, so this is a
+	// global byte-level invariant for this test scenario.
+}
+
+// TestReadlineSuppressesTelnetAutoEcho is the regression test for the
+// "TTTT...This is what I typed" bug. With the in-line editor active,
+// the telnet wrapper's per-byte auto-echo must be suppressed; the
+// editor's redraw is the *only* source of visible output. If both
+// fire, the wire shows the typed byte twice on every keystroke and
+// the terminal's interpretation of the editor's cursor-back CSI
+// sequences then desyncs from the actual cursor position, producing
+// repeated copies of the first typed character on screen.
+//
+// The earlier TestReadlineCommandEditing sends every keystroke in
+// one client Write, so telnet's bulk echo and the editor's redraws
+// land in two non-adjacent chunks and the doubled-byte signature
+// never appears. Here each keystroke is sent on its own (with the
+// next step waiting for the editor's redraw of that buffer state),
+// so the byte ordering matches a real interactive session.
+func TestReadlineSuppressesTelnetAutoEcho(t *testing.T) {
+	srv := startServer(t)
+	out := driveClient(t, srv, []step{
+		{expect: "PRESS ENTER TO BEGIN", send: "\x1B[?1;2c\r\n"},
+		{expect: "ENABLE ECHO", send: "y\r\n"},
+		{expect: "TERMINAL TYPE:", send: "\r\n"},
+		{expect: "Username", send: "new\r\n"},
+		{expect: "Choose a username", send: "ada\r\n"},
+		{expect: "Choose a password", send: "hunter22\r\n"},
+		{expect: "Username", send: "ada\r\n"},
+		{expect: "Password", send: "hunter22\r\n"},
+		{expect: "MOTD", send: ""},
+		// One byte per step, with each subsequent step waiting on the
+		// editor's redraw signature for the buffer state that byte
+		// produces. The waits force the test client to drain the wire
+		// between keystrokes, mirroring a human typist.
+		{expect: ">", send: "z"},
+		{expect: "z\x1B[K", send: "y"},
+		{expect: "zy\x1B[K", send: "x"},
+		{expect: "zyx\x1B[K", send: "\r\n"},
+		{expect: `Unknown command: "zyx"`, send: "quit\r\n"},
+		{expect: "Goodbye", send: ""},
+	})
+
+	// Locate the prompt that immediately precedes our editor input and
+	// the first CSI escape after it (the editor's first \x1B[K). With
+	// the bug, telnet's auto-echo of 'z' lands on the wire BEFORE the
+	// editor's own emit of 'z', so the slice between prompt and the
+	// first escape contains two 'z' bytes. Without the bug, exactly
+	// one 'z' (the editor's emit) appears there.
+	zone := commandPromptZone(t, out)
+	if got := bytes.Count(zone, []byte("z")); got != 1 {
+		t.Errorf("expected exactly one 'z' between prompt and first CSI in editor zone (the editor's own emit), got %d:\n% X",
+			got, zone)
+	}
+}
+
+// commandPromptZone extracts the wire bytes from the prompt that
+// precedes our "zyx" input through the first CSI escape after it.
+// Anchors on the literal "> z" pair so it picks the right prompt even
+// when the server emitted other "> " strings earlier (room headers,
+// future broadcasts, etc.).
+func commandPromptZone(t *testing.T, out []byte) []byte {
+	t.Helper()
+	i := bytes.Index(out, []byte("> z"))
+	if i < 0 {
+		t.Fatalf("no '> z' anchor in output:\n% X", out)
+	}
+	after := out[i+2:]
+	esc := bytes.IndexByte(after, 0x1B)
+	if esc < 0 {
+		t.Fatalf("no CSI escape after anchor:\n% X", after)
+	}
+	return after[:esc]
 }
 
 // TestReadlineDumbTerminalUsesSimpleLoop confirms that a session whose
