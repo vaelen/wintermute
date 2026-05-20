@@ -428,24 +428,31 @@ func TestEngageKiosk_seededAsMenu(t *testing.T) {
 	alice.send("quit\r\n")
 }
 
-// TestEngageMenu_singleLetterNotHijackedByLook guards against the
-// menu-vs-world meta-command collision that caused 'l' (the menu's
-// "List files" selector on the admin Files screen, and a likely
-// future selector elsewhere) to invoke the world's `look` command
-// instead. menuMetaCommands listed `l` as a synonym for `look`, so
-// while engaged in a menu the world parser hijacked the keystroke
-// before the menu state machine ever saw it.
+// TestEngageMenu_singleLetterFullyModal guards against single-letter
+// menu selectors being intercepted by the world layer. Menus use
+// single letters for almost everything — d=delete on the mail
+// screen, l=List files on admin Files, n=Next page, p=Prev,
+// u=Upload, and so on. Two specific escape paths have caused user-
+// visible bugs:
 //
-// Test plan: open the kiosk, type 'l' at the main menu (where 'l'
-// is NOT a recognised selector and the correct response is a quiet
-// redraw of the same frame). Assert that the world's `look` output
-// — recognisable by the room name + Exits line — does NOT appear
-// on the wire. We don't drill into the admin Files screen because
-// the integration test's startEngageServer wires a minimal menu
-// without an auth dep, so visibleMenu strips the Admin entry there;
-// but the meta-command bug is at the dispatch layer above the menu,
-// so any menu state will exercise it.
-func TestEngageMenu_singleLetterNotHijackedByLook(t *testing.T) {
+//   - 'l' matched `look` in menuMetaCommands, so the world parser
+//     rendered the room when the player meant "List files."
+//   - 'd' (and 'n', 's', 'e', 'w', 'u', 'in', 'out', 'go') matches
+//     movementDirections, which prints "You can't move while
+//     engaged." — drowning out the menu's actual response.
+//
+// The dispatcher short-circuits both for KindMenuTerminal: any
+// single-character input is routed straight to the menu handler.
+// This test exercises both classes by typing two characters that
+// would, without the fix, have escaped:
+//
+//   - 'l' (would have been re-routed to world `look`)
+//   - 'd' (would have been caught by the d=down movement block)
+//
+// In both cases we expect the menu to silently redraw — neither
+// the world's room render nor the movement-block notice may appear
+// on the wire.
+func TestEngageMenu_singleLetterFullyModal(t *testing.T) {
 	srv := startEngageServer(t)
 	alice := dialClient(t, srv)
 	alice.loginNew("alice", "hunter22")
@@ -454,19 +461,19 @@ func TestEngageMenu_singleLetterNotHijackedByLook(t *testing.T) {
 	alice.send("use kiosk\r\n")
 	alice.expect("Select:", 5*time.Second)
 
-	// Snapshot the buffer position right before we send the
-	// vulnerable keystroke, so the substring assertion below only
-	// looks at the bytes returned in response.
-	preL := len(alice.string())
-	alice.send("l\r\n")
-	alice.drainFor(500 * time.Millisecond)
-	got := alice.string()[preL:]
-
-	// The world's `look` rendering carries "The Lobby" + "Exits:";
-	// the menu's redraw does not. Either substring appearing means
-	// the keystroke was hijacked.
-	if strings.Contains(got, "The Lobby") || strings.Contains(got, "Exits:") {
-		t.Errorf("'l' was hijacked by world `look` instead of routing to the menu:\n%s", got)
+	for _, key := range []string{"l", "d"} {
+		pre := len(alice.string())
+		alice.send(key + "\r\n")
+		alice.drainFor(300 * time.Millisecond)
+		got := alice.string()[pre:]
+		// World `look` escape:
+		if strings.Contains(got, "The Lobby") || strings.Contains(got, "Exits:") {
+			t.Errorf("%q was hijacked by world `look`:\n%s", key, got)
+		}
+		// Movement-block escape:
+		if strings.Contains(got, "You can't move while engaged") {
+			t.Errorf("%q was caught by the movement-block notice:\n%s", key, got)
+		}
 	}
 
 	alice.send("quit\r\n")

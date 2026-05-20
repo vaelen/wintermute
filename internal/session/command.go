@@ -133,10 +133,27 @@ func (h *Handler) commandLoop(ctx context.Context, s *Session) {
 					}
 					continue
 				}
-				// Movement attempts are explicitly blocked while
-				// engaged. Print the host's disengage hint so the
-				// player knows how to step away first, then drop the
-				// input.
+				// In a menu engagement, single-character input ALWAYS
+				// goes straight to the menu handler. Menu screens use
+				// single letters as their own selectors — d=delete
+				// on the mail screen, l=List files on admin Files,
+				// n=Next page, p=Previous page, u=Upload, etc.
+				// Without this short-circuit, `d` would be caught by
+				// the movement block (d=down), `n` by the same
+				// (n=north), `l` by a hypothetical future meta-
+				// command, and so on. The menu is fully modal for
+				// single-letter input; the only escape hatch is the
+				// host's disengage verbs, checked above.
+				if eng.Host.Kind == engage.KindMenuTerminal && len(line) == 1 {
+					if p := participantFor(s, eng); p != nil {
+						eng.Handler.Handle(p, line)
+					}
+					continue
+				}
+				// Movement attempts (multi-char or non-menu hosts)
+				// are explicitly blocked while engaged. Print the
+				// host's disengage hint so the player knows how to
+				// step away first, then drop the input.
 				cmd, _ := splitCmd(line)
 				if movementDirections[strings.ToLower(cmd)] {
 					_ = s.writeString(movementBlockedNotice(eng.Host) + "\r\n")
