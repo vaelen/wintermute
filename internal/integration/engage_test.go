@@ -27,6 +27,7 @@ import (
 	"github.com/vaelen/wintermute/internal/world"
 	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
 	"github.com/vaelen/wintermute/internal/world/engage"
+	"github.com/vaelen/wintermute/internal/world/engage/menu"
 )
 
 // npcEngageChatAdapter wraps an NPC so it satisfies engage.NPCClient.
@@ -128,6 +129,23 @@ func startEngageServer(t *testing.T) *testServer {
 		switch host.Kind {
 		case engage.KindTerminal:
 			h = engage.NewTerminalHandler(host, closeBroadcast)
+		case engage.KindMenuTerminal:
+			// Minimal menu handler for integration tests: no Mail /
+			// Boards / Files deps wired, just enough to render the
+			// main menu frame and exercise the dispatch path.
+			mh := menu.NewHandler(host, closeBroadcast)
+			mh.SetWidth(presence.TermWidth)
+			mh.SetHeight(presence.TermHeight)
+			mh.SetDisengage(func() {
+				if sb != nil {
+					engage.CloseForSession(engageReg, sb, engage.CloseVoluntary)
+					return
+				}
+				if eng := engageReg.HostEngagement(host.ObjectID); eng != nil {
+					engageReg.Close(eng, engage.CloseVoluntary)
+				}
+			})
+			h = mh
 		case engage.KindNPC:
 			n := npcReg.Get(host.ObjectID)
 			if n == nil {
@@ -149,6 +167,13 @@ func startEngageServer(t *testing.T) *testServer {
 			DisplayName: displayName,
 			Write:       presence.Write,
 		}
+		// Enter broadcast BEFORE the registry open — mirrors the
+		// production engageOpen so integration tests observe the same
+		// ordering (room broadcast first, then handler's OnOpen).
+		enter := engage.ExpandTemplate(host.EnterMsg, displayName, hostName) + "\r\n"
+		if loc, locErr := w.LocationOf(host.ObjectID); locErr == nil {
+			w.BroadcastToRoom(loc.RoomID, 0, enter)
+		}
 		var openErr error
 		if sb == nil {
 			_, openErr = engageReg.Open(host, h, p)
@@ -157,10 +182,6 @@ func startEngageServer(t *testing.T) *testServer {
 		}
 		if openErr != nil {
 			return openErr
-		}
-		enter := engage.ExpandTemplate(host.EnterMsg, displayName, hostName) + "\r\n"
-		if loc, locErr := w.LocationOf(host.ObjectID); locErr == nil {
-			w.BroadcastToRoom(loc.RoomID, 0, enter)
 		}
 		return nil
 	}
@@ -282,10 +303,14 @@ func TestEngageTerminal_outsideViewAndPrivateContent(t *testing.T) {
 	bob.send("quit\r\n")
 }
 
-// TestEngageTerminal_movementAutoDisengages verifies that moving to another
-// room automatically closes the engagement (CloseMovement) and that Bob sees
-// the exit broadcast before Alice's movement message.
-func TestEngageTerminal_movementAutoDisengages(t *testing.T) {
+// TestEngageTerminal_movementBlocked verifies the M6.6+ behaviour: a
+// movement attempt while engaged does NOT auto-disengage anymore.
+// Instead the engagement dispatcher prints a "disengage first" hint
+// naming the host's first disengage verb, and the player stays at the
+// terminal. Bob in the corridor must not see any movement broadcast.
+// Replaces the older _movementAutoDisengages test that asserted the
+// opposite behaviour.
+func TestEngageTerminal_movementBlocked(t *testing.T) {
 	srv := startEngageServer(t)
 	alice := dialClient(t, srv)
 	bob := dialClient(t, srv)
@@ -300,17 +325,158 @@ func TestEngageTerminal_movementAutoDisengages(t *testing.T) {
 	alice.expect("terminal>", 5*time.Second)
 	bob.expect("sits down at", 5*time.Second)
 
-	// Alice moves east; the engagement should auto-close.
+	// Alice tries to walk east — the dispatcher should block the
+	// movement and print the "disengage first" notice. The hint
+	// names "stand up" because that's the first disengage verb on
+	// the lobby terminal's row (migration 0023).
 	alice.send("e\r\n")
+	alice.expect("You can't move while engaged", 5*time.Second)
+	alice.expect("stand up", 5*time.Second)
 
-	// Alice should land in the Maintenance Corridor.
-	alice.expect("Maintenance Corridor", 5*time.Second)
+	// Bob must not see any exit broadcast: Alice never actually moved
+	// and never auto-disengaged.
+	bob.drainFor(300 * time.Millisecond)
+	if got := bob.unread(); strings.Contains(got, "steps away from") {
+		t.Errorf("bob saw an exit broadcast for a blocked movement: %q", got)
+	}
 
-	// Bob should see the exit broadcast ("steps away from") before alice leaves.
+	// Sanity: Alice is still engaged. Her terminal prompt is still
+	// active, so `help` should reach the terminal handler (not the
+	// world parser) and print the terminal's command list.
+	alice.send("help\r\n")
+	alice.expect("Terminal commands:", 5*time.Second)
+
+	// Now disengage explicitly and confirm the broadcast lands.
+	alice.send("stand up\r\n")
 	bob.expect("steps away from", 5*time.Second)
 
 	alice.send("quit\r\n")
 	bob.send("quit\r\n")
+}
+
+// TestEngageTerminal_enterBroadcastBeforePrompt verifies the M6.6
+// reordering: the enter broadcast goes out before the engagement
+// handler's OnOpen. Asserted by having a second player (bob) in the
+// room: with the reorder, bob's wire shows the enter line as soon as
+// alice's input lands, *before* any of alice's OnOpen output could
+// possibly reach a per-room broadcast. Previously, OnOpen ran first,
+// so the prompt landed first on the engaging player's wire and only
+// then did the broadcast go out to everyone else. We test via the
+// observer because the engaging player's own writes (the OnOpen
+// hint + prompt) are scoped to her session and never appear on
+// bob's wire, so timing-on-bob is a clean signal.
+func TestEngageTerminal_enterBroadcastBeforePrompt(t *testing.T) {
+	srv := startEngageServer(t)
+	alice := dialClient(t, srv)
+	bob := dialClient(t, srv)
+
+	alice.loginNew("alice", "hunter22")
+	bob.loginNew("bob", "hunter22")
+	alice.drainFor(300 * time.Millisecond)
+	bob.drainFor(300 * time.Millisecond)
+
+	// Alice engages — bob should see the enter broadcast.
+	alice.send("sit at terminal\r\n")
+	bob.expect("alice sits down at", 5*time.Second)
+
+	// Alice's own wire reaches the terminal prompt as usual; the
+	// assertion above is the order-of-operations check.
+	alice.expect("terminal>", 5*time.Second)
+
+	alice.send("disengage\r\n")
+	bob.expect("steps away from", 5*time.Second)
+
+	alice.send("quit\r\n")
+	bob.send("quit\r\n")
+}
+
+// TestEngageKiosk_seededAsMenu confirms the new mail-and-news kiosk
+// in the lobby uses the menu_terminal handler AND has a usable menu.
+// Engaging it should render a framed BBS menu with Mail / Boards /
+// Files entries (the kiosk's seeded menu config in policy JSON) and
+// the implicit Q) Quit footer. The bug this guards against is the
+// initial 0023 migration shipping the row with kind=menu_terminal
+// but no `menu` key in policy — the handler rendered only "Q) Quit"
+// because visibleMenu(host) was an empty slice.
+func TestEngageKiosk_seededAsMenu(t *testing.T) {
+	srv := startEngageServer(t)
+	alice := dialClient(t, srv)
+	alice.loginNew("alice", "hunter22")
+	alice.drainFor(300 * time.Millisecond)
+
+	alice.send("use kiosk\r\n")
+	// The menu handler's first frame includes a "Select: " footer; the
+	// free-form terminal handler instead emits "terminal>". Asserting
+	// on "Select" proves we got the menu code path.
+	alice.expect("Select:", 5*time.Second)
+	if got := alice.string(); strings.Contains(got, "terminal> ") {
+		t.Errorf("kiosk should be a menu, not a free-form terminal:\n%s", got)
+	}
+
+	// Every public-facing menu feature seeded in migration 0023 must
+	// be visible in the rendered frame. Admin is intentionally not
+	// checked here — visibleMenu strips it for non-admin participants.
+	got := alice.string()
+	for _, label := range []string{"Mail", "Boards", "Files"} {
+		if !strings.Contains(got, label) {
+			t.Errorf("expected %q in kiosk menu frame; got:\n%s", label, got)
+		}
+	}
+
+	// "step back" is one of the disengage verbs we seeded for the kiosk.
+	alice.send("step back\r\n")
+	alice.send("quit\r\n")
+}
+
+// TestEngageMenu_singleLetterFullyModal guards against single-letter
+// menu selectors being intercepted by the world layer. Menus use
+// single letters for almost everything — d=delete on the mail
+// screen, l=List files on admin Files, n=Next page, p=Prev,
+// u=Upload, and so on. Two specific escape paths have caused user-
+// visible bugs:
+//
+//   - 'l' matched `look` in menuMetaCommands, so the world parser
+//     rendered the room when the player meant "List files."
+//   - 'd' (and 'n', 's', 'e', 'w', 'u', 'in', 'out', 'go') matches
+//     movementDirections, which prints "You can't move while
+//     engaged." — drowning out the menu's actual response.
+//
+// The dispatcher short-circuits both for KindMenuTerminal: any
+// single-character input is routed straight to the menu handler.
+// This test exercises both classes by typing two characters that
+// would, without the fix, have escaped:
+//
+//   - 'l' (would have been re-routed to world `look`)
+//   - 'd' (would have been caught by the d=down movement block)
+//
+// In both cases we expect the menu to silently redraw — neither
+// the world's room render nor the movement-block notice may appear
+// on the wire.
+func TestEngageMenu_singleLetterFullyModal(t *testing.T) {
+	srv := startEngageServer(t)
+	alice := dialClient(t, srv)
+	alice.loginNew("alice", "hunter22")
+	alice.drainFor(300 * time.Millisecond)
+
+	alice.send("use kiosk\r\n")
+	alice.expect("Select:", 5*time.Second)
+
+	for _, key := range []string{"l", "d"} {
+		pre := len(alice.string())
+		alice.send(key + "\r\n")
+		alice.drainFor(300 * time.Millisecond)
+		got := alice.string()[pre:]
+		// World `look` escape:
+		if strings.Contains(got, "The Lobby") || strings.Contains(got, "Exits:") {
+			t.Errorf("%q was hijacked by world `look`:\n%s", key, got)
+		}
+		// Movement-block escape:
+		if strings.Contains(got, "You can't move while engaged") {
+			t.Errorf("%q was caught by the movement-block notice:\n%s", key, got)
+		}
+	}
+
+	alice.send("quit\r\n")
 }
 
 // TestEngageNPC_brushOffForRoomAddressing verifies that:

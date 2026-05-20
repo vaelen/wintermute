@@ -201,7 +201,24 @@ func (h *TerminalHandler) appendComposeLine(line string) bool {
 }
 
 func (h *TerminalHandler) OnOpen(p *Participant) {
+	// One-line discoverability hint above the first prompt: tells the
+	// player how to see the command list and how to step away. The hint
+	// names the host's first disengage verb so the wording matches the
+	// vocabulary configured for this specific terminal (defaults to
+	// "stand up" via the KindTerminal kind-default table).
+	_ = p.Write("Type `help` for commands, `" + h.disengageHint() + "` to leave.\r\n")
 	h.writePrompt(p)
+}
+
+// disengageHint returns the first configured disengage verb for the
+// host (used in OnOpen and writeHelp). Falls back to the universal
+// "disengage" if the host carries no disengage verbs at all — that
+// keeps the hint truthful even for misconfigured admin-created hosts.
+func (h *TerminalHandler) disengageHint() string {
+	if h.host != nil && len(h.host.DisengageVerbs) > 0 {
+		return h.host.DisengageVerbs[0]
+	}
+	return "disengage"
 }
 
 // OnClose fires the optional close callback.
@@ -707,9 +724,23 @@ func (h *TerminalHandler) writeHelp(p *Participant) {
 		b.WriteString(c)
 		b.WriteString("\r\n")
 	}
-	b.WriteString("Meta:\r\n")
-	b.WriteString("  disengage  — close the terminal\r\n")
-	b.WriteString("  look, who, help — world commands (briefly leave the terminal view)\r\n")
+	b.WriteString("To leave the terminal, type:\r\n")
+	// Print the host's actual disengage vocabulary so the help text
+	// matches what the player can really type (the kind-default
+	// "stand up" / "step away" for KindTerminal, or whatever the
+	// admin / Lua configured on this specific host). The universal
+	// "disengage" is always accepted, so it's listed first and
+	// independently of the host's own list.
+	b.WriteString("  disengage\r\n")
+	if h.host != nil {
+		for _, v := range h.host.DisengageVerbs {
+			b.WriteString("  ")
+			b.WriteString(v)
+			b.WriteString("\r\n")
+		}
+	}
+	b.WriteString("World commands available without disengaging:\r\n")
+	b.WriteString("  look, who, terminal\r\n")
 	_ = p.Write(b.String())
 }
 
