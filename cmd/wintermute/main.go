@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
@@ -32,6 +34,7 @@ import (
 	wnettls "github.com/vaelen/wintermute/internal/net/tls"
 	"github.com/vaelen/wintermute/internal/npc"
 	scriptlua "github.com/vaelen/wintermute/internal/script/lua"
+	"github.com/vaelen/wintermute/internal/security"
 	"github.com/vaelen/wintermute/internal/session"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
@@ -94,10 +97,40 @@ func run(cfgPath string) error {
 
 	authStore := auth.NewStore(db)
 
+	// M6.6: login-hardening service. Construct after store.Open so the
+	// disallowed-username seed migration has already run, then wire it
+	// as the username policy + history recorder on authStore. Errors
+	// here are fatal — the engine cannot enforce the deny list without
+	// it.
+	secSvc, err := buildSecurityService(cfg.Security, db, logger)
+	if err != nil {
+		return fmt.Errorf("security: %w", err)
+	}
+	if err := secSvc.Start(ctx); err != nil {
+		return fmt.Errorf("security: start: %w", err)
+	}
+	defer func() { _ = secSvc.Close() }()
+	authStore.SetUsernamePolicy(secSvc)
+	authStore.SetRenameRecorder(func(ctx context.Context, tx *sql.Tx, oldName string, accountID int64, newName string, renamedBy *int64) error {
+		return secSvc.RecordRename(ctx, tx, oldName, accountID, newName, renamedBy)
+	})
+
 	w, err := world.Load(ctx, db, logger)
 	if err != nil {
 		return fmt.Errorf("load world: %w", err)
 	}
+
+	// Rename boots every live session for the renamed account so the
+	// in-memory s.account.Username cannot drift from the DB. Runs after
+	// the rename transaction commits.
+	authStore.SetAfterRename(func(_ context.Context, accountID int64, oldName, newName string) error {
+		w.BootByAccount(accountID, fmt.Sprintf("Your account has been renamed to %q.\r\n", newName))
+		logger.Info("account renamed",
+			"account_id", accountID,
+			"old_username", oldName,
+			"new_username", newName)
+		return nil
+	})
 
 	// When a new account is created, spawn its body in the world.
 	authStore.SetAfterCreate(func(ctx context.Context, acc *auth.Account) error {
@@ -133,6 +166,7 @@ func run(cfgPath string) error {
 	adminAPI.Mail = mailSvc
 	adminAPI.Boards = boardsSvc
 	adminAPI.Files = filesSvc
+	adminAPI.Security = secSvc
 	luaAPI := scriptlua.NewAPI(adminAPI, nil, ctx)
 	luaPool := scriptlua.NewPool(scriptlua.PoolConfig{Size: 4, API: luaAPI})
 	defer luaPool.Close()
@@ -193,11 +227,11 @@ func run(cfgPath string) error {
 		switch host.Kind {
 		case engage.KindTerminal:
 			th := engage.NewTerminalHandler(host, closeBroadcast)
-			th.SetDeps(buildTerminalDeps(ctx, w, authStore, mailSvc, boardsSvc, filesSvc, cfg))
+			th.SetDeps(terminalDepsWithSecurity(buildTerminalDeps(ctx, w, authStore, mailSvc, boardsSvc, filesSvc, cfg), secSvc, adminAPI))
 			handler = th
 		case engage.KindMenuTerminal:
 			mh := menu.NewHandler(host, closeBroadcast)
-			mh.SetDeps(buildTerminalDeps(ctx, w, authStore, mailSvc, boardsSvc, filesSvc, cfg))
+			mh.SetDeps(terminalDepsWithSecurity(buildTerminalDeps(ctx, w, authStore, mailSvc, boardsSvc, filesSvc, cfg), secSvc, adminAPI))
 			// Size the frame to the client's negotiated terminal width
 			// and height. SetWidth / SetHeight no-op on non-positive
 			// values, so clients without NAWS keep menu.DefaultWidth and
@@ -295,6 +329,7 @@ func run(cfgPath string) error {
 	handler.HistorySize = cfg.Session.HistorySize
 	handler.EngageRegistry = engageReg
 	handler.EngageBackend = engageBackend
+	handler.LoginGuard = secSvc
 	handler.PostMOTD = func(ctx context.Context, acc *auth.Account) string {
 		n, err := mailSvc.UnreadCount(ctx, acc.ID)
 		if err != nil || n == 0 {
@@ -315,7 +350,7 @@ func run(cfgPath string) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			acceptLoop(ctx, ln, handler, logger, &wg)
+			acceptLoop(ctx, ln, handler, logger, &wg, secSvc)
 		}()
 		go func() { <-ctx.Done(); _ = ln.Close() }()
 	}
@@ -329,7 +364,7 @@ func run(cfgPath string) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			acceptLoop(ctx, tlsLn, handler, logger, &wg)
+			acceptLoop(ctx, tlsLn, handler, logger, &wg, secSvc)
 		}()
 		go func() { <-ctx.Done(); _ = tlsLn.Close() }()
 	}
@@ -382,6 +417,25 @@ func run(cfgPath string) error {
 			case <-tick.C:
 				if _, err := filesSvc.Janitor(ctx, blobGrace); err != nil {
 					logger.Warn("files janitor", "err", err)
+				}
+			}
+		}
+	}()
+
+	// M6.6: security janitor — purge expired temporary ip_denials rows
+	// from both the cache and the DB on a tunable interval.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tick := time.NewTicker(secSvc.EvictionInterval())
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				if _, err := secSvc.EvictExpired(ctx); err != nil {
+					logger.Warn("security janitor", "err", err)
 				}
 			}
 		}
@@ -483,7 +537,14 @@ func joinHostPort(host string, port int) string {
 	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
-func acceptLoop(ctx context.Context, ln net.Listener, h *session.Handler, logger *slog.Logger, wg *sync.WaitGroup) {
+// ipDenier is the minimal interface acceptLoop needs from the M6.6
+// security service: a single accept-time check. Holding it as an
+// interface keeps the loop test-friendly.
+type ipDenier interface {
+	IsIPDenied(netip.Addr) bool
+}
+
+func acceptLoop(ctx context.Context, ln net.Listener, h *session.Handler, logger *slog.Logger, wg *sync.WaitGroup, denier ipDenier) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -498,6 +559,15 @@ func acceptLoop(ctx context.Context, ln net.Listener, h *session.Handler, logger
 			}
 			logger.Warn("accept failed", "err", err)
 			continue
+		}
+		if denier != nil {
+			if addr := remoteIPFromConn(conn); addr.IsValid() && denier.IsIPDenied(addr) {
+				logger.Info("connection denied",
+					"session", conn.RemoteAddr().String(),
+					"reason", "ip_denied")
+				_ = conn.Close()
+				continue
+			}
 		}
 		wg.Add(1)
 		go func(c net.Conn) {
@@ -526,6 +596,42 @@ func acceptLoop(ctx context.Context, ln net.Listener, h *session.Handler, logger
 			h.Handle(ctx, c)
 		}(conn)
 	}
+}
+
+// remoteIPFromConn extracts the netip.Addr of a TCP-or-TLS connection.
+// Returns the zero Addr for non-TCP transports (test harnesses).
+func remoteIPFromConn(c net.Conn) netip.Addr {
+	tcp, ok := c.RemoteAddr().(*net.TCPAddr)
+	if !ok {
+		return netip.Addr{}
+	}
+	addr, ok := netip.AddrFromSlice(tcp.IP)
+	if !ok {
+		return netip.Addr{}
+	}
+	return addr.Unmap()
+}
+
+// buildSecurityService constructs the M6.6 service from config. The
+// optional UDP emitter is created here (and only here) so that startup
+// fails fast on a misconfigured subtext-filter address.
+func buildSecurityService(cfg config.SecurityConfig, db *store.DB, logger *slog.Logger) (*security.Service, error) {
+	opts := security.Options{
+		AutoDenyEnabled:         cfg.AutoDenyEnabled,
+		AutoDenyTTL:             time.Duration(cfg.AutoDenyTTLSeconds) * time.Second,
+		FailedPasswordThreshold: cfg.FailedPasswordThreshold,
+		FailedPasswordWindow:    time.Duration(cfg.FailedPasswordWindowSeconds) * time.Second,
+		EvictionInterval:        time.Duration(cfg.EvictionIntervalSeconds) * time.Second,
+		Logger:                  logger,
+	}
+	if cfg.Filter.Enabled {
+		em, err := security.NewEmitter(cfg.Filter.Address, logger)
+		if err != nil {
+			return nil, fmt.Errorf("filter: %w", err)
+		}
+		opts.Emitter = em
+	}
+	return security.New(db, opts), nil
 }
 
 func defaultMOTD() string {
@@ -591,6 +697,15 @@ func buildTerminalDeps(
 			return authStore.GetByID(rootCtx, id)
 		},
 	}
+}
+
+// terminalDepsWithSecurity adds the M6.6 admin-menu hooks to a base
+// TerminalDeps. Called after the existing buildTerminalDeps so the
+// callers in main.go only have to thread the extra deps once.
+func terminalDepsWithSecurity(deps *engage.TerminalDeps, secSvc *security.Service, adminAPI *worldapi.API) *engage.TerminalDeps {
+	deps.Security = secSvc
+	deps.RenameAccount = adminAPI.RenameAccount
+	return deps
 }
 
 // uploadMailNotifier returns the OnUpload callback wired into the M6

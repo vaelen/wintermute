@@ -77,3 +77,22 @@ embedding_model  = "nomic-embed-text"
 # name    = "fsxNet"
 # domain  = "fsxnet"
 # addr    = "21:1/100.0"
+
+# M6.6 login-hardening. The defaults below are what's compiled into the
+# engine; uncomment and edit any field to override. Disabling
+# `auto_deny_enabled` keeps the structured "ip flagged" log lines but
+# stops the engine from inserting rows into ip_denials. The optional
+# subtext-filter bridge (https://github.com/vaelen/subtext-filter)
+# announces flagged IPv4 addresses on UDP for an upstream nft drop
+# rule; leave `filter.enabled = false` if you're not running one.
+#
+# [security]
+# auto_deny_enabled              = true
+# auto_deny_ttl_seconds          = 300
+# failed_password_threshold      = 5
+# failed_password_window_seconds = 60
+# eviction_interval_seconds      = 60
+#
+# [security.filter]
+# enabled = false
+# address = "127.0.0.1:1234"

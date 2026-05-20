@@ -16,6 +16,7 @@ import (
 	"github.com/vaelen/wintermute/internal/boards"
 	"github.com/vaelen/wintermute/internal/files"
 	"github.com/vaelen/wintermute/internal/mail"
+	"github.com/vaelen/wintermute/internal/security"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
 )
@@ -93,6 +94,17 @@ type TerminalDeps struct {
 	// Used by the admin System subsection to compute uptime. Zero
 	// value falls back to "unknown".
 	StartedAt time.Time
+
+	// Security backs the M6.6 admin Security subsection and the
+	// adminUserView rename/history actions. nil suppresses the
+	// subsection and reports "unavailable" if the admin tries to
+	// rename or list history.
+	Security *security.Service
+
+	// RenameAccount wraps API.RenameAccount so the menu can rename
+	// without importing world/api. Optional; nil suppresses the
+	// Rename action on adminUserView.
+	RenameAccount func(ctx context.Context, currentName, newName string, renamedBy int64) error
 }
 
 // TerminalHandler is the built-in handler for kind='terminal' hosts.

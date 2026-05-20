@@ -6,6 +6,9 @@ package lua
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/netip"
+	"time"
 
 	lua "github.com/yuin/gopher-lua"
 
@@ -82,7 +85,20 @@ func (a *API) Bind(L *lua.LState) {
 	account := L.NewTable()
 	L.SetField(account, "set_level", L.NewFunction(a.luaAccountSetLevel))
 	L.SetField(account, "boot", L.NewFunction(a.luaAccountBoot))
+	L.SetField(account, "rename", L.NewFunction(a.luaAccountRename))
+	L.SetField(account, "username_history", L.NewFunction(a.luaAccountUsernameHistory))
+	L.SetField(account, "release_old_username", L.NewFunction(a.luaAccountReleaseOldUsername))
 	L.SetField(root, "account", account)
+
+	sec := L.NewTable()
+	L.SetField(sec, "deny_username", L.NewFunction(a.luaSecurityDenyUsername))
+	L.SetField(sec, "allow_username", L.NewFunction(a.luaSecurityAllowUsername))
+	L.SetField(sec, "list_disallowed_usernames", L.NewFunction(a.luaSecurityListDisallowed))
+	L.SetField(sec, "deny_ip", L.NewFunction(a.luaSecurityDenyIP))
+	L.SetField(sec, "allow_ip", L.NewFunction(a.luaSecurityAllowIP))
+	L.SetField(sec, "list_denied_ips", L.NewFunction(a.luaSecurityListDeniedIPs))
+	L.SetField(sec, "clear_temp_denials", L.NewFunction(a.luaSecurityClearTempDenials))
+	L.SetField(root, "security", sec)
 
 	sys := L.NewTable()
 	L.SetField(sys, "broadcast", L.NewFunction(a.luaSystemBroadcast))
@@ -614,6 +630,197 @@ func (a *API) luaAccountBoot(L *lua.LState) int {
 	username := L.CheckString(1)
 	msg := L.OptString(2, "")
 	n, err := a.Backend.BootAccount(a.Ctx, username, msg)
+	if err != nil {
+		return pushError(L, err)
+	}
+	L.Push(lua.LNumber(n))
+	return 1
+}
+
+// luaAccountRename: rename(current_username, new_username[, renamed_by_id])
+func (a *API) luaAccountRename(L *lua.LState) int {
+	cur := L.CheckString(1)
+	newName := L.CheckString(2)
+	var renamedBy int64
+	if L.GetTop() >= 3 {
+		renamedBy = int64(L.CheckNumber(3))
+	}
+	return pushError(L, a.Backend.RenameAccount(a.Ctx, cur, newName, renamedBy))
+}
+
+// luaAccountUsernameHistory: username_history(account_id_or_username) →
+// array-of-tables. account_id = 0 returns every row.
+func (a *API) luaAccountUsernameHistory(L *lua.LState) int {
+	if a.Backend == nil || a.Backend.Security == nil {
+		return pushError(L, errors.New("security service not wired"))
+	}
+	var accountID int64
+	switch v := L.Get(1).(type) {
+	case lua.LNumber:
+		accountID = int64(v)
+	case lua.LString:
+		if a.Backend.Accts == nil {
+			return pushError(L, errors.New("account store not wired"))
+		}
+		acc, err := a.Backend.Accts.GetByUsername(a.Ctx, string(v))
+		if err != nil {
+			return pushError(L, err)
+		}
+		accountID = acc.ID
+	case *lua.LNilType:
+		accountID = 0
+	default:
+		return pushError(L, fmt.Errorf("username_history: expected number, string, or nil; got %s", v.Type()))
+	}
+	rows, err := a.Backend.Security.ListUsernameHistory(a.Ctx, accountID)
+	if err != nil {
+		return pushError(L, err)
+	}
+	arr := L.NewTable()
+	for i, r := range rows {
+		t := L.NewTable()
+		L.SetField(t, "old_username", lua.LString(r.OldUsername))
+		L.SetField(t, "renamed_to", lua.LString(r.RenamedTo))
+		L.SetField(t, "renamed_at", lua.LNumber(r.RenamedAt))
+		if r.AccountID != nil {
+			L.SetField(t, "account_id", lua.LNumber(*r.AccountID))
+		}
+		if r.RenamedBy != nil {
+			L.SetField(t, "renamed_by", lua.LNumber(*r.RenamedBy))
+		}
+		arr.RawSetInt(i+1, t)
+	}
+	L.Push(arr)
+	return 1
+}
+
+// luaAccountReleaseOldUsername: release_old_username(name)
+func (a *API) luaAccountReleaseOldUsername(L *lua.LState) int {
+	name := L.CheckString(1)
+	if a.Backend == nil || a.Backend.Security == nil {
+		return pushError(L, errors.New("security service not wired"))
+	}
+	return pushError(L, a.Backend.Security.ReleaseUsernameHistory(a.Ctx, name))
+}
+
+// ---------------------------------------------------------------------------
+// security bindings (M6.6)
+
+func (a *API) luaSecurityDenyUsername(L *lua.LState) int {
+	name := L.CheckString(1)
+	reason := L.OptString(2, "")
+	if a.Backend == nil || a.Backend.Security == nil {
+		return pushError(L, errors.New("security service not wired"))
+	}
+	return pushError(L, a.Backend.Security.DisallowUsername(a.Ctx, name, reason, nil))
+}
+
+func (a *API) luaSecurityAllowUsername(L *lua.LState) int {
+	name := L.CheckString(1)
+	if a.Backend == nil || a.Backend.Security == nil {
+		return pushError(L, errors.New("security service not wired"))
+	}
+	return pushError(L, a.Backend.Security.AllowUsername(a.Ctx, name))
+}
+
+func (a *API) luaSecurityListDisallowed(L *lua.LState) int {
+	if a.Backend == nil || a.Backend.Security == nil {
+		return pushError(L, errors.New("security service not wired"))
+	}
+	rows, err := a.Backend.Security.ListDisallowed(a.Ctx)
+	if err != nil {
+		return pushError(L, err)
+	}
+	arr := L.NewTable()
+	for i, r := range rows {
+		t := L.NewTable()
+		L.SetField(t, "username", lua.LString(r.Username))
+		L.SetField(t, "reason", lua.LString(r.Reason))
+		L.SetField(t, "added_at", lua.LNumber(r.AddedAt))
+		arr.RawSetInt(i+1, t)
+	}
+	L.Push(arr)
+	return 1
+}
+
+// luaSecurityDenyIP: deny_ip(ip, { ttl_seconds, permanent, reason })
+func (a *API) luaSecurityDenyIP(L *lua.LState) int {
+	ipStr := L.CheckString(1)
+	addr, perr := netip.ParseAddr(ipStr)
+	if perr != nil {
+		return pushError(L, fmt.Errorf("invalid IP %q", ipStr))
+	}
+	if a.Backend == nil || a.Backend.Security == nil {
+		return pushError(L, errors.New("security service not wired"))
+	}
+	opts := L.OptTable(2, L.NewTable())
+	permanent := false
+	if v, ok := opts.RawGetString("permanent").(lua.LBool); ok {
+		permanent = bool(v)
+	}
+	reason := optString(opts, "reason")
+	if permanent {
+		return pushError(L, a.Backend.Security.AddPermanentDeny(a.Ctx, addr, nil, reason))
+	}
+	ttl := time.Duration(optInt64(opts, "ttl_seconds")) * time.Second
+	return pushError(L, a.Backend.Security.AddTempDeny(a.Ctx, addr, ttl, nil, reason))
+}
+
+// luaSecurityAllowIP: allow_ip(ip)
+func (a *API) luaSecurityAllowIP(L *lua.LState) int {
+	ipStr := L.CheckString(1)
+	addr, perr := netip.ParseAddr(ipStr)
+	if perr != nil {
+		return pushError(L, fmt.Errorf("invalid IP %q", ipStr))
+	}
+	if a.Backend == nil || a.Backend.Security == nil {
+		return pushError(L, errors.New("security service not wired"))
+	}
+	return pushError(L, a.Backend.Security.RemoveDeny(a.Ctx, addr))
+}
+
+// luaSecurityListDeniedIPs: list_denied_ips(kind?) → array.
+// kind one of "all" | "permanent" | "temporary"; missing means "all".
+func (a *API) luaSecurityListDeniedIPs(L *lua.LState) int {
+	if a.Backend == nil || a.Backend.Security == nil {
+		return pushError(L, errors.New("security service not wired"))
+	}
+	kind := L.OptString(1, "all")
+	rows := a.Backend.Security.ListDenials()
+	arr := L.NewTable()
+	idx := 1
+	for _, r := range rows {
+		switch kind {
+		case "permanent":
+			if !r.Permanent() {
+				continue
+			}
+		case "temporary", "temp":
+			if r.Permanent() {
+				continue
+			}
+		}
+		t := L.NewTable()
+		L.SetField(t, "ip", lua.LString(r.IP.String()))
+		L.SetField(t, "reason", lua.LString(r.Reason))
+		L.SetField(t, "permanent", lua.LBool(r.Permanent()))
+		L.SetField(t, "automatic", lua.LBool(r.Automatic))
+		if r.ExpiresAt != nil {
+			L.SetField(t, "expires_at", lua.LNumber(r.ExpiresAt.Unix()))
+		}
+		arr.RawSetInt(idx, t)
+		idx++
+	}
+	L.Push(arr)
+	return 1
+}
+
+// luaSecurityClearTempDenials: clear_temp_denials() → number flushed.
+func (a *API) luaSecurityClearTempDenials(L *lua.LState) int {
+	if a.Backend == nil || a.Backend.Security == nil {
+		return pushError(L, errors.New("security service not wired"))
+	}
+	n, err := a.Backend.Security.FlushTempDenials(a.Ctx)
 	if err != nil {
 		return pushError(L, err)
 	}

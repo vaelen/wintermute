@@ -62,7 +62,22 @@ var (
 	ErrAccountNotFound    = errors.New("auth: account not found")
 	ErrInvalidUsername    = errors.New("auth: invalid username")
 	ErrPasswordTooShort   = errors.New("auth: password too short")
+	// ErrUsernameDisallowed is surfaced when a UsernamePolicy rejects a
+	// name as matching the operator-curated disallow list (M6.6).
+	ErrUsernameDisallowed = errors.New("auth: username disallowed")
+	// ErrUsernameReserved is surfaced when a UsernamePolicy rejects a
+	// name as reserved by a prior account's username_history row (M6.6).
+	ErrUsernameReserved = errors.New("auth: username reserved")
 )
+
+// UsernamePolicy is the M6.6 hook into auth. CheckAvailable is invoked
+// for new-account creation and for rename. forAccount = 0 means
+// "creating a new account"; otherwise the ID being renamed (so a
+// historical row owned by the same account does not block its own
+// self-rotation).
+type UsernamePolicy interface {
+	CheckAvailable(ctx context.Context, name string, forAccount int64) error
+}
 
 // Argon2id parameters. Tuned per OWASP guidance.
 const (
@@ -85,6 +100,9 @@ const MinPasswordLen = 6
 type Store struct {
 	db          *store.DB
 	afterCreate func(ctx context.Context, acc *Account) error
+	policy      UsernamePolicy
+	afterRename func(ctx context.Context, accountID int64, oldName, newName string) error
+	historyRec  func(ctx context.Context, tx *sql.Tx, oldName string, accountID int64, newName string, renamedBy *int64) error
 }
 
 // NewStore returns a Store backed by the given database handle.
@@ -103,6 +121,46 @@ func (s *Store) SetAfterCreate(fn func(ctx context.Context, acc *Account) error)
 	s.afterCreate = fn
 }
 
+// SetUsernamePolicy registers the M6.6 policy hook. nil disables the
+// policy check entirely (test paths, milestones before M6.6).
+func (s *Store) SetUsernamePolicy(p UsernamePolicy) {
+	s.policy = p
+}
+
+// SetRenameRecorder registers the function called inside Rename's
+// transaction to insert the username_history row that reserves the
+// previous name. nil disables history recording (test paths). The
+// callback receives the rename's *sql.Tx and must not commit or roll
+// back — those happen at the auth.Store layer.
+func (s *Store) SetRenameRecorder(fn func(ctx context.Context, tx *sql.Tx, oldName string, accountID int64, newName string, renamedBy *int64) error) {
+	s.historyRec = fn
+}
+
+// SetAfterRename registers a callback invoked after a successful Rename
+// once the transaction has committed. Used by the engine to boot live
+// sessions belonging to the renamed account so their cached
+// s.account.Username cannot drift from the DB.
+func (s *Store) SetAfterRename(fn func(ctx context.Context, accountID int64, oldName, newName string) error) {
+	s.afterRename = fn
+}
+
+// ValidateNewUsername composes the syntactic check with the registered
+// policy. Returns ErrInvalidUsername / ErrUsernameDisallowed /
+// ErrUsernameReserved. DB uniqueness is enforced at insert / update time
+// via the UNIQUE constraint, not by this helper.
+func (s *Store) ValidateNewUsername(ctx context.Context, name string, forAccount int64) error {
+	if !validUsername(name) {
+		return ErrInvalidUsername
+	}
+	if s.policy == nil {
+		return nil
+	}
+	if err := s.policy.CheckAvailable(ctx, name, forAccount); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Count returns the number of accounts currently in the database. Used by
 // callers that want to bootstrap the first account as an admin.
 func (s *Store) Count(ctx context.Context) (int, error) {
@@ -117,8 +175,8 @@ func (s *Store) Count(ctx context.Context) (int, error) {
 // ErrUsernameTaken if the username already exists, ErrInvalidUsername /
 // ErrPasswordTooShort on policy violations.
 func (s *Store) Create(ctx context.Context, username, password string, level AccessLevel) (*Account, error) {
-	if !validUsername(username) {
-		return nil, ErrInvalidUsername
+	if err := s.ValidateNewUsername(ctx, username, 0); err != nil {
+		return nil, err
 	}
 	if len(password) < MinPasswordLen {
 		return nil, ErrPasswordTooShort
@@ -322,6 +380,66 @@ func (s *Store) ListAccounts(ctx context.Context) ([]Account, error) {
 		out = append(out, *acc)
 	}
 	return out, rows.Err()
+}
+
+// Rename changes accounts.username from the current value to newname.
+// The validation chain is identical to Create's: syntactic, then policy
+// (disallow + reservation), then DB uniqueness via the UNIQUE
+// constraint. On success a single transaction updates the accounts row
+// and (when the rename recorder is wired) writes the username_history
+// row that reserves the old name. The afterRename hook fires after the
+// transaction commits; failures from it surface to the caller but the
+// rename itself is already persisted.
+//
+// Returns ErrAccountNotFound when id is unknown, ErrInvalidUsername /
+// ErrUsernameDisallowed / ErrUsernameReserved on validation failures,
+// and ErrUsernameTaken when the new name collides with an existing
+// account.
+func (s *Store) Rename(ctx context.Context, id int64, newname string, renamedBy *int64) error {
+	if err := s.ValidateNewUsername(ctx, newname, id); err != nil {
+		return err
+	}
+	cur, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if cur.Username == newname {
+		return nil
+	}
+	err = s.db.Write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE accounts SET username = ? WHERE id = ?`,
+			newname, id,
+		)
+		if err != nil {
+			if isUniqueErr(err) {
+				return ErrUsernameTaken
+			}
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrAccountNotFound
+		}
+		if s.historyRec != nil {
+			if err := s.historyRec(ctx, tx, cur.Username, id, newname, renamedBy); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if s.afterRename != nil {
+		if err := s.afterRename(ctx, id, cur.Username, newname); err != nil {
+			return fmt.Errorf("auth: after-rename hook: %w", err)
+		}
+	}
+	return nil
 }
 
 // SetAccessLevel updates the access level for the given account. Returns

@@ -42,6 +42,15 @@ func (h *Handler) login(ctx context.Context, s *Session) error {
 			continue // back to login prompt; user can now log in
 		}
 
+		if h.LoginGuard != nil {
+			if err := h.LoginGuard.CheckUsername(ctx, s.remoteIP(), username); err != nil {
+				if errors.Is(err, auth.ErrUsernameDisallowed) {
+					return ErrSilentDrop
+				}
+				return err
+			}
+		}
+
 		_ = s.writeString("Password: ")
 		prevEcho := s.echoOn()
 		_ = s.setEcho(true)
@@ -56,6 +65,10 @@ func (h *Handler) login(ctx context.Context, s *Session) error {
 		res, err := s.auth.Login(ctx, username, password)
 		if err != nil {
 			if errors.Is(err, auth.ErrInvalidCredentials) {
+				if h.LoginGuard != nil &&
+					h.LoginGuard.RecordFailedPassword(ctx, s.remoteIP()) {
+					return ErrSilentDrop
+				}
 				_ = s.writeString("Invalid username or password.\r\n")
 				continue
 			}

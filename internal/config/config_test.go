@@ -129,3 +129,67 @@ mode = "autocert"`), 0o644); err != nil {
 		t.Fatalf("Load: expected error for autocert with no hostnames")
 	}
 }
+
+func TestSecurityDefaults(t *testing.T) {
+	c := Default()
+	if !c.Security.AutoDenyEnabled {
+		t.Errorf("Default() security.auto_deny_enabled = false, want true")
+	}
+	if c.Security.AutoDenyTTLSeconds != 300 {
+		t.Errorf("auto_deny_ttl_seconds = %d, want 300", c.Security.AutoDenyTTLSeconds)
+	}
+	if c.Security.FailedPasswordThreshold != 5 {
+		t.Errorf("failed_password_threshold = %d, want 5", c.Security.FailedPasswordThreshold)
+	}
+	if c.Security.Filter.Enabled {
+		t.Errorf("filter.enabled = true, want false (off by default)")
+	}
+	if c.Security.Filter.Address != "127.0.0.1:1234" {
+		t.Errorf("filter.address = %q, want 127.0.0.1:1234", c.Security.Filter.Address)
+	}
+}
+
+func TestLoadSecurityNegativeTTL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wintermute.toml")
+	if err := os.WriteFile(path, []byte(`[security]
+auto_deny_ttl_seconds = -1
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatalf("Load: expected error for negative ttl")
+	}
+}
+
+func TestLoadSecurityFilterInvalidAddress(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wintermute.toml")
+	if err := os.WriteFile(path, []byte(`[security.filter]
+enabled = true
+address = "not-a-real:address:::"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatalf("Load: expected error for unparseable filter.address")
+	}
+}
+
+func TestLoadSecurityFilterValidAddress(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wintermute.toml")
+	if err := os.WriteFile(path, []byte(`[security.filter]
+enabled = true
+address = "10.20.30.40:9999"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.Security.Filter.Address != "10.20.30.40:9999" {
+		t.Errorf("filter.address = %q", c.Security.Filter.Address)
+	}
+}

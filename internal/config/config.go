@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 
 	"github.com/pelletier/go-toml/v2"
@@ -15,14 +16,54 @@ import (
 // Config is the engine's top-level configuration as loaded from
 // wintermute.toml.
 type Config struct {
-	Server  ServerConfig  `toml:"server"`
-	DB      DBConfig      `toml:"db"`
-	Log     LogConfig     `toml:"log"`
-	TLS     TLSConfig     `toml:"tls"`
-	LLM     LLMConfig     `toml:"llm"`
-	Session SessionConfig `toml:"session"`
-	FTN     FTNConfig     `toml:"ftn"`
-	Files   FilesConfig   `toml:"files"`
+	Server   ServerConfig   `toml:"server"`
+	DB       DBConfig       `toml:"db"`
+	Log      LogConfig      `toml:"log"`
+	TLS      TLSConfig      `toml:"tls"`
+	LLM      LLMConfig      `toml:"llm"`
+	Session  SessionConfig  `toml:"session"`
+	FTN      FTNConfig      `toml:"ftn"`
+	Files    FilesConfig    `toml:"files"`
+	Security SecurityConfig `toml:"security"`
+}
+
+// SecurityConfig configures the M6.6 login-hardening defences: the
+// disallowed-username list, the IP deny list, the failed-password
+// sliding-window counter, and the optional subtext-filter UDP bridge.
+type SecurityConfig struct {
+	// AutoDenyEnabled gates the auto-insert behaviour. When false, the
+	// disallowed-username and failed-password triggers still drop the
+	// connection and still emit the structured log line, but no IP is
+	// ever inserted into ip_denials.
+	AutoDenyEnabled bool `toml:"auto_deny_enabled"`
+	// AutoDenyTTLSeconds is the default TTL applied to auto-inserts and
+	// to admin-inserts that don't specify one.
+	AutoDenyTTLSeconds int `toml:"auto_deny_ttl_seconds"`
+	// FailedPasswordThreshold is the number of failed-password attempts
+	// per IP within FailedPasswordWindowSeconds that triggers an
+	// auto-flag.
+	FailedPasswordThreshold int `toml:"failed_password_threshold"`
+	// FailedPasswordWindowSeconds is the sliding-window length for the
+	// per-IP failed-password counter.
+	FailedPasswordWindowSeconds int `toml:"failed_password_window_seconds"`
+	// EvictionIntervalSeconds is how often the janitor goroutine sweeps
+	// expired ip_denials rows from the cache and DB.
+	EvictionIntervalSeconds int `toml:"eviction_interval_seconds"`
+	// Filter configures the optional subtext-filter UDP bridge.
+	Filter SecurityFilterConfig `toml:"filter"`
+}
+
+// SecurityFilterConfig configures the subtext-filter UDP emitter. The
+// wire format is a single UDP datagram per flag, payload = IPv4
+// dotted-quad ASCII, no terminator. See
+// https://github.com/vaelen/subtext-filter.
+type SecurityFilterConfig struct {
+	// Enabled toggles emission entirely. Off by default — most
+	// operators don't deploy subtext-filter.
+	Enabled bool `toml:"enabled"`
+	// Address is the udp4 host:port of the bridge. Validated via
+	// net.ResolveUDPAddr at config load when Enabled is true.
+	Address string `toml:"address"`
 }
 
 // FilesConfig configures the on-disk blob store used by uploads.
@@ -147,6 +188,17 @@ func Default() *Config {
 		Files: FilesConfig{
 			Root: "./blobs",
 		},
+		Security: SecurityConfig{
+			AutoDenyEnabled:             true,
+			AutoDenyTTLSeconds:          300,
+			FailedPasswordThreshold:     5,
+			FailedPasswordWindowSeconds: 60,
+			EvictionIntervalSeconds:     60,
+			Filter: SecurityFilterConfig{
+				Enabled: false,
+				Address: "127.0.0.1:1234",
+			},
+		},
 	}
 }
 
@@ -203,6 +255,33 @@ func (c *Config) validate() error {
 	}
 	if err := c.FTN.validate(); err != nil {
 		return err
+	}
+	if err := c.Security.validate(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *SecurityConfig) validate() error {
+	if s.AutoDenyTTLSeconds < 0 {
+		return fmt.Errorf("security.auto_deny_ttl_seconds must be >= 0, got %d", s.AutoDenyTTLSeconds)
+	}
+	if s.FailedPasswordThreshold < 0 {
+		return fmt.Errorf("security.failed_password_threshold must be >= 0, got %d", s.FailedPasswordThreshold)
+	}
+	if s.FailedPasswordWindowSeconds < 0 {
+		return fmt.Errorf("security.failed_password_window_seconds must be >= 0, got %d", s.FailedPasswordWindowSeconds)
+	}
+	if s.EvictionIntervalSeconds < 0 {
+		return fmt.Errorf("security.eviction_interval_seconds must be >= 0, got %d", s.EvictionIntervalSeconds)
+	}
+	if s.Filter.Enabled {
+		if s.Filter.Address == "" {
+			return fmt.Errorf("security.filter.address required when filter.enabled = true")
+		}
+		if _, err := net.ResolveUDPAddr("udp4", s.Filter.Address); err != nil {
+			return fmt.Errorf("security.filter.address %q: %w", s.Filter.Address, err)
+		}
 	}
 	return nil
 }
