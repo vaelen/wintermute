@@ -64,6 +64,7 @@ The `internal/llm` package defines an `LLM` interface and a factory registry. **
 - **No comments** explaining what code already says. Only comment when the *why* is non-obvious (a hidden constraint, a workaround, a surprise).
 - **No backwards-compatibility shims**, no half-finished implementations, no premature abstractions. The plan tells you what each milestone delivers; deliver that and stop.
 - **Error matching**: use sentinel errors (`var ErrFoo = errors.New(...)`) and `errors.Is` / `errors.As` for cross-package error dispatch. Do not match on `err.Error()` substrings — message text is presentation, not API, and substring matches break silently when wording changes. The one exception is third-party concrete error types we can't introspect cleanly (e.g. `modernc.org/sqlite`'s unique-constraint error); document the reason inline when you do.
+- **Network timing assumes a 2400 bps dialup user as the worst case.** Most players will be on modern broadband, but the engine has to stay usable on retro hardware (C64 modems, vintage terminal servers) and on weird tunnelled paths. When picking a timeout for a protocol round-trip (TTYPE re-request, ANSI probe drain, file-transfer handshake, etc.), assume ~300 bytes/sec throughput and budget for the full reply size to make a round-trip — typically that means 1 s minimum for short replies. A protocol that breaks for a slow connection is a regression even if every developer's laptop sails through it.
 
 ## Repo layout
 
