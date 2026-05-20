@@ -41,14 +41,15 @@ var defaultMetaCommands = []string{
 }
 
 // menuMetaCommands is the equivalent allow-list for menu_terminal
-// engagements. The menu state machine owns every keystroke (numbered
-// selectors, B for Back, Q for Quit, plus per-screen letters), so the
-// list is intentionally identical to defaultMetaCommands rather than
-// any broader. Universal world commands (look/who/terminal) stay
-// reachable so the player can glance at the world or resize their
-// terminal mid-menu.
+// engagements. Single-letter abbreviations are intentionally absent
+// because menu screens use single letters as their own selectors —
+// e.g. "L) List files", "B) Back", "Q) Quit". Letting `l` route up
+// to the world parser as `look` made the admin Files screen
+// uncallable. Full-word commands (`look`, `who`, `terminal`) don't
+// collide and stay reachable so the player can glance at the world
+// or resize their terminal mid-menu.
 var menuMetaCommands = []string{
-	"look", "l", "who", "terminal",
+	"look", "who", "terminal",
 }
 
 // movementDirections is every input the world parser would treat as a
