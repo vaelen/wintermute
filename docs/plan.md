@@ -167,7 +167,7 @@ github.com/vaelen/go-zmodem
 | 06.3 | Menu-driven engagement interface     | Reusable line-drawing menu handler (mail/boards/files entries opt-in per object); ASCII fallback for non-UTF-8         | 05.7, 06, 06.2    | M      | not started |
 | 06.4 | Menu-driven admin interface          | Admin entry in the M6.3 menu, gated by admin level + per-object opt-in; users/mail/boards/files/objects/rooms/networks | 06.1, 06.2, 06.3  | M      | not started |
 | 06.4.1 | Password reset via admin           | Admin-issued one-time word-list tokens, 48h TTL, forced password change on redemption; adds the Reset Password action to the admin menu | 06.4             | S      | not started |
-| 07   | Semi-autonomous NPC loop             | Event bus, tick goroutines, two-tier routing, budget enforcement, tool execution                                       | 04, 05            | L      | not started |
+| 07   | Semi-autonomous NPC loop             | Event bus, tick goroutines, two-tier routing, budget enforcement, tool execution                                       | 04, 05            | L      | shipped     |
 | 08   | Player-tier scripting                | Sandboxed Lua, instruction/memory budgets, ACL-restricted world API                                                    | 05                | M      | not started |
 | 09   | X/Y/ZModem spinoff libraries         | Three MIT-licensed Go modules, engine integration                                                                      | 06                | L      | not started |
 | 10   | TLS configuration                    | Shared `self-signed` / `files` / `autocert` provider for the telnet TLS port and the HTTPS file-transfer port          | 01, 06            | S      | not started |
