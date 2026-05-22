@@ -17,8 +17,18 @@ import (
 	"time"
 
 	"github.com/vaelen/wintermute/internal/llm"
+	"github.com/vaelen/wintermute/internal/npc/memory"
 	"github.com/vaelen/wintermute/internal/world/events"
 )
+
+// Broadcaster is the minimum World surface the loop needs to publish an
+// NPC reply. *world.World satisfies this via a small adapter (see
+// cmd/wintermute wiring): the adapter converts events.ObjectID (an
+// int64 alias) into the named world.ObjectID type. Tests can swap in a
+// stub that captures broadcasts without standing up the full world.
+type Broadcaster interface {
+	NPCSay(npcID events.ObjectID, text string) error
+}
 
 // Loop is one NPC's tick goroutine. Construct with the required fields
 // filled in and call Run from a goroutine. Leave Tick nil to use the
@@ -38,6 +48,21 @@ type Loop struct {
 	LLM       llm.LLM
 	ChatModel string
 	GateModel string
+
+	// Memory is the per-NPC short+long-term memory wrapper. Nil disables
+	// memory operations (retrieve, append) — the loop still runs but
+	// without context.
+	Memory *memory.State
+
+	// World is the broadcast surface the loop uses to publish NPC
+	// replies. Nil is permitted only for unit tests that don't need to
+	// observe the broadcast end-to-end; production always wires it.
+	World Broadcaster
+
+	// MaxToolDepth caps the number of nested tool-call rounds before the
+	// response is broadcast as-is. Task 8 uses this; Task 7 just stores
+	// it.
+	MaxToolDepth int
 
 	Logger *slog.Logger
 }
