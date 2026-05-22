@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -69,7 +70,10 @@ func (m *Manager) Load(ctx context.Context) error {
 			Day:    Window{Limit: int(dl), Used: int(du), StartedAt: time.Unix(ds, 0), Duration: 24 * time.Hour},
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("budget: load: %w", err)
+	}
+	return nil
 }
 
 // get returns the existing budget for npcID or seeds a new one.
@@ -150,18 +154,23 @@ func (m *Manager) Flush(ctx context.Context) error {
 	})
 }
 
-// RunFlushLoop flushes dirty budgets at interval until ctx is done. On
-// ctx done it performs one final Flush (with a background ctx) so the
-// most recent windows aren't lost. Returns the last error from Flush
-// (or nil).
-func (m *Manager) RunFlushLoop(ctx context.Context, interval time.Duration) error {
+// RunFlushLoop flushes dirty budgets at interval until ctx is done.
+// Transient Flush errors are logged and the loop continues — losing
+// one interval of usage on an error is acceptable, but abandoning the
+// loop (and therefore the final shutdown Flush) is not. On ctx done,
+// a final Flush runs with context.Background() so usage is persisted
+// even when the parent ctx is already cancelled.
+func (m *Manager) RunFlushLoop(ctx context.Context, interval time.Duration, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-t.C:
 			if err := m.Flush(ctx); err != nil {
-				return err
+				logger.Warn("budget: periodic flush failed", "err", err)
 			}
 		case <-ctx.Done():
 			return m.Flush(context.Background())
