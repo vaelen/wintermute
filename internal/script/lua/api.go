@@ -80,6 +80,7 @@ func (a *API) Bind(L *lua.LState) {
 	L.SetField(npc, "create", L.NewFunction(a.luaNPCCreate))
 	L.SetField(npc, "ensure", L.NewFunction(a.luaNPCEnsure))
 	L.SetField(npc, "set_persona", L.NewFunction(a.luaNPCSetPersona))
+	L.SetField(npc, "schedule", L.NewFunction(a.luaNPCSchedule))
 	L.SetField(root, "npc", npc)
 
 	account := L.NewTable()
@@ -598,6 +599,47 @@ func (a *API) luaNPCSetPersona(L *lua.LState) int {
 		return pushError(L, goErrorf("invalid_argument", "npc.set_persona: handle missing slug"))
 	}
 	return pushError(L, a.Backend.SetNPCPersona(a.Ctx, slug, persona))
+}
+
+// luaNPCSchedule binds wintermute.npc.schedule(npc, { fire_at, goal,
+// recurring }). The first argument may be a numeric npc id or an NPC
+// handle (table with an .id field). fire_at is a Unix timestamp in
+// seconds. goal is the prompt the scheduler injects as a KindSched
+// event when the goal fires. recurring is one of "", "daily", "hourly";
+// other values are stored verbatim and fire once.
+func (a *API) luaNPCSchedule(L *lua.LState) int {
+	var npcID int64
+	switch v := L.Get(1).(type) {
+	case lua.LNumber:
+		npcID = int64(v)
+	case *lua.LTable:
+		if n, ok := v.RawGetString("id").(lua.LNumber); ok {
+			npcID = int64(n)
+		}
+	}
+	if npcID == 0 {
+		return pushError(L, goErrorf("invalid_argument", "npc.schedule: npc id required"))
+	}
+	opts := L.CheckTable(2)
+	fireAt := optInt64(opts, "fire_at")
+	goal := optString(opts, "goal")
+	recurring := optString(opts, "recurring")
+	if goal == "" {
+		return pushError(L, goErrorf("invalid_argument", "npc.schedule: goal required"))
+	}
+	if fireAt == 0 {
+		return pushError(L, goErrorf("invalid_argument", "npc.schedule: fire_at required"))
+	}
+	if recurring != "" && recurring != "daily" && recurring != "hourly" {
+		return pushError(L, goErrorf("invalid_argument",
+			`npc.schedule: recurring must be "", "daily", or "hourly"`))
+	}
+	if err := a.Backend.ScheduleNPCGoal(a.Ctx, world.ObjectID(npcID),
+		time.Unix(fireAt, 0), goal, recurring); err != nil {
+		return pushError(L, err)
+	}
+	L.Push(lua.LBool(true))
+	return 1
 }
 
 func npcSpecFromTable(tbl *lua.LTable) worldapi.NPCSpec {

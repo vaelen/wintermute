@@ -34,6 +34,7 @@ import (
 	"github.com/vaelen/wintermute/internal/mail"
 	wnettls "github.com/vaelen/wintermute/internal/net/tls"
 	"github.com/vaelen/wintermute/internal/npc"
+	"github.com/vaelen/wintermute/internal/npc/schedule"
 	scriptlua "github.com/vaelen/wintermute/internal/script/lua"
 	"github.com/vaelen/wintermute/internal/security"
 	"github.com/vaelen/wintermute/internal/session"
@@ -179,6 +180,11 @@ func run(cfgPath string) error {
 		npcReg.HandleSay(roomID, speakerID, speakerName, text)
 	})
 	logger.Info("npc registry loaded")
+
+	// M7: scheduler fires npc_goals as KindSched events into the per-room
+	// bus. The per-NPC loops observe them through their normal subscription.
+	sch := schedule.New(db, w, bus, logger)
+	go sch.Run(ctx)
 
 	// Engagement primitive (M5.7): registry of live engagements, in-memory
 	// host cache, and a handler factory that maps host kind to the right
