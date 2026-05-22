@@ -176,6 +176,81 @@ address = "not-a-real:address:::"
 	}
 }
 
+func TestNPCLoopDefaults(t *testing.T) {
+	c := Default()
+	if c.NPC.Loop.DebounceMs != 800 {
+		t.Errorf("npc.loop.debounce_ms = %d, want 800", c.NPC.Loop.DebounceMs)
+	}
+	if c.NPC.Loop.MaxToolDepth != 3 {
+		t.Errorf("npc.loop.max_tool_depth = %d, want 3", c.NPC.Loop.MaxToolDepth)
+	}
+	if c.NPC.Loop.DefaultMinuteLimit != 5000 {
+		t.Errorf("npc.loop.default_minute_limit = %d, want 5000", c.NPC.Loop.DefaultMinuteLimit)
+	}
+	if c.NPC.Loop.DefaultHourLimit != 100000 {
+		t.Errorf("npc.loop.default_hour_limit = %d, want 100000", c.NPC.Loop.DefaultHourLimit)
+	}
+	if c.NPC.Loop.DefaultDayLimit != 1000000 {
+		t.Errorf("npc.loop.default_day_limit = %d, want 1000000", c.NPC.Loop.DefaultDayLimit)
+	}
+	if c.NPC.Loop.DefaultGateModel != "llama3.2:1b" {
+		t.Errorf("npc.loop.default_gate_model = %q, want llama3.2:1b", c.NPC.Loop.DefaultGateModel)
+	}
+}
+
+func TestLoadNPCLoopMissingSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wintermute.toml")
+	if err := os.WriteFile(path, []byte(`[server]
+telnet_port = 1234
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	d := Default()
+	if c.NPC.Loop != d.NPC.Loop {
+		t.Errorf("npc.loop = %+v, want defaults %+v", c.NPC.Loop, d.NPC.Loop)
+	}
+}
+
+func TestLoadNPCLoopPartialOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wintermute.toml")
+	contents := `
+[npc.loop]
+debounce_ms = 500
+default_gate_model = "qwen2.5:0.5b"
+`
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.NPC.Loop.DebounceMs != 500 {
+		t.Errorf("debounce_ms = %d, want 500", c.NPC.Loop.DebounceMs)
+	}
+	if c.NPC.Loop.DefaultGateModel != "qwen2.5:0.5b" {
+		t.Errorf("default_gate_model = %q, want qwen2.5:0.5b", c.NPC.Loop.DefaultGateModel)
+	}
+	if c.NPC.Loop.MaxToolDepth != 3 {
+		t.Errorf("max_tool_depth = %d, want default 3", c.NPC.Loop.MaxToolDepth)
+	}
+	if c.NPC.Loop.DefaultMinuteLimit != 5000 {
+		t.Errorf("default_minute_limit = %d, want default 5000", c.NPC.Loop.DefaultMinuteLimit)
+	}
+	if c.NPC.Loop.DefaultHourLimit != 100000 {
+		t.Errorf("default_hour_limit = %d, want default 100000", c.NPC.Loop.DefaultHourLimit)
+	}
+	if c.NPC.Loop.DefaultDayLimit != 1000000 {
+		t.Errorf("default_day_limit = %d, want default 1000000", c.NPC.Loop.DefaultDayLimit)
+	}
+}
+
 func TestLoadSecurityFilterValidAddress(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wintermute.toml")

@@ -148,9 +148,9 @@ func run(cfgPath string) error {
 	// npc_budgets; the flush loop persists fresh usage on a 30s cadence
 	// and on shutdown via RunFlushLoop's ctx-done path.
 	budgetMgr := budget.NewManager(db, budget.Defaults{
-		Minute: 5000,
-		Hour:   100000,
-		Day:    1000000,
+		Minute: cfg.NPC.Loop.DefaultMinuteLimit,
+		Hour:   cfg.NPC.Loop.DefaultHourLimit,
+		Day:    cfg.NPC.Loop.DefaultDayLimit,
 	})
 	if err := budgetMgr.Load(ctx); err != nil {
 		return fmt.Errorf("budget: load: %w", err)
@@ -173,6 +173,11 @@ func run(cfgPath string) error {
 		Budget: budgetMgr,
 		World:  worldBroadcaster{w: w},
 		Tools:  toolsAdapter,
+		Config: npc.LoopConfig{
+			Debounce:         time.Duration(cfg.NPC.Loop.DebounceMs) * time.Millisecond,
+			MaxToolDepth:     cfg.NPC.Loop.MaxToolDepth,
+			DefaultGateModel: cfg.NPC.Loop.DefaultGateModel,
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("load npc registry: %w", err)

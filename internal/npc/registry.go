@@ -36,6 +36,11 @@ type EngageLookup interface {
 type LoopConfig struct {
 	Debounce     time.Duration
 	MaxToolDepth int
+	// DefaultGateModel is the fallback gate model name when an NPC's
+	// npc_config.gate_model column is empty. "" disables the fallback;
+	// such NPCs run gate-less (every observation triggers the chat
+	// model). Set via cfg.NPC.Loop.DefaultGateModel in main.go.
+	DefaultGateModel string
 }
 
 // LoopDeps bundles the cross-cutting dependencies the per-NPC loops
@@ -307,6 +312,10 @@ func (r *Registry) rebuild(ctx context.Context) error {
 					"npc", n.Name, "err", err)
 				continue
 			}
+			gateModel := n.GateModel
+			if gateModel == "" {
+				gateModel = r.loopDeps.Config.DefaultGateModel
+			}
 			l := &loop.Loop{
 				RoomID:       events.RoomID(loc.RoomID),
 				Bus:          r.loopDeps.Bus,
@@ -316,7 +325,7 @@ func (r *Registry) rebuild(ctx context.Context) error {
 				Persona:      n.Persona,
 				LLM:          n.llm,
 				ChatModel:    n.Model,
-				GateModel:    n.GateModel,
+				GateModel:    gateModel,
 				Memory:       n.Memory,
 				Budget:       r.loopDeps.Budget,
 				Tools:        r.loopDeps.Tools,
