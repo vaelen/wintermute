@@ -10,8 +10,10 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/vaelen/wintermute/internal/auth"
+	"github.com/vaelen/wintermute/internal/world/events"
 )
 
 // pendingWrite captures a (callback, message) pair to be flushed *after*
@@ -147,8 +149,17 @@ func (w *World) Attach(p *Presence) (RoomID, error) {
 	w.attachAt(p, loc.RoomID)
 	pending := w.collectBroadcastLocked(loc.RoomID, p.PlayerID,
 		fmt.Sprintf("%s wakes up.\r\n", playerDisplayName(w.objects[p.PlayerID])))
+	bus := w.bus
 	w.mu.Unlock()
 	flush(pending)
+	if bus != nil {
+		bus.Publish(events.Event{
+			Kind:   events.KindAttach,
+			RoomID: int64(loc.RoomID),
+			Actor:  int64(p.PlayerID),
+			At:     time.Now(),
+		})
+	}
 	return loc.RoomID, nil
 }
 
@@ -193,8 +204,17 @@ func (w *World) Detach(playerID ObjectID, reason DisconnectReason) {
 	pending := w.collectBroadcastLocked(loc.RoomID, playerID,
 		fmt.Sprintf("%s %s\r\n", name, disconnectVerbPhrase(reason)))
 	observer := w.detachObserver
+	bus := w.bus
 	w.mu.Unlock()
 	flush(pending)
+	if bus != nil {
+		bus.Publish(events.Event{
+			Kind:   events.KindDetach,
+			RoomID: int64(loc.RoomID),
+			Actor:  int64(playerID),
+			At:     time.Now(),
+		})
+	}
 	if observer != nil {
 		observer(playerID, loc.RoomID, reason)
 	}
@@ -304,9 +324,27 @@ func (w *World) Move(ctx context.Context, p *Presence, dir string) (RoomID, erro
 	leaving := w.collectBroadcastLocked(from.RoomID, p.PlayerID, leaveMsg+"\r\n")
 	arriving := w.collectBroadcastLocked(toID, p.PlayerID, arriveMsg+"\r\n")
 	observer := w.moveObserver
+	bus := w.bus
 	w.mu.Unlock()
 	flush(leaving)
 	flush(arriving)
+	if bus != nil {
+		now := time.Now()
+		bus.Publish(events.Event{
+			Kind:   events.KindDepart,
+			RoomID: int64(from.RoomID),
+			Actor:  int64(p.PlayerID),
+			Text:   dir,
+			At:     now,
+		})
+		bus.Publish(events.Event{
+			Kind:   events.KindArrive,
+			RoomID: int64(toID),
+			Actor:  int64(p.PlayerID),
+			Text:   dir,
+			At:     now,
+		})
+	}
 	if observer != nil {
 		observer(p.PlayerID, from.RoomID, toID, dir)
 	}
@@ -340,8 +378,18 @@ func (w *World) Say(p *Presence, text string) error {
 	roomID := loc.RoomID
 	speakerID := p.PlayerID
 	observer := w.sayObserver
+	bus := w.bus
 	w.mu.RUnlock()
 	flush(pending)
+	if bus != nil {
+		bus.Publish(events.Event{
+			Kind:   events.KindSay,
+			RoomID: int64(roomID),
+			Actor:  int64(speakerID),
+			Text:   text,
+			At:     time.Now(),
+		})
+	}
 	// Observer is invoked synchronously so any goroutines it registers
 	// (e.g. NPC dispatch goroutines) are accounted for in their owner's
 	// WaitGroup before Say returns. Observers MUST be cheap — see
@@ -374,8 +422,18 @@ func (w *World) NPCSay(npcID ObjectID, text string) error {
 	}
 	line := fmt.Sprintf("%s says, \"%s\"\r\n", o.Name, text)
 	pending := w.collectBroadcastLocked(loc.RoomID, 0, line)
+	bus := w.bus
 	w.mu.RUnlock()
 	flush(pending)
+	if bus != nil {
+		bus.Publish(events.Event{
+			Kind:   events.KindSay,
+			RoomID: int64(loc.RoomID),
+			Actor:  int64(npcID),
+			Text:   text,
+			At:     time.Now(),
+		})
+	}
 	return nil
 }
 
@@ -400,8 +458,18 @@ func (w *World) Emote(p *Presence, text string) error {
 	line := fmt.Sprintf("%s %s\r\n", name, text)
 	pending := w.collectBroadcastLocked(loc.RoomID, p.PlayerID, line)
 	pending = append(pending, pendingWrite{write: p.Write, msg: line, log: p.Log})
+	bus := w.bus
 	w.mu.RUnlock()
 	flush(pending)
+	if bus != nil {
+		bus.Publish(events.Event{
+			Kind:   events.KindEmote,
+			RoomID: int64(loc.RoomID),
+			Actor:  int64(p.PlayerID),
+			Text:   text,
+			At:     time.Now(),
+		})
+	}
 	return nil
 }
 
@@ -448,8 +516,19 @@ func (w *World) Take(ctx context.Context, p *Presence, target string) (Object, e
 	pending := w.collectBroadcastLocked(loc.RoomID, p.PlayerID,
 		fmt.Sprintf("%s picks up %s.\r\n", name, obj.Name))
 	taken := *obj
+	bus := w.bus
 	w.mu.Unlock()
 	flush(pending)
+	if bus != nil {
+		bus.Publish(events.Event{
+			Kind:   events.KindTake,
+			RoomID: int64(loc.RoomID),
+			Actor:  int64(p.PlayerID),
+			Target: int64(objID),
+			Text:   taken.Name,
+			At:     time.Now(),
+		})
+	}
 	return taken, nil
 }
 
@@ -492,8 +571,19 @@ func (w *World) Drop(ctx context.Context, p *Presence, target string) (Object, e
 	pending := w.collectBroadcastLocked(loc.RoomID, p.PlayerID,
 		fmt.Sprintf("%s drops %s.\r\n", name, obj.Name))
 	dropped := *obj
+	bus := w.bus
 	w.mu.Unlock()
 	flush(pending)
+	if bus != nil {
+		bus.Publish(events.Event{
+			Kind:   events.KindDrop,
+			RoomID: int64(loc.RoomID),
+			Actor:  int64(p.PlayerID),
+			Target: int64(objID),
+			Text:   dropped.Name,
+			At:     time.Now(),
+		})
+	}
 	return dropped, nil
 }
 

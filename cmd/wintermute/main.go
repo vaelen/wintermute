@@ -42,6 +42,7 @@ import (
 	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
 	"github.com/vaelen/wintermute/internal/world/engage"
 	"github.com/vaelen/wintermute/internal/world/engage/menu"
+	"github.com/vaelen/wintermute/internal/world/events"
 )
 
 func main() {
@@ -119,6 +120,9 @@ func run(cfgPath string) error {
 	if err != nil {
 		return fmt.Errorf("load world: %w", err)
 	}
+	bus := events.NewMemBus()
+	defer bus.Close()
+	w.SetBus(bus)
 
 	// Rename boots every live session for the renamed account so the
 	// in-memory s.account.Username cannot drift from the DB. Runs after

@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/vaelen/wintermute/internal/store"
+	"github.com/vaelen/wintermute/internal/world/events"
 )
 
 // Errors surfaced by world operations.
@@ -121,6 +122,10 @@ type World struct {
 	moveObserver   MoveObserver
 	detachObserver DetachObserver
 	beforeDelete   BeforeDeleteObserver
+	// bus is the per-room structured event publisher. Optional; nil
+	// means no structured publishes happen (the string broadcast path
+	// is unaffected either way). Set via SetBus after Load.
+	bus events.Bus
 }
 
 // SetSayObserver registers an observer to be notified after each Say
@@ -156,6 +161,21 @@ func (w *World) SetBeforeDeleteObserver(fn BeforeDeleteObserver) {
 	w.mu.Lock()
 	w.beforeDelete = fn
 	w.mu.Unlock()
+}
+
+// SetBus registers the per-room events.Bus the world publishes
+// structured events to. Pass nil to clear.
+func (w *World) SetBus(b events.Bus) {
+	w.mu.Lock()
+	w.bus = b
+	w.mu.Unlock()
+}
+
+// Bus returns the per-room event bus, or nil if none is configured.
+func (w *World) Bus() events.Bus {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.bus
 }
 
 // Load constructs a World by reading the entire world state from db. The
