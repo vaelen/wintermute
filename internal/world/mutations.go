@@ -425,6 +425,9 @@ func (w *World) NPCSay(npcID ObjectID, text string) error {
 	bus := w.bus
 	w.mu.RUnlock()
 	flush(pending)
+	// NPC speech intentionally uses KindSay (not a distinct KindNPCSay) so
+	// subscribers process all room speech uniformly; distinguishing player
+	// vs. NPC happens via Actor lookup in the world cache.
 	if bus != nil {
 		bus.Publish(events.Event{
 			Kind:   events.KindSay,
