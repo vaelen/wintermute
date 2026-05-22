@@ -13,18 +13,33 @@ package loop
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
+	"github.com/vaelen/wintermute/internal/llm"
 	"github.com/vaelen/wintermute/internal/world/events"
 )
 
 // Loop is one NPC's tick goroutine. Construct with the required fields
-// filled in and call Run from a goroutine.
+// filled in and call Run from a goroutine. Leave Tick nil to use the
+// production dispatch path (gate-model decision; response in later M7
+// tasks); set Tick explicitly only for tests that want to intercept the
+// buffered batch.
 type Loop struct {
 	RoomID   events.RoomID
 	Bus      events.Bus
 	Debounce time.Duration
 	Tick     func(ctx context.Context, observations []events.Event)
+
+	NPCID   events.ObjectID
+	NPCName string
+	Persona string
+
+	LLM       llm.LLM
+	ChatModel string
+	GateModel string
+
+	Logger *slog.Logger
 }
 
 // Run subscribes to the bus for RoomID and buffers events until
@@ -32,6 +47,12 @@ type Loop struct {
 // the buffered batch. Returns when ctx is cancelled or the
 // subscription channel closes.
 func (l *Loop) Run(ctx context.Context) {
+	if l.Tick == nil {
+		l.Tick = l.defaultTick
+	}
+	if l.Logger == nil {
+		l.Logger = slog.Default()
+	}
 	sub, cancel := l.Bus.Subscribe(l.RoomID)
 	defer cancel()
 

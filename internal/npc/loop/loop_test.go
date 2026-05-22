@@ -1,6 +1,8 @@
 // Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
 // SPDX-License-Identifier: MIT
 
+//go:build test
+
 package loop
 
 import (
@@ -8,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vaelen/wintermute/internal/llm/fake"
 	"github.com/vaelen/wintermute/internal/world/events"
 )
 
@@ -89,5 +92,126 @@ func TestLoop_NoTickWithoutObservations(t *testing.T) {
 	case <-called:
 		t.Fatal("Tick fired despite no observations")
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestLoop_GateNo_DoesNotCallResponse(t *testing.T) {
+	bus := events.NewMemBus()
+	defer bus.Close()
+
+	fakeLLM, err := fake.New(map[string]any{
+		"models": map[string]any{
+			"gate":     map[string]any{"default": "NO"},
+			"response": map[string]any{"default": "Hello there."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fb := fakeLLM.(*fake.Fake)
+
+	done := make(chan struct{}, 1)
+	l := &Loop{
+		RoomID:    1,
+		Bus:       bus,
+		Debounce:  20 * time.Millisecond,
+		NPCID:     100,
+		NPCName:   "Tester",
+		Persona:   "tester",
+		LLM:       fakeLLM,
+		ChatModel: "response",
+		GateModel: "gate",
+	}
+	// Wrap defaultTick to signal when it has run end-to-end.
+	l.Tick = func(ctx context.Context, obs []events.Event) {
+		l.defaultTick(ctx, obs)
+		done <- struct{}{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go l.Run(ctx)
+
+	time.Sleep(10 * time.Millisecond)
+	bus.Publish(events.Event{Kind: events.KindSay, RoomID: 1, Text: "ignore me"})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Tick never fired")
+	}
+
+	if calls := fb.Calls("response"); calls != 0 {
+		t.Fatalf("response model called %d times on NO gate; want 0", calls)
+	}
+	if calls := fb.Calls("gate"); calls != 1 {
+		t.Fatalf("gate model called %d times; want 1", calls)
+	}
+}
+
+func TestLoop_GateYes_AllowsResponsePath(t *testing.T) {
+	// With the response path being a stub in this task, this test only
+	// confirms that gateAllows returns true and defaultTick proceeds
+	// to (the stub) respond — i.e., it doesn't bail at the gate.
+	bus := events.NewMemBus()
+	defer bus.Close()
+
+	fakeLLM, err := fake.New(map[string]any{
+		"models": map[string]any{
+			"gate": map[string]any{"default": "YES"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fb := fakeLLM.(*fake.Fake)
+
+	done := make(chan struct{}, 1)
+	l := &Loop{
+		RoomID:    1,
+		Bus:       bus,
+		Debounce:  20 * time.Millisecond,
+		NPCID:     100,
+		NPCName:   "Tester",
+		Persona:   "tester",
+		LLM:       fakeLLM,
+		ChatModel: "response",
+		GateModel: "gate",
+	}
+	l.Tick = func(ctx context.Context, obs []events.Event) {
+		l.defaultTick(ctx, obs)
+		done <- struct{}{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go l.Run(ctx)
+
+	time.Sleep(10 * time.Millisecond)
+	bus.Publish(events.Event{Kind: events.KindSay, RoomID: 1, Text: "hello"})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Tick never fired")
+	}
+
+	if calls := fb.Calls("gate"); calls != 1 {
+		t.Fatalf("gate model called %d times; want 1", calls)
+	}
+}
+
+func TestFirstToken(t *testing.T) {
+	cases := map[string]string{
+		"YES":          "YES",
+		"  YES":        "YES",
+		"YES.":         "YES",
+		"YES, please.": "YES",
+		"":             "",
+	}
+	for in, want := range cases {
+		if got := firstToken(in); got != want {
+			t.Errorf("firstToken(%q)=%q want %q", in, got, want)
+		}
 	}
 }
