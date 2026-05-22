@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/vaelen/wintermute/internal/llm"
+	"github.com/vaelen/wintermute/internal/llm/budget"
 	"github.com/vaelen/wintermute/internal/llm/fake"
+	"github.com/vaelen/wintermute/internal/world"
 	"github.com/vaelen/wintermute/internal/world/events"
 )
 
@@ -456,6 +458,70 @@ func TestLoop_ToolCallDepthBound(t *testing.T) {
 	}
 	if got := len(tools.invoked); got != 2 {
 		t.Fatalf("tool invocations=%d want 2", got)
+	}
+}
+
+func TestLoop_BudgetExhausted_SkipsResponse(t *testing.T) {
+	bus := events.NewMemBus()
+	defer bus.Close()
+
+	fakeLLM, err := fake.New(map[string]any{
+		"models": map[string]any{
+			"gate":     map[string]any{"default": "YES"},
+			"response": map[string]any{"default": "Hello."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fb := fakeLLM.(*fake.Fake)
+
+	// nil db is safe: Manager only dereferences db in Load/Flush, and
+	// the loop never calls those — only Allow/Record.
+	mgr := budget.NewManager(nil, budget.Defaults{Minute: 100, Hour: 1000, Day: 10000})
+	const npcID world.ObjectID = 100
+	// Burn the minute window so the next Allow(npcID, gateBudgetEstimate)
+	// returns false.
+	mgr.Record(npcID, 100, 0)
+
+	bcast := newStubBroadcaster()
+	done := make(chan struct{}, 1)
+
+	l := &Loop{
+		RoomID:    1,
+		Bus:       bus,
+		Debounce:  20 * time.Millisecond,
+		NPCID:     events.ObjectID(npcID),
+		NPCName:   "T",
+		Persona:   "p",
+		LLM:       fakeLLM,
+		ChatModel: "response",
+		GateModel: "gate",
+		World:     bcast,
+		Budget:    mgr,
+	}
+	l.Tick = func(ctx context.Context, obs []events.Event) {
+		l.defaultTick(ctx, obs)
+		done <- struct{}{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go l.Run(ctx)
+	time.Sleep(10 * time.Millisecond)
+
+	bus.Publish(events.Event{Kind: events.KindSay, RoomID: 1, Text: "hi"})
+	<-done
+
+	if calls := fb.Calls("gate"); calls != 0 {
+		t.Fatalf("gate calls=%d want 0 (budget should have short-circuited before gate)", calls)
+	}
+	if calls := fb.Calls("response"); calls != 0 {
+		t.Fatalf("response calls=%d want 0", calls)
+	}
+	select {
+	case msg := <-bcast.said:
+		t.Fatalf("unexpected broadcast: %+v", msg)
+	default:
 	}
 }
 

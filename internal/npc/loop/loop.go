@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/vaelen/wintermute/internal/llm"
+	"github.com/vaelen/wintermute/internal/llm/budget"
 	"github.com/vaelen/wintermute/internal/npc/memory"
 	"github.com/vaelen/wintermute/internal/world/events"
 )
@@ -93,6 +94,11 @@ type Loop struct {
 	// MaxToolDepth caps the number of nested tool-call rounds before the
 	// response is broadcast as-is.
 	MaxToolDepth int
+
+	// Budget enforces per-NPC token budgets across minute/hour/day
+	// windows. Nil disables budget enforcement (every Allow returns true
+	// implicitly). Production wires this in main.go via budget.Manager.
+	Budget *budget.Manager
 
 	Logger *slog.Logger
 }

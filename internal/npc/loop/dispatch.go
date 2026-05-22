@@ -6,14 +6,30 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/vaelen/wintermute/internal/llm"
 	"github.com/vaelen/wintermute/internal/npc/memory"
+	"github.com/vaelen/wintermute/internal/world"
 	"github.com/vaelen/wintermute/internal/world/events"
 )
+
+// gateBudgetEstimate is the rough token cost of one gate-model call.
+// Sized small so a single gate decision fits even in a near-exhausted
+// minute window — gating must never be skipped while the response
+// model would fail-soft on the same budget state.
+const gateBudgetEstimate = 32
+
+// responseBudgetEstimate is a rough token cost for one response-model
+// Chat call. Conservative — actual usage is recorded after the call.
+const responseBudgetEstimate = 256
+
+// errBudgetExhausted is returned by callChatWithTools when the budget
+// would not accommodate the next Chat. respond logs and swallows it.
+var errBudgetExhausted = errors.New("npc loop: budget exhausted")
 
 // gatePrompt is the system message sent to the gate model. Kept short
 // because the gate model is tiny (e.g. llama3.2:1b); we parse its
@@ -29,6 +45,12 @@ Should %s respond or act now? Answer YES or NO. Answer with only one word.`
 // M7 tasks; for now defaultTick stops after the gate.
 func (l *Loop) defaultTick(ctx context.Context, obs []events.Event) {
 	if l.LLM == nil {
+		return
+	}
+	if l.Budget != nil && !l.Budget.Allow(world.ObjectID(l.NPCID), gateBudgetEstimate) {
+		l.Logger.Warn("npc loop: budget exhausted, skipping tick",
+			"npc", l.NPCName)
+		l.recordObservationsToShortTerm(obs)
 		return
 	}
 	if l.GateModel != "" && !l.gateAllows(ctx, obs) {
@@ -48,6 +70,9 @@ func (l *Loop) gateAllows(ctx context.Context, obs []events.Event) bool {
 		l.Logger.Warn("npc loop: gate call failed, defaulting to YES",
 			"npc", l.NPCName, "err", err)
 		return true
+	}
+	if l.Budget != nil {
+		l.Budget.Record(world.ObjectID(l.NPCID), resp.UsageIn, resp.UsageOut)
 	}
 	return strings.EqualFold(firstToken(resp.Content), "YES")
 }
@@ -129,8 +154,11 @@ func (l *Loop) respond(ctx context.Context, obs []events.Event) {
 
 	resp, err := l.callChatWithTools(ctx, msgs, tools, 0)
 	if err != nil {
-		l.Logger.Warn("npc loop: response model failed",
-			"npc", l.NPCName, "err", err)
+		if !errors.Is(err, errBudgetExhausted) {
+			l.Logger.Warn("npc loop: response model failed",
+				"npc", l.NPCName, "err", err)
+		}
+		l.recordObservationsToShortTerm(obs)
 		return
 	}
 	reply := strings.TrimSpace(resp.Content)
@@ -220,9 +248,15 @@ func (l *Loop) toolDefs() []llm.ToolDef {
 // is appended as a RoleTool message before the next Chat round.
 func (l *Loop) callChatWithTools(ctx context.Context, msgs []llm.Message, tools []llm.ToolDef, depth int) (llm.Response, error) {
 	for {
+		if l.Budget != nil && !l.Budget.Allow(world.ObjectID(l.NPCID), responseBudgetEstimate) {
+			return llm.Response{}, errBudgetExhausted
+		}
 		resp, err := l.LLM.Chat(ctx, msgs, tools, llm.ChatOpts{Model: l.ChatModel})
 		if err != nil {
 			return resp, err
+		}
+		if l.Budget != nil {
+			l.Budget.Record(world.ObjectID(l.NPCID), resp.UsageIn, resp.UsageOut)
 		}
 		if len(resp.ToolCalls) == 0 {
 			return resp, nil
