@@ -318,6 +318,213 @@ func TestDispatchNPCReloadAdminFailure(t *testing.T) {
 	}
 }
 
+// stubNPCDebug satisfies cmd.NPCDebugger for the @npc-debug /
+// @gc-memories admin-gate tests. It records call counts and lets each
+// test point a specific method at the answer it wants.
+type stubNPCDebug struct {
+	mu             sync.Mutex
+	lookups        int
+	snapshotCalls  int
+	budgetCalls    int
+	gcCalls        int
+	salienceCalls  int
+	info           NPCInfo
+	infoOK         bool
+	snap           NPCSnapshot
+	snapOK         bool
+	w1, w2, w3     NPCBudgetWindow
+	budgetOK       bool
+	gcDeleted      int64
+	gcErr          error
+	salienceReturn float64
+}
+
+func (s *stubNPCDebug) LookupByName(name string) (NPCInfo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lookups++
+	return s.info, s.infoOK
+}
+
+func (s *stubNPCDebug) LoopSnapshot(world.ObjectID) (NPCSnapshot, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshotCalls++
+	return s.snap, s.snapOK
+}
+
+func (s *stubNPCDebug) BudgetFor(world.ObjectID) (NPCBudgetWindow, NPCBudgetWindow, NPCBudgetWindow, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.budgetCalls++
+	return s.w1, s.w2, s.w3, s.budgetOK
+}
+
+func (s *stubNPCDebug) GCMemories(context.Context, float64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gcCalls++
+	return s.gcDeleted, s.gcErr
+}
+
+func (s *stubNPCDebug) SalienceFloor() float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.salienceCalls++
+	return s.salienceReturn
+}
+
+func TestDispatchNPCDebugAdminPrintsAllSections(t *testing.T) {
+	h, rw := newHandlerWithLevel(t, "admin", auth.AccessAdmin)
+	stub := &stubNPCDebug{
+		info: NPCInfo{
+			ObjectID:  42,
+			Name:      "Bartender",
+			Persona:   "A weary bartender.",
+			Model:     "llama3.2:3b",
+			GateModel: "llama3.2:1b",
+			ToolNames: []string{"give", "look"},
+		},
+		infoOK: true,
+		snap: NPCSnapshot{
+			NPCName: "Bartender",
+			RoomID:  7,
+			Observations: []NPCEvent{
+				{Kind: "say", Actor: 3, Text: "hi"},
+			},
+			LastReply: "Howdy.",
+		},
+		snapOK: true,
+		w1:     NPCBudgetWindow{Limit: 1000, Used: 100},
+		w2:     NPCBudgetWindow{Limit: 60000, Used: 5000},
+		w3:     NPCBudgetWindow{Limit: 1000000, Used: 50000},
+		budgetOK: true,
+	}
+	h.NPCDebug = stub
+	if got := h.Dispatch(context.Background(), "@npc-debug Bartender"); got != OutcomeContinue {
+		t.Fatalf("Dispatch(@npc-debug) = %v, want OutcomeContinue", got)
+	}
+	out := rw.Drain()
+	for _, want := range []string{
+		"NPC: Bartender",
+		"id=42",
+		"A weary bartender.",
+		"llama3.2:3b",
+		"llama3.2:1b",
+		"give, look",
+		"minute=100/1000",
+		"hour=5000/60000",
+		"day=50000/1000000",
+		`Last reply: "Howdy."`,
+		"Recent observations:",
+		`[say] actor=3 text="hi"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("@npc-debug output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestDispatchNPCDebugUnknownNPC(t *testing.T) {
+	h, rw := newHandlerWithLevel(t, "admin", auth.AccessAdmin)
+	stub := &stubNPCDebug{infoOK: false}
+	h.NPCDebug = stub
+	if got := h.Dispatch(context.Background(), "@npc-debug nope"); got != OutcomeContinue {
+		t.Fatalf("Dispatch(@npc-debug nope) = %v, want OutcomeContinue", got)
+	}
+	if !strings.Contains(rw.Drain(), "Unknown NPC: nope") {
+		t.Errorf("expected unknown-NPC message")
+	}
+}
+
+func TestDispatchNPCDebugUsage(t *testing.T) {
+	h, rw := newHandlerWithLevel(t, "admin", auth.AccessAdmin)
+	h.NPCDebug = &stubNPCDebug{}
+	if got := h.Dispatch(context.Background(), "@npc-debug"); got != OutcomeContinue {
+		t.Fatalf("Dispatch(@npc-debug) = %v, want OutcomeContinue", got)
+	}
+	if !strings.Contains(rw.Drain(), "Usage: @npc-debug") {
+		t.Errorf("expected usage message")
+	}
+}
+
+func TestDispatchNPCDebugNonAdminHiddenAsUnknown(t *testing.T) {
+	h, _ := newHandlerWithLevel(t, "bob", auth.AccessPlayer)
+	stub := &stubNPCDebug{}
+	h.NPCDebug = stub
+	if got := h.Dispatch(context.Background(), "@npc-debug whoever"); got != OutcomeUnknown {
+		t.Errorf("Dispatch(@npc-debug) non-admin = %v, want OutcomeUnknown", got)
+	}
+	stub.mu.Lock()
+	calls := stub.lookups
+	stub.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("LookupByName called %d times for non-admin, want 0", calls)
+	}
+}
+
+func TestDispatchNPCDebugNoDebuggerHiddenAsUnknown(t *testing.T) {
+	h, _ := newHandlerWithLevel(t, "admin", auth.AccessAdmin)
+	// h.NPCDebug stays nil.
+	if got := h.Dispatch(context.Background(), "@npc-debug foo"); got != OutcomeUnknown {
+		t.Errorf("Dispatch(@npc-debug) with nil NPCDebug = %v, want OutcomeUnknown", got)
+	}
+}
+
+func TestDispatchGCMemoriesAdminSuccess(t *testing.T) {
+	h, rw := newHandlerWithLevel(t, "admin", auth.AccessAdmin)
+	stub := &stubNPCDebug{gcDeleted: 7, salienceReturn: 0.1}
+	h.NPCDebug = stub
+	if got := h.Dispatch(context.Background(), "@gc-memories"); got != OutcomeContinue {
+		t.Fatalf("Dispatch(@gc-memories) = %v, want OutcomeContinue", got)
+	}
+	out := rw.Drain()
+	if !strings.Contains(out, "deleted 7 rows") || !strings.Contains(out, "0.10") {
+		t.Errorf("unexpected gc output: %q", out)
+	}
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	if stub.gcCalls != 1 {
+		t.Errorf("GCMemories called %d times, want 1", stub.gcCalls)
+	}
+}
+
+func TestDispatchGCMemoriesAdminFailure(t *testing.T) {
+	h, rw := newHandlerWithLevel(t, "admin", auth.AccessAdmin)
+	stub := &stubNPCDebug{gcErr: errors.New("disk full")}
+	h.NPCDebug = stub
+	if got := h.Dispatch(context.Background(), "@gc-memories"); got != OutcomeContinue {
+		t.Fatalf("Dispatch(@gc-memories) = %v, want OutcomeContinue", got)
+	}
+	out := rw.Drain()
+	if !strings.Contains(out, "GC failed:") || !strings.Contains(out, "disk full") {
+		t.Errorf("expected failure message, got: %q", out)
+	}
+}
+
+func TestDispatchGCMemoriesNonAdminHiddenAsUnknown(t *testing.T) {
+	h, _ := newHandlerWithLevel(t, "bob", auth.AccessPlayer)
+	stub := &stubNPCDebug{}
+	h.NPCDebug = stub
+	if got := h.Dispatch(context.Background(), "@gc-memories"); got != OutcomeUnknown {
+		t.Errorf("Dispatch(@gc-memories) non-admin = %v, want OutcomeUnknown", got)
+	}
+	stub.mu.Lock()
+	calls := stub.gcCalls
+	stub.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("GCMemories called %d times for non-admin, want 0", calls)
+	}
+}
+
+func TestDispatchGCMemoriesNoDebuggerHiddenAsUnknown(t *testing.T) {
+	h, _ := newHandlerWithLevel(t, "admin", auth.AccessAdmin)
+	// h.NPCDebug stays nil.
+	if got := h.Dispatch(context.Background(), "@gc-memories"); got != OutcomeUnknown {
+		t.Errorf("Dispatch(@gc-memories) with nil NPCDebug = %v, want OutcomeUnknown", got)
+	}
+}
+
 func TestDispatchNPCReloadNonAdminHiddenAsUnknown(t *testing.T) {
 	h, _ := newHandlerWithLevel(t, "bob", auth.AccessPlayer)
 	stub := &stubReloader{}

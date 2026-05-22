@@ -95,6 +95,20 @@ func (m *Manager) Allow(npcID world.ObjectID, estimate int) bool {
 	return m.get(npcID, now).Allow(estimate, now)
 }
 
+// WindowsFor returns a snapshot of the three windows for npcID. The
+// boolean is false when no in-memory budget exists yet for that NPC
+// (a state which is normal pre-first-Allow). Used by the @npc-debug
+// admin command.
+func (m *Manager) WindowsFor(npcID world.ObjectID) (Window, Window, Window, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.budgets[npcID]
+	if !ok {
+		return Window{}, Window{}, Window{}, false
+	}
+	return b.Minute, b.Hour, b.Day, true
+}
+
 // Record adds tokens to npcID's three windows and marks it dirty.
 func (m *Manager) Record(npcID world.ObjectID, usageIn, usageOut int) {
 	now := time.Now()

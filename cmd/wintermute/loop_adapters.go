@@ -5,12 +5,16 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync/atomic"
 
+	"github.com/vaelen/wintermute/internal/npc"
 	"github.com/vaelen/wintermute/internal/npc/loop"
+	npcmemory "github.com/vaelen/wintermute/internal/npc/memory"
 	scriptlua "github.com/vaelen/wintermute/internal/script/lua"
 	"github.com/vaelen/wintermute/internal/world"
+	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
 	"github.com/vaelen/wintermute/internal/world/events"
 )
 
@@ -68,3 +72,73 @@ func (a *luaToolsAdapter) Invoke(ctx context.Context, name string, args map[stri
 	}
 	return a.reg.Invoke(ctx, pool, name, args)
 }
+
+// npcDebugAdapter wraps *npc.Registry to satisfy worldcmd.NPCDebugger,
+// translating between the npc package's domain types and the cmd-side
+// view types so the cmd package stays free of an npc/loop/budget
+// import.
+type npcDebugAdapter struct{ r *npc.Registry }
+
+func (a npcDebugAdapter) LookupByName(name string) (worldcmd.NPCInfo, bool) {
+	n, ok := a.r.LookupByName(name)
+	if !ok {
+		return worldcmd.NPCInfo{}, false
+	}
+	tools := append([]string(nil), n.ToolNames...)
+	return worldcmd.NPCInfo{
+		ObjectID:  n.ObjectID,
+		Name:      n.Name,
+		Persona:   n.Persona,
+		Model:     n.Model,
+		GateModel: n.GateModel,
+		ToolNames: tools,
+	}, true
+}
+
+func (a npcDebugAdapter) LoopSnapshot(npcID world.ObjectID) (worldcmd.NPCSnapshot, bool) {
+	snap, ok := a.r.LoopSnapshot(npcID)
+	if !ok {
+		return worldcmd.NPCSnapshot{}, false
+	}
+	obs := make([]worldcmd.NPCEvent, 0, len(snap.Observations))
+	for _, e := range snap.Observations {
+		obs = append(obs, worldcmd.NPCEvent{
+			Kind:  string(e.Kind),
+			Actor: int64(e.Actor),
+			Text:  e.Text,
+		})
+	}
+	return worldcmd.NPCSnapshot{
+		NPCName:      snap.NPCName,
+		RoomID:       int64(snap.RoomID),
+		Observations: obs,
+		LastReply:    snap.LastReply,
+	}, true
+}
+
+func (a npcDebugAdapter) BudgetFor(npcID world.ObjectID) (worldcmd.NPCBudgetWindow, worldcmd.NPCBudgetWindow, worldcmd.NPCBudgetWindow, bool) {
+	w1, w2, w3, ok := a.r.BudgetFor(npcID)
+	if !ok {
+		return worldcmd.NPCBudgetWindow{}, worldcmd.NPCBudgetWindow{}, worldcmd.NPCBudgetWindow{}, false
+	}
+	return worldcmd.NPCBudgetWindow{Limit: w1.Limit, Used: w1.Used},
+		worldcmd.NPCBudgetWindow{Limit: w2.Limit, Used: w2.Used},
+		worldcmd.NPCBudgetWindow{Limit: w3.Limit, Used: w3.Used},
+		true
+}
+
+func (a npcDebugAdapter) GCMemories(ctx context.Context, floor float64) (int64, error) {
+	var deleted int64
+	err := a.r.DB().Write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM npc_memories WHERE salience < ?`, floor)
+		if err != nil {
+			return err
+		}
+		deleted, _ = res.RowsAffected()
+		return nil
+	})
+	return deleted, err
+}
+
+func (a npcDebugAdapter) SalienceFloor() float64 { return npcmemory.DecayFloor }

@@ -18,16 +18,24 @@ type Manager struct {
 	parent context.Context
 
 	mu    sync.Mutex
-	loops map[events.ObjectID]context.CancelFunc
+	loops map[events.ObjectID]*loopEntry
 
 	wg sync.WaitGroup
+}
+
+// loopEntry pairs a live Loop with the cancel func that stops its
+// goroutine. The Loop pointer is kept so the admin @npc-debug command
+// can take a Snapshot off the live loop.
+type loopEntry struct {
+	loop   *Loop
+	cancel context.CancelFunc
 }
 
 // NewManager constructs a Manager whose per-loop ctx derives from parent.
 func NewManager(parent context.Context) *Manager {
 	return &Manager{
 		parent: parent,
-		loops:  map[events.ObjectID]context.CancelFunc{},
+		loops:  map[events.ObjectID]*loopEntry{},
 	}
 }
 
@@ -36,11 +44,11 @@ func NewManager(parent context.Context) *Manager {
 // ctx is cancelled first.
 func (m *Manager) Add(l *Loop) {
 	m.mu.Lock()
-	if cancel, ok := m.loops[l.NPCID]; ok {
-		cancel()
+	if prev, ok := m.loops[l.NPCID]; ok {
+		prev.cancel()
 	}
 	ctx, cancel := context.WithCancel(m.parent)
-	m.loops[l.NPCID] = cancel
+	m.loops[l.NPCID] = &loopEntry{loop: l, cancel: cancel}
 	m.mu.Unlock()
 
 	m.wg.Add(1)
@@ -53,19 +61,30 @@ func (m *Manager) Add(l *Loop) {
 // Remove stops the loop for npcID. No-op if absent.
 func (m *Manager) Remove(npcID events.ObjectID) {
 	m.mu.Lock()
-	cancel, ok := m.loops[npcID]
+	entry, ok := m.loops[npcID]
 	delete(m.loops, npcID)
 	m.mu.Unlock()
 	if ok {
-		cancel()
+		entry.cancel()
 	}
+}
+
+// Get returns the live Loop for npcID, or nil if absent. Used by the
+// admin @npc-debug command to take a Snapshot.
+func (m *Manager) Get(npcID events.ObjectID) *Loop {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e, ok := m.loops[npcID]; ok {
+		return e.loop
+	}
+	return nil
 }
 
 // Stop cancels every loop and waits for all goroutines to return.
 func (m *Manager) Stop() {
 	m.mu.Lock()
-	for id, cancel := range m.loops {
-		cancel()
+	for id, entry := range m.loops {
+		entry.cancel()
 		delete(m.loops, id)
 	}
 	m.mu.Unlock()

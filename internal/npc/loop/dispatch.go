@@ -53,6 +53,7 @@ func (l *Loop) defaultTick(ctx context.Context, obs []events.Event) {
 		l.recordObservationsToShortTerm(obs)
 		return
 	}
+	l.recordObservationsForSnapshot(obs)
 	if l.GateModel != "" && !l.gateAllows(ctx, obs) {
 		l.recordObservationsToShortTerm(obs)
 		return
@@ -173,6 +174,7 @@ func (l *Loop) respond(ctx context.Context, obs []events.Event) {
 				"npc", l.NPCName, "err", err)
 		}
 	}
+	l.recordLastReplyForSnapshot(reply)
 	l.recordOwnReplyToShortTerm(reply)
 }
 

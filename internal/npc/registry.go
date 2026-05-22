@@ -343,6 +343,60 @@ func (r *Registry) Get(id world.ObjectID) *NPC {
 	return r.byID[id]
 }
 
+// LookupByName resolves an NPC by name (case-insensitive), returning
+// (NPC, true) on the first match. Per-NPC names are not guaranteed
+// unique in the schema; returning the first match is acceptable for
+// a debug command.
+func (r *Registry) LookupByName(name string) (*NPC, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, n := range r.byID {
+		if strings.EqualFold(n.Name, name) {
+			return n, true
+		}
+	}
+	return nil, false
+}
+
+// LoopSnapshot returns the snapshot of the named NPC's loop (recent
+// observations + last reply). Returns (Snapshot{}, false) if the
+// loop is not running.
+func (r *Registry) LoopSnapshot(npcID world.ObjectID) (loop.Snapshot, bool) {
+	r.mu.RLock()
+	mgr := r.loopMgr
+	r.mu.RUnlock()
+	if mgr == nil {
+		return loop.Snapshot{}, false
+	}
+	l := mgr.Get(events.ObjectID(npcID))
+	if l == nil {
+		return loop.Snapshot{}, false
+	}
+	return l.Snapshot(), true
+}
+
+// BudgetFor returns a snapshot of the three budget windows for npcID.
+// The boolean is false when no budget is wired or no record exists
+// yet. Used by the @npc-debug admin command.
+func (r *Registry) BudgetFor(npcID world.ObjectID) (budget.Window, budget.Window, budget.Window, bool) {
+	r.mu.RLock()
+	mgr := r.loopDeps.Budget
+	r.mu.RUnlock()
+	if mgr == nil {
+		return budget.Window{}, budget.Window{}, budget.Window{}, false
+	}
+	return mgr.WindowsFor(npcID)
+}
+
+// DB exposes the underlying store handle so admin commands that need
+// to run direct SQL (e.g. @gc-memories) can do so without dragging
+// the store dependency through cmd.
+func (r *Registry) DB() *store.DB { return r.db }
+
 // NPCsInRoom returns the registered NPCs currently located in room. NPCs in
 // the room without an npc_config entry are silently omitted.
 func (r *Registry) NPCsInRoom(roomID world.RoomID) []*NPC {

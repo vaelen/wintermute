@@ -14,6 +14,7 @@ package loop
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/vaelen/wintermute/internal/llm"
@@ -21,6 +22,16 @@ import (
 	"github.com/vaelen/wintermute/internal/npc/memory"
 	"github.com/vaelen/wintermute/internal/world/events"
 )
+
+// Snapshot is a defensive copy of the loop's recent observations and
+// last broadcast reply, used by the @npc-debug admin command to
+// inspect the live state of an NPC without touching its goroutine.
+type Snapshot struct {
+	NPCName      string
+	RoomID       events.RoomID
+	Observations []events.Event
+	LastReply    string
+}
 
 // Broadcaster is the minimum World surface the loop needs to publish an
 // NPC reply. *world.World satisfies this via a small adapter (see
@@ -107,6 +118,49 @@ type Loop struct {
 	Engage EngageLookup
 
 	Logger *slog.Logger
+
+	// snapMu guards recentObs and lastReply, populated from the tick
+	// goroutine and read by the admin @npc-debug command via
+	// Snapshot(). The mutex is intentionally separate from the loop's
+	// own state because it is touched off-goroutine.
+	snapMu    sync.Mutex
+	recentObs []events.Event
+	lastReply string
+}
+
+// Snapshot returns a defensive copy of the loop's recent observations
+// and last broadcast reply. Safe to call from outside the loop
+// goroutine.
+func (l *Loop) Snapshot() Snapshot {
+	l.snapMu.Lock()
+	defer l.snapMu.Unlock()
+	return Snapshot{
+		NPCName:      l.NPCName,
+		RoomID:       l.RoomID,
+		Observations: append([]events.Event(nil), l.recentObs...),
+		LastReply:    l.lastReply,
+	}
+}
+
+// recordObservationsForSnapshot copies obs into the loop's
+// recent-observations ring (last 16). Called from defaultTick after the
+// budget check so the @npc-debug snapshot reflects what was actually
+// processed.
+func (l *Loop) recordObservationsForSnapshot(obs []events.Event) {
+	l.snapMu.Lock()
+	defer l.snapMu.Unlock()
+	l.recentObs = append([]events.Event(nil), obs...)
+	if len(l.recentObs) > 16 {
+		l.recentObs = l.recentObs[len(l.recentObs)-16:]
+	}
+}
+
+// recordLastReplyForSnapshot stores the most recent broadcast reply.
+// Called from respond after the World.NPCSay call returns.
+func (l *Loop) recordLastReplyForSnapshot(reply string) {
+	l.snapMu.Lock()
+	defer l.snapMu.Unlock()
+	l.lastReply = reply
 }
 
 // Run subscribes to the bus for RoomID and buffers events until

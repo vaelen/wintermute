@@ -376,6 +376,7 @@ func run(cfgPath string) error {
 	}
 
 	handler := session.DefaultHandler(authStore, w, npcReg, logger, motd)
+	handler.NPCDebug = npcDebugAdapter{r: npcReg}
 	handler.Admin = adminBackend
 	handler.HistorySize = cfg.Session.HistorySize
 	handler.EngageRegistry = engageReg
