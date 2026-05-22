@@ -34,6 +34,7 @@ import (
 	"github.com/vaelen/wintermute/internal/mail"
 	wnettls "github.com/vaelen/wintermute/internal/net/tls"
 	"github.com/vaelen/wintermute/internal/npc"
+	npcmemory "github.com/vaelen/wintermute/internal/npc/memory"
 	"github.com/vaelen/wintermute/internal/npc/schedule"
 	scriptlua "github.com/vaelen/wintermute/internal/script/lua"
 	"github.com/vaelen/wintermute/internal/security"
@@ -470,6 +471,21 @@ func run(cfgPath string) error {
 				}
 			}
 		}
+	}()
+
+	// M7 Task 13: daily memory-salience decay job. Multiplies every
+	// npc_memories.salience by DecayFactor (0.95) once per 24h so
+	// unreferenced memories drift toward DecayFloor (0.1) and become
+	// eligible for the @gc-memories admin sweep. The first tick fires
+	// after a full interval — startup is not a decay event.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		(&npcmemory.DecayJob{
+			DB:       db,
+			Logger:   logger,
+			Interval: 24 * time.Hour,
+		}).Run(ctx)
 	}()
 
 	// M6.6: security janitor — purge expired temporary ip_denials rows
