@@ -52,21 +52,57 @@ func TestMemBus_OverflowDropsOldest(t *testing.T) {
 	defer b.Close()
 	ch, cancel := b.Subscribe(RoomID(1))
 	defer cancel()
-	for i := 0; i < defaultSubBuffer+10; i++ {
-		b.Publish(Event{Kind: KindSay, RoomID: 1, Text: "x"})
+
+	// Publish more events than the buffer can hold, tagging each
+	// with a monotonically increasing sequence number in Extra.
+	total := defaultSubBuffer * 2
+	for i := 0; i < total; i++ {
+		b.Publish(Event{
+			Kind:   KindSay,
+			RoomID: 1,
+			Extra:  map[string]any{"seq": i},
+		})
 	}
-	count := 0
+
+	// Drain whatever survived.
+	var seqs []int
 loop:
 	for {
 		select {
-		case <-ch:
-			count++
+		case e := <-ch:
+			seqs = append(seqs, e.Extra["seq"].(int))
 		default:
 			break loop
 		}
 	}
-	if count == 0 || count > defaultSubBuffer+1 {
-		t.Fatalf("received %d events; want between 1 and %d", count, defaultSubBuffer+1)
+
+	if len(seqs) == 0 {
+		t.Fatal("no events survived")
+	}
+	if len(seqs) > defaultSubBuffer+1 {
+		t.Fatalf("more events than buffer can hold: %d > %d",
+			len(seqs), defaultSubBuffer+1)
+	}
+	// Drop-oldest invariant: the surviving events should be a suffix
+	// of the published range. The minimum sequence number among
+	// survivors must be at least (total - defaultSubBuffer - 1):
+	// anything older was overwritten.
+	minSeq := seqs[0]
+	for _, s := range seqs {
+		if s < minSeq {
+			minSeq = s
+		}
+	}
+	if minSeq < total-defaultSubBuffer-1 {
+		t.Fatalf("oldest surviving seq=%d but expected ≥ %d (drop-oldest violated)",
+			minSeq, total-defaultSubBuffer-1)
+	}
+	// And the surviving seq numbers should be strictly increasing
+	// when read in channel order (FIFO).
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] <= seqs[i-1] {
+			t.Fatalf("seqs out of order at index %d: %v", i, seqs)
+		}
 	}
 }
 

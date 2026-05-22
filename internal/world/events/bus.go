@@ -32,6 +32,7 @@ const (
 	KindDetach Kind = "detach"
 	KindTool   Kind = "tool"
 	KindSched  Kind = "sched"
+	KindTick   Kind = "tick"
 )
 
 // Event is the structured form of a per-room occurrence.
