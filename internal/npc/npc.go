@@ -31,6 +31,11 @@ type NPC struct {
 	GateModel   string
 	MaxContext  int
 
+	// ToolNames is the NPC's allow-list of tool names exposed to the
+	// response model. Populated from npc_config.tools (comma-separated)
+	// by Registry.rebuild.
+	ToolNames []string
+
 	// Memory is the per-NPC short-term + long-term + worker bundle.
 	// Wired up by Registry.Load; non-nil when llm is non-nil.
 	Memory *memory.State

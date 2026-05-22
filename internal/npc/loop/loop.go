@@ -100,6 +100,12 @@ type Loop struct {
 	// implicitly). Production wires this in main.go via budget.Manager.
 	Budget *budget.Manager
 
+	// Engage is consulted at observation time. When the NPC is currently
+	// engaged with someone other than the event's Actor, say events are
+	// dropped (the brush-off line is emitted by the npc registry's
+	// SayObserver elsewhere). Nil means no filtering.
+	Engage EngageLookup
+
 	Logger *slog.Logger
 }
 
@@ -147,6 +153,9 @@ func (l *Loop) Run(ctx context.Context) {
 			if !ok {
 				return
 			}
+			if l.shouldDropEvent(e) {
+				continue
+			}
 			obs = append(obs, e)
 			armDebounce()
 		case <-debounceC():
@@ -158,4 +167,39 @@ func (l *Loop) Run(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// shouldDropEvent reports whether the loop should ignore e. Two cases
+// drop:
+//   - self-actor: KindSay / KindEmote whose Actor is this NPC. The
+//     world publishes a KindSay for the NPC's own broadcast (so admin
+//     scripts and other NPCs can observe it); without this filter the
+//     loop would echo on its own output and recurse.
+//   - engagement filter: when the NPC is currently engaged with someone
+//     other than the event's Actor, say events are dropped (the
+//     brush-off line is emitted by the npc registry's SayObserver
+//     elsewhere). Non-verbal events (arrive/depart/take/drop/etc.) are
+//     not filtered: the NPC should still be aware of room state
+//     changes during an engagement.
+func (l *Loop) shouldDropEvent(e events.Event) bool {
+	if l.NPCID != 0 && e.Actor == l.NPCID &&
+		(e.Kind == events.KindSay || e.Kind == events.KindEmote) {
+		return true
+	}
+	if l.Engage == nil {
+		return false
+	}
+	if e.Kind != events.KindSay && e.Kind != events.KindEmote {
+		return false
+	}
+	participants, engaged := l.Engage.EngagedWith(l.NPCID)
+	if !engaged {
+		return false
+	}
+	for _, p := range participants {
+		if p == e.Actor {
+			return false
+		}
+	}
+	return true
 }

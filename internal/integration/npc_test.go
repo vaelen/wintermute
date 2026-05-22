@@ -26,7 +26,17 @@ import (
 	"github.com/vaelen/wintermute/internal/session"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
+	"github.com/vaelen/wintermute/internal/world/events"
 )
+
+// npcLoopBroadcaster adapts *world.World to loop.Broadcaster for the
+// integration test environment. Defined here (not imported from
+// cmd/wintermute) so this package stays free of the cmd dependency.
+type npcLoopBroadcaster struct{ w *world.World }
+
+func (b npcLoopBroadcaster) NPCSay(npcID events.ObjectID, text string) error {
+	return b.w.NPCSay(world.ObjectID(npcID), text)
+}
 
 // errAlwaysBackend is a test-only LLM whose Chat always fails. It mimics a
 // broken/unreachable provider so we can assert that NPC dispatch errors do
@@ -91,7 +101,16 @@ func startServerWithNPC(t *testing.T, defaults config.LLMBackend) *testServer {
 		t.Fatalf("update bartender backend: %v", err)
 	}
 
-	reg, err := npc.Load(ctx, db, w, defaults, logger)
+	// M7: wire an events.Bus so the per-NPC loop can subscribe; tests
+	// that drive the say → reply round-trip publish on this bus when
+	// they invoke world.Say from the session loop.
+	bus := events.NewMemBus()
+	w.SetBus(bus)
+	reg, err := npc.Load(ctx, db, w, defaults, logger, npc.LoopDeps{
+		Bus:    bus,
+		World:  npcLoopBroadcaster{w: w},
+		Config: npc.LoopConfig{Debounce: 50 * time.Millisecond},
+	})
 	if err != nil {
 		_ = db.Close()
 		cancel()
@@ -147,6 +166,7 @@ func startServerWithNPC(t *testing.T, defaults config.LLMBackend) *testServer {
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancelShutdown()
 		_ = reg.Shutdown(shutdownCtx)
+		bus.Close()
 		_ = db.Close()
 	}
 	t.Cleanup(srv.close)
@@ -154,14 +174,15 @@ func startServerWithNPC(t *testing.T, defaults config.LLMBackend) *testServer {
 }
 
 // bartenderFakeDefaults builds an LLMBackend that uses the fake backend with
-// responses keyed off "says" — every dispatch comes through HandleSay's
-// "<who> says: ..." template, so any utterance will route to bartenderReply.
+// responses keyed off "someone said" — the loop renders observations as
+// "- someone said: <text>" so any incoming utterance routes to
+// bartenderReply via the substring match.
 func bartenderFakeDefaults(bartenderReply string) config.LLMBackend {
 	return config.LLMBackend{
 		Backend: "fake",
 		Opts: map[string]any{
 			"responses": map[string]any{
-				"says": bartenderReply,
+				"someone said": bartenderReply,
 			},
 			"default": "*the bartender shrugs*",
 		},
@@ -183,36 +204,14 @@ func TestBartenderRespondsToAddressedSay(t *testing.T) {
 	c.expect("Goodbye", 5*time.Second)
 }
 
-// TestBartenderIgnoresUnaddressedSay covers acceptance criterion #3: the
-// bartender must not respond when a player addresses someone else by name
-// and the room has more than one non-speaker entity.
+// TestBartenderIgnoresUnaddressedSay covered M3's name-in-text +
+// sole-entity addressing rules. M7 replaces those rules with the
+// per-NPC loop's gate-model decision; whether an NPC ignores an
+// unaddressed say is now an LLM-driven judgement, not a structural
+// guarantee from the registry. The unit-level gate-NO behaviour is
+// covered by internal/npc/loop's TestLoop_GateNo_DoesNotCallResponse.
 func TestBartenderIgnoresUnaddressedSay(t *testing.T) {
-	srv := startServerWithNPC(t, bartenderFakeDefaults("the bar smells of stale coffee"))
-	alice := dialClient(t, srv)
-	bob := dialClient(t, srv)
-	alice.loginNew("alice", "hunter22")
-	bob.loginNew("bob", "hunter22")
-	alice.drainFor(200 * time.Millisecond)
-	bob.drainFor(200 * time.Millisecond)
-
-	alice.send("say hello, bob\r\n")
-	alice.expect(`You say, "hello, bob"`, 5*time.Second)
-
-	// Give the registry a generous window to (NOT) dispatch. Both clients
-	// drain for the same budget so a spurious broadcast can't slip onto bob's
-	// connection after alice's drain has already closed.
-	alice.drainFor(700 * time.Millisecond)
-	bob.drainFor(700 * time.Millisecond)
-
-	if strings.Contains(alice.string(), `the bartender says,`) {
-		t.Errorf("bartender should not have replied to an unaddressed say with another player in the room; alice saw:\n%s", alice.string())
-	}
-	if strings.Contains(bob.string(), `the bartender says,`) {
-		t.Errorf("bartender should not have replied; bob saw:\n%s", bob.string())
-	}
-
-	alice.send("quit\r\n")
-	bob.send("quit\r\n")
+	t.Skip("M7: the bartender's silence on unaddressed Says is now gate-model-driven; see internal/npc/loop tests")
 }
 
 // TestTwoPlayersConcurrentBartenderSay covers acceptance criterion #4: two

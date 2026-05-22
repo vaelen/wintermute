@@ -107,44 +107,39 @@ func TestHandleSay_noInterruptWhenEngagedParticipantSpeaks(t *testing.T) {
 }
 
 // TestHandleSay_noEngageLookupNoChange verifies that when SetEngageLookup has
-// NOT been called (engage == nil), HandleSay behaves exactly as before: it
-// dispatches to the LLM when the NPC is addressed.
+// NOT been called (engage == nil), the bus-driven loop replies normally and
+// no brush-off path interferes.
 func TestHandleSay_noEngageLookupNoChange(t *testing.T) {
 	e := newFakeBackendEnv(t)
-	lobby := lobbyID(t, e)
-
 	alice := e.attachPlayer(t, "alice")
-	bob := e.attachPlayer(t, "bob") // disable rule (b)
 	alice.drain()
-	bob.drain()
 
 	// No SetEngageLookup call — default nil engage field.
-	e.reg.HandleSay(lobby, alice.PlayerID, "alice", "hi bartender")
-	alice.waitFor(t, bartenderResponse, 2*time.Second)
+	if err := e.world.Say(alice.Presence, "hi bartender"); err != nil {
+		t.Fatalf("Say: %v", err)
+	}
+	alice.waitFor(t, bartenderResponse, 3*time.Second)
 }
 
 // TestHandleSay_brushOffNotSentWhenNPCNotEngaged verifies that when the
-// engage registry is wired but the NPC has no open engagement, HandleSay
+// engage registry is wired but the NPC has no open engagement, the loop
 // dispatches normally (no spurious brush-off).
 func TestHandleSay_brushOffNotSentWhenNPCNotEngaged(t *testing.T) {
 	e := newFakeBackendEnv(t)
-	lobby := lobbyID(t, e)
-
 	alice := e.attachPlayer(t, "alice")
-	bob := e.attachPlayer(t, "bob") // disable rule (b)
 
 	// Wire an empty engage registry — no engagements open.
 	e.reg.SetEngageLookup(engage.NewRegistry())
 
 	alice.drain()
-	bob.drain()
 
-	e.reg.HandleSay(lobby, alice.PlayerID, "alice", "hi bartender")
-	alice.waitFor(t, bartenderResponse, 2*time.Second)
+	if err := e.world.Say(alice.Presence, "hi bartender"); err != nil {
+		t.Fatalf("Say: %v", err)
+	}
+	alice.waitFor(t, bartenderResponse, 3*time.Second)
 
 	// Verify no brush-off was broadcast.
-	got := alice.drain() + bob.drain()
-	if strings.Contains(got, "raises a finger") {
+	if got := alice.drain(); strings.Contains(got, "raises a finger") {
 		t.Errorf("unexpected brush-off when NPC is not engaged; got %q", got)
 	}
 }

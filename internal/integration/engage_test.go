@@ -82,7 +82,7 @@ func startEngageServer(t *testing.T) *testServer {
 		t.Fatalf("update bartender backend: %v", err)
 	}
 
-	npcReg, err := npc.Load(ctx, db, w, fakeDefaults, logger)
+	npcReg, err := npc.Load(ctx, db, w, fakeDefaults, logger, npc.LoopDeps{})
 	if err != nil {
 		_ = db.Close()
 		cancel()

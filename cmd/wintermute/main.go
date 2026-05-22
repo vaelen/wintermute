@@ -29,6 +29,7 @@ import (
 	"github.com/vaelen/wintermute/internal/ftn/msgid"
 	ftnnetworks "github.com/vaelen/wintermute/internal/ftn/networks"
 	wintermutehttp "github.com/vaelen/wintermute/internal/http"
+	"github.com/vaelen/wintermute/internal/llm/budget"
 	_ "github.com/vaelen/wintermute/internal/llm/ollama"
 	"github.com/vaelen/wintermute/internal/mail"
 	wnettls "github.com/vaelen/wintermute/internal/net/tls"
@@ -141,7 +142,36 @@ func run(cfgPath string) error {
 		return err
 	})
 
-	npcReg, err := npc.Load(ctx, db, w, cfg.LLM.Default, logger)
+	// M7: per-NPC token budget manager. Load reads persisted usage from
+	// npc_budgets; the flush loop persists fresh usage on a 30s cadence
+	// and on shutdown via RunFlushLoop's ctx-done path.
+	budgetMgr := budget.NewManager(db, budget.Defaults{
+		Minute: 5000,
+		Hour:   100000,
+		Day:    1000000,
+	})
+	if err := budgetMgr.Load(ctx); err != nil {
+		return fmt.Errorf("budget: load: %w", err)
+	}
+	go func() {
+		if err := budgetMgr.RunFlushLoop(ctx, 30*time.Second, logger); err != nil {
+			logger.Warn("budget: final flush failed", "err", err)
+		}
+	}()
+
+	// M7: lua tool registry + late-bound pool adapter. The adapter is
+	// constructed BEFORE npc.Load so the per-NPC loop goroutines have a
+	// stable Tools interface; the actual *Pool is wired in below after
+	// luaPool is constructed.
+	toolsRegistry := scriptlua.NewToolRegistry()
+	toolsAdapter := &luaToolsAdapter{reg: toolsRegistry}
+
+	npcReg, err := npc.Load(ctx, db, w, cfg.LLM.Default, logger, npc.LoopDeps{
+		Bus:    bus,
+		Budget: budgetMgr,
+		World:  worldBroadcaster{w: w},
+		Tools:  toolsAdapter,
+	})
 	if err != nil {
 		return fmt.Errorf("load npc registry: %w", err)
 	}
@@ -170,9 +200,13 @@ func run(cfgPath string) error {
 	adminAPI.Boards = boardsSvc
 	adminAPI.Files = filesSvc
 	adminAPI.Security = secSvc
-	luaAPI := scriptlua.NewAPI(adminAPI, nil, ctx)
+	luaAPI := scriptlua.NewAPI(adminAPI, toolsRegistry, ctx)
 	luaPool := scriptlua.NewPool(scriptlua.PoolConfig{Size: 4, API: luaAPI})
 	defer luaPool.Close()
+	// Now that the pool is alive, wire it into the tools adapter so the
+	// per-NPC loops constructed by npcReg can actually invoke registered
+	// tools.
+	toolsAdapter.setPool(luaPool)
 	scripts := scriptlua.NewScriptStore(db)
 	adminBackend := &worldcmd.AdminBackend{
 		API:     adminAPI,

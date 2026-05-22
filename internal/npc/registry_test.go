@@ -8,7 +8,6 @@ package npc
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -19,24 +18,24 @@ import (
 
 	"github.com/vaelen/wintermute/internal/auth"
 	"github.com/vaelen/wintermute/internal/config"
-	"github.com/vaelen/wintermute/internal/llm"
 	_ "github.com/vaelen/wintermute/internal/llm/fake"
 	"github.com/vaelen/wintermute/internal/store"
 	"github.com/vaelen/wintermute/internal/world"
+	"github.com/vaelen/wintermute/internal/world/events"
 )
 
 const bartenderResponse = "the bartender nods slowly."
 
 // fakeDefaults pins every NPC at construction time to the test-only fake
-// backend with a deterministic response keyed off "says". The substring
-// "says" appears in HandleSay's user-message template ("<who> says: ...")
-// so any incoming utterance routes to bartenderResponse.
+// backend with a deterministic response keyed off "someone said". The
+// loop renders observations as "- someone said: <text>" so any incoming
+// utterance routes to bartenderResponse via the substring match.
 func fakeDefaults() config.LLMBackend {
 	return config.LLMBackend{
 		Backend: "fake",
 		Opts: map[string]any{
 			"responses": map[string]any{
-				"says": bartenderResponse,
+				"someone said": bartenderResponse,
 			},
 			"default": "(no idea)",
 		},
@@ -83,31 +82,39 @@ func (r *recordingPresence) assertSilent(t *testing.T, budget time.Duration) {
 	}
 }
 
+// loopBroadcaster adapts *world.World to loop.Broadcaster for tests.
+type loopBroadcaster struct{ w *world.World }
+
+func (b loopBroadcaster) NPCSay(npcID events.ObjectID, text string) error {
+	return b.w.NPCSay(world.ObjectID(npcID), text)
+}
+
 type testEnv struct {
 	db    *store.DB
 	auth  *auth.Store
 	world *world.World
 	reg   *Registry
+	bus   events.Bus
 }
 
 // newFakeBackendEnv builds a test environment whose seed NPC is forced to
-// use the fake backend. Use this when the test wants HandleSay to drive a
-// real Chat round-trip.
+// use the fake backend, with a real events.Bus wired so the per-NPC
+// loop goroutine drives the say→reply round-trip.
 func newFakeBackendEnv(t *testing.T) *testEnv {
 	t.Helper()
-	return newEnv(t, true, fakeDefaults())
+	return newEnv(t, true, fakeDefaults(), true)
 }
 
 // newRawEnv builds an environment with the seed NPC's backend untouched —
 // "ollama", which the test build does NOT register, so the bartender's
-// `llm` ends up nil. Useful for testing the "no llm => no broadcast" path
-// and for asserting that Load logs and continues on Open failures.
+// `llm` ends up nil. Used for the "no llm => no loop started" path.
+// Also wires a bus so the loop infrastructure is exercised.
 func newRawEnv(t *testing.T) *testEnv {
 	t.Helper()
-	return newEnv(t, false, fakeDefaults())
+	return newEnv(t, false, fakeDefaults(), true)
 }
 
-func newEnv(t *testing.T, switchBackendToFake bool, defaults config.LLMBackend) *testEnv {
+func newEnv(t *testing.T, switchBackendToFake bool, defaults config.LLMBackend, withBus bool) *testEnv {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	path := filepath.Join(t.TempDir(), "npc.db")
@@ -124,11 +131,37 @@ func newEnv(t *testing.T, switchBackendToFake bool, defaults config.LLMBackend) 
 	if err != nil {
 		t.Fatalf("world.Load: %v", err)
 	}
-	r, err := Load(context.Background(), db, w, defaults, logger)
+
+	var bus events.Bus
+	deps := LoopDeps{}
+	if withBus {
+		bus = events.NewMemBus()
+		w.SetBus(bus)
+		deps = LoopDeps{
+			Bus:    bus,
+			World:  loopBroadcaster{w: w},
+			Config: LoopConfig{Debounce: 30 * time.Millisecond},
+		}
+	}
+
+	r, err := Load(context.Background(), db, w, defaults, logger, deps)
 	if err != nil {
 		t.Fatalf("npc.Load: %v", err)
 	}
-	return &testEnv{db: db, auth: auth.NewStore(db), world: w, reg: r}
+	w.SetSayObserver(func(roomID world.RoomID, speakerID world.ObjectID, speakerName, text string) {
+		r.HandleSay(roomID, speakerID, speakerName, text)
+	})
+	// Cleanup order matters: stop loops + drain memory first, then close
+	// the bus. Otherwise a loop goroutine mid-NPCSay races bus.Close.
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = r.Shutdown(shutdownCtx)
+		if bus != nil {
+			bus.Close()
+		}
+	})
+	return &testEnv{db: db, auth: auth.NewStore(db), world: w, reg: r, bus: bus}
 }
 
 func (e *testEnv) attachPlayer(t *testing.T, username string) *recordingPresence {
@@ -209,7 +242,8 @@ func TestLoadRegistersBartender(t *testing.T) {
 
 func TestLoadGracefulOnUnregisteredBackend(t *testing.T) {
 	// Seed backend is "ollama" which isn't registered under build tag test.
-	// Load must succeed; the NPC must be present with llm == nil.
+	// Load must succeed; the NPC must be present with llm == nil. With a
+	// nil llm the registry does not start a loop for this NPC.
 	e := newRawEnv(t)
 	id := e.bartenderID(t)
 	n := e.reg.Get(id)
@@ -220,11 +254,16 @@ func TestLoadGracefulOnUnregisteredBackend(t *testing.T) {
 		t.Errorf("expected llm == nil when backend %q is unregistered", n.Backend)
 	}
 
-	// HandleSay must not crash and must not broadcast anything.
+	// HandleSay must not crash. With no engagement and no loop, the
+	// player sees only their own Say echo.
 	alice := e.attachPlayer(t, "alice")
 	alice.drain()
 	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
-	alice.assertSilent(t, 200*time.Millisecond)
+	// Brief grace then ensure no bartender reply appeared.
+	time.Sleep(200 * time.Millisecond)
+	if strings.Contains(alice.drain(), "bartender nods") {
+		t.Errorf("expected no bartender reply when llm is nil")
+	}
 }
 
 func lobbyID(t *testing.T, e *testEnv) world.RoomID {
@@ -236,165 +275,19 @@ func lobbyID(t *testing.T, e *testEnv) world.RoomID {
 	return id
 }
 
-func TestHandleSayAddressedByName(t *testing.T) {
-	e := newFakeBackendEnv(t)
-	alice := e.attachPlayer(t, "alice")
-	bob := e.attachPlayer(t, "bob") // a second player so rule (b) cannot fire.
-	_ = bob
-	alice.drain()
-	bob.drain()
-
-	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
-	alice.waitFor(t, bartenderResponse, 2*time.Second)
-}
-
-func TestHandleSayAddressedAsSoleEntity(t *testing.T) {
+// TestLoopRespondsViaBus is the bus-driven counterpart to M3's
+// TestHandleSayAddressedByName: a player Says something, the world
+// publishes a KindSay event, the bartender's loop observes it after
+// the debounce, calls Chat, and broadcasts the reply via NPCSay.
+func TestLoopRespondsViaBus(t *testing.T) {
 	e := newFakeBackendEnv(t)
 	alice := e.attachPlayer(t, "alice")
 	alice.drain()
 
-	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi")
-	alice.waitFor(t, bartenderResponse, 2*time.Second)
-}
-
-func TestHandleSayNotAddressedWhenAnotherPlayerPresent(t *testing.T) {
-	e := newFakeBackendEnv(t)
-	alice := e.attachPlayer(t, "alice")
-	bob := e.attachPlayer(t, "bob")
-	alice.drain()
-	bob.drain()
-
-	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi")
-	alice.assertSilent(t, 200*time.Millisecond)
-	bob.assertSilent(t, 1*time.Millisecond) // Drain again; shouldn't have changed.
-}
-
-// TestHandleSayAddressedWhenOnlyOtherPlayerIsAsleep covers the case where a
-// disconnected player's body still occupies the room. Sleeping bodies cannot
-// participate in conversation, so they must NOT count for rule (b) — the
-// speaker is "alone with the bartender" as far as addressing is concerned.
-func TestHandleSayAddressedWhenOnlyOtherPlayerIsAsleep(t *testing.T) {
-	e := newFakeBackendEnv(t)
-	alice := e.attachPlayer(t, "alice")
-	bob := e.attachPlayer(t, "bob")
-	alice.drain()
-	bob.drain()
-
-	// Bob's connection drops; his body remains in the lobby (asleep).
-	e.world.Detach(bob.PlayerID, world.DisconnectDropped)
-	alice.drain() // discard the "bob fell asleep." broadcast
-
-	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi")
-	alice.waitFor(t, bartenderResponse, 2*time.Second)
-}
-
-// TestHandleSayNotAddressedWhenUnregisteredNPCPresent guards against rule (b)
-// firing spuriously when a kind='npc' object exists in the room without an
-// npc_config row. The unregistered NPC is invisible to the registry but still
-// occupies the room, so the speaker is not "alone with" the bartender.
-func TestHandleSayNotAddressedWhenUnregisteredNPCPresent(t *testing.T) {
-	e := newFakeBackendEnv(t)
-	// Insert a second NPC into the lobby without a matching npc_config row.
-	lobby, err := e.world.LobbyID()
-	if err != nil {
-		t.Fatalf("LobbyID: %v", err)
+	if err := e.world.Say(alice.Presence, "hi bartender"); err != nil {
+		t.Fatalf("Say: %v", err)
 	}
-	mustWrite(t, e.db,
-		`INSERT INTO objects(slug, name, short_desc, long_desc, kind) VALUES
-		 ('npc/ghost', 'a flickering ghost', 'a flickering ghost', '', 'npc')`)
-	mustWrite(t, e.db,
-		`INSERT INTO object_locations(object_id, room_id, holder_id)
-		 SELECT id, ?, NULL FROM objects WHERE slug='npc/ghost'`, lobby)
-	// Reload the world so the new NPC shows up in NPCsInRoom.
-	w2, err := world.Load(context.Background(), e.db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatalf("world.Load: %v", err)
-	}
-	r2, err := Load(context.Background(), e.db, w2, fakeDefaults(), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatalf("npc.Load: %v", err)
-	}
-
-	rp := &recordingPresence{}
-	acc, err := e.auth.Create(context.Background(), "alice", "hunter22", auth.AccessPlayer)
-	if err != nil {
-		t.Fatalf("auth.Create: %v", err)
-	}
-	pid, err := w2.CreatePlayer(context.Background(), acc)
-	if err != nil {
-		t.Fatalf("CreatePlayer: %v", err)
-	}
-	rp.Presence = &world.Presence{
-		PlayerID: pid,
-		Account:  acc,
-		Write: func(s string) error {
-			rp.mu.Lock()
-			rp.buf = append(rp.buf, s)
-			rp.mu.Unlock()
-			return nil
-		},
-	}
-	if _, err := w2.Attach(rp.Presence); err != nil {
-		t.Fatalf("Attach: %v", err)
-	}
-	rp.drain()
-
-	r2.HandleSay(lobby, rp.PlayerID, "alice", "hi")
-	rp.assertSilent(t, 200*time.Millisecond)
-}
-
-// erroringLLM returns a Chat error every time. Used to cover the LLM-error
-// path of HandleSay.
-type erroringLLM struct{}
-
-func (erroringLLM) Chat(context.Context, []llm.Message, []llm.ToolDef, llm.ChatOpts) (llm.Response, error) {
-	return llm.Response{}, errors.New("simulated chat failure")
-}
-
-func (erroringLLM) Embed(context.Context, string) ([]float32, error) {
-	return nil, errors.New("simulated embed failure")
-}
-
-func TestHandleSayLLMErrorDoesNotCrash(t *testing.T) {
-	e := newFakeBackendEnv(t)
-	id := e.bartenderID(t)
-	n := e.reg.Get(id)
-	if n == nil {
-		t.Fatalf("Get(%d) = nil", id)
-	}
-	// Patch the llm under the per-NPC mutex so dispatch sees the new one.
-	n.mu.Lock()
-	n.llm = erroringLLM{}
-	n.mu.Unlock()
-
-	alice := e.attachPlayer(t, "alice")
-	alice.drain()
-	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
-	alice.assertSilent(t, 200*time.Millisecond)
-}
-
-func TestHandleSayHistoryAccumulatesAndTrims(t *testing.T) {
-	e := newFakeBackendEnv(t)
-	id := e.bartenderID(t)
-	alice := e.attachPlayer(t, "alice")
-
-	for i := 0; i < historyWindow+2; i++ {
-		alice.drain()
-		e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
-		alice.waitFor(t, bartenderResponse, 2*time.Second)
-	}
-
-	n := e.reg.Get(id)
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	if got := len(n.history); got != 2*historyWindow {
-		t.Errorf("history length = %d, want %d after over-filling", got, 2*historyWindow)
-	}
-	// Each window slot is a (user, assistant) pair; oldest pair must be
-	// dropped as the window trims from the front.
-	if n.history[0].Role != llm.RoleUser {
-		t.Errorf("oldest entry role = %q, want %q", n.history[0].Role, llm.RoleUser)
-	}
+	alice.waitFor(t, bartenderResponse, 3*time.Second)
 }
 
 func TestReloadRebuildsAfterPersonaUpdate(t *testing.T) {
@@ -423,133 +316,4 @@ func TestReloadRebuildsAfterPersonaUpdate(t *testing.T) {
 	if after.Persona == originalPersona {
 		t.Errorf("persona unchanged across reload")
 	}
-}
-
-func TestNameMatchingWholeWord(t *testing.T) {
-	cases := []struct {
-		text string
-		want bool
-	}{
-		{"hi, bartender", true},
-		{"BARTENDER!", true},
-		{"the BarTender, please", true},
-		{"bartenderly speaking", false},
-		{"foobartenderbar", false},
-		{"i need a barten der", false},
-		{"hi", false},
-	}
-	for _, tc := range cases {
-		got := nameInText("the bartender", tc.text)
-		if got != tc.want {
-			t.Errorf("nameInText(\"the bartender\", %q) = %v, want %v",
-				tc.text, got, tc.want)
-		}
-	}
-}
-
-func TestNameMatchingDoesNotFireOnStopword(t *testing.T) {
-	// Even though "the" is in the NPC's name, a sentence containing only
-	// "the" should not match — stopwords are stripped before comparison.
-	if nameInText("the bartender", "I left the keycard at home") {
-		t.Errorf("nameInText matched on the stopword \"the\"")
-	}
-}
-
-// blockingLLM blocks Chat until the release channel is closed, then
-// returns a fixed response. Used to assert Registry.Wait() actually
-// blocks while a dispatch is in flight.
-type blockingLLM struct {
-	release  chan struct{}
-	started  chan struct{}
-	response string
-}
-
-func newBlockingLLM(response string) *blockingLLM {
-	return &blockingLLM{
-		release:  make(chan struct{}),
-		started:  make(chan struct{}, 1),
-		response: response,
-	}
-}
-
-func (b *blockingLLM) Chat(ctx context.Context, _ []llm.Message, _ []llm.ToolDef, _ llm.ChatOpts) (llm.Response, error) {
-	select {
-	case b.started <- struct{}{}:
-	default:
-	}
-	select {
-	case <-b.release:
-		return llm.Response{Content: b.response}, nil
-	case <-ctx.Done():
-		return llm.Response{}, ctx.Err()
-	}
-}
-
-func (b *blockingLLM) Embed(context.Context, string) ([]float32, error) {
-	return nil, errors.New("embed not implemented")
-}
-
-func TestRegistryWaitBlocksUntilDispatchCompletes(t *testing.T) {
-	e := newFakeBackendEnv(t)
-	id := e.bartenderID(t)
-	n := e.reg.Get(id)
-	if n == nil {
-		t.Fatalf("Get(%d) = nil", id)
-	}
-
-	blocker := newBlockingLLM("the bartender stirs.")
-	n.mu.Lock()
-	n.llm = blocker
-	n.mu.Unlock()
-
-	alice := e.attachPlayer(t, "alice")
-	alice.drain()
-	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice", "hi, bartender")
-
-	// Confirm the dispatch goroutine actually entered Chat.
-	select {
-	case <-blocker.started:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("dispatch goroutine never reached Chat")
-	}
-
-	// Wait() must NOT return while Chat is blocked.
-	waitDone := make(chan struct{})
-	go func() {
-		e.reg.Wait()
-		close(waitDone)
-	}()
-	select {
-	case <-waitDone:
-		t.Fatalf("Registry.Wait() returned while a dispatch was in flight")
-	case <-time.After(100 * time.Millisecond):
-	}
-
-	// Release the LLM; Wait() must return promptly.
-	close(blocker.release)
-	select {
-	case <-waitDone:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("Registry.Wait() did not return after Chat completed")
-	}
-}
-
-func TestHandleSayWholeWordViaLiveDispatch(t *testing.T) {
-	e := newFakeBackendEnv(t)
-	alice := e.attachPlayer(t, "alice")
-	bob := e.attachPlayer(t, "bob") // disable rule (b) so only rule (a) can fire
-	alice.drain()
-	bob.drain()
-
-	// "bartenderly" must NOT trigger.
-	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice",
-		"speaking bartenderly today")
-	alice.assertSilent(t, 200*time.Millisecond)
-
-	// "BARTENDER!" must trigger.
-	alice.drain()
-	bob.drain()
-	e.reg.HandleSay(lobbyID(t, e), alice.PlayerID, "alice",
-		"BARTENDER!")
-	alice.waitFor(t, bartenderResponse, 2*time.Second)
 }
