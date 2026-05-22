@@ -11,3 +11,4 @@ CREATE TABLE npc_goals (
 );
 
 CREATE INDEX idx_npc_goals_fire ON npc_goals(fire_at);
+CREATE INDEX idx_npc_goals_npc ON npc_goals(npc_id);
