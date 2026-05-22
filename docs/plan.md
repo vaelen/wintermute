@@ -152,26 +152,28 @@ github.com/vaelen/go-zmodem
 
 ## Milestones
 
-| #    | Milestone                            | Summary                                                                                                                | Depends on        | Effort | Status      |
-|------|--------------------------------------|------------------------------------------------------------------------------------------------------------------------|-------------------|--------|-------------|
-| 01   | Connection layer                     | Telnet (opt-in) + TLS + raw-TCP; capability detection across six encodings; accounts, login                            | —                 | L      | not started |
-| 02   | World layer                          | Rooms, exits, objects, movement, basic commands                                                                        | 01                | M      | not started |
-| 03   | Reactive NPCs                        | Pluggable `LLM` interface, Ollama backend, addressed-only NPC responses                                                | 02                | M      | not started |
-| 04   | NPC memory                           | Short-term ring buffer, long-term summary+embedding via `sqlite-vec`                                                   | 03                | M      | not started |
-| 05   | Admin scripting                      | gopher-lua, admin world API, tool registry (NPC tool calls wired in M7)                                                | 02                | L      | not started |
-| 05.5 | Readline line editing                | In-line editing + per-session history on ANSI terminals; simple loop kept for the rest                                 | 01                | S      | not started |
-| 05.7 | Diegetic engagement primitive        | Player↔object and player↔NPC private engagements; M3 name-tag fallback becomes engagement-aware                        | 03, 05            | M      | not started |
-| 06   | Mail / boards / HTTPS file transfer  | In-world mail, message boards, token-gated upload/download — accessed via a terminal engagement (M5.7)                 | 05.7              | M      | not started |
-| 06.1 | Admin Lua: mail / boards / networks  | `wintermute.mail.*`, `wintermute.board.*`, `wintermute.ftn.network.*` admin bindings; no new in-game admin commands    | 06                | S      | not started |
-| 06.2 | Admin Lua: files + Dropbox + mail-on-upload | File-area concept + default `dropbox`; admin Lua for files; upload-complete delivered as system mail; `@cleanup-files` | 06, 06.1          | S      | not started |
-| 06.3 | Menu-driven engagement interface     | Reusable line-drawing menu handler (mail/boards/files entries opt-in per object); ASCII fallback for non-UTF-8         | 05.7, 06, 06.2    | M      | not started |
-| 06.4 | Menu-driven admin interface          | Admin entry in the M6.3 menu, gated by admin level + per-object opt-in; users/mail/boards/files/objects/rooms/networks | 06.1, 06.2, 06.3  | M      | not started |
-| 06.4.1 | Password reset via admin           | Admin-issued one-time word-list tokens, 48h TTL, forced password change on redemption; adds the Reset Password action to the admin menu | 06.4             | S      | not started |
-| 07   | Semi-autonomous NPC loop             | Event bus, tick goroutines, two-tier routing, budget enforcement, tool execution                                       | 04, 05            | L      | shipped     |
-| 08   | Player-tier scripting                | Sandboxed Lua, instruction/memory budgets, ACL-restricted world API                                                    | 05                | M      | not started |
-| 09   | X/Y/ZModem spinoff libraries         | Three MIT-licensed Go modules, engine integration                                                                      | 06                | L      | not started |
-| 10   | TLS configuration                    | Shared `self-signed` / `files` / `autocert` provider for the telnet TLS port and the HTTPS file-transfer port          | 01, 06            | S      | not started |
-| 11   | End-to-end integration testing       | Living scenario suite; each milestone appends its scenario wishlist as it ships                                        | (all)             | M      | not started |
+| #      | Milestone                                   | Summary                                                                                                                                 | Depends on        | Effort | Status      |
+|--------|---------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------|-------------------|--------|-------------|
+| 01     | Connection layer                            | Telnet (opt-in) + TLS + raw-TCP; capability detection across six encodings; accounts, login                                             | —                 | L      | shipped     |
+| 02     | World layer                                 | Rooms, exits, objects, movement, basic commands                                                                                         | 01                | M      | shipped     |
+| 03     | Reactive NPCs                               | Pluggable `LLM` interface, Ollama backend, addressed-only NPC responses                                                                 | 02                | M      | shipped     |
+| 04     | NPC memory                                  | Short-term ring buffer, long-term summary+embedding via `sqlite-vec`                                                                    | 03                | M      | shipped     |
+| 05     | Admin scripting                             | gopher-lua, admin world API, tool registry (NPC tool calls wired in M7)                                                                 | 02                | L      | shipped     |
+| 05.5   | Readline line editing                       | In-line editing + per-session history on ANSI terminals; simple loop kept for the rest                                                  | 01                | S      | shipped     |
+| 05.7   | Diegetic engagement primitive               | Player↔object and player↔NPC private engagements; M3 name-tag fallback becomes engagement-aware                                         | 03, 05            | M      | shipped     |
+| 06     | Mail / boards / HTTPS file transfer         | In-world mail, message boards, token-gated upload/download — accessed via a terminal engagement (M5.7)                                  | 05.7              | M      | shipped     |
+| 06.1   | Admin Lua: mail / boards / networks         | `wintermute.mail.*`, `wintermute.board.*`, `wintermute.ftn.network.*` admin bindings; no new in-game admin commands                     | 06                | S      | shipped     |
+| 06.2   | Admin Lua: files + Dropbox + mail-on-upload | File-area concept + default `dropbox`; admin Lua for files; upload-complete delivered as system mail; `@cleanup-files`                  | 06, 06.1          | S      | shipped     |
+| 06.3   | Menu-driven engagement interface            | Reusable line-drawing menu handler (mail/boards/files entries opt-in per object); ASCII fallback for non-UTF-8                          | 05.7, 06, 06.2    | M      | shipped     |
+| 06.4   | Menu-driven admin interface                 | Admin entry in the M6.3 menu, gated by admin level + per-object opt-in; users/mail/boards/files/objects/rooms/networks                  | 06.1, 06.2, 06.3  | M      | shipped     |
+| 06.4.1 | Password reset via admin                    | Admin-issued one-time word-list tokens, 48h TTL, forced password change on redemption; adds the Reset Password action to the admin menu | 06.4              | S      | shipped     |
+| 06.5   | ANSI-based terminal detection               | Detect terminal type and size from ANSI sequences for non-telnet clients; telnet TTYPE/NAWS remain preferred when available             | 01, 06.3.1        | S      | shipped     |
+| 06.6   | Login hardening                             | Disallowed-username list, IP deny list with TTL, optional subtext-filter UDP bridge, `@rename` admin command                            | 01                | M      | shipped     |
+| 07     | Semi-autonomous NPC loop                    | Event bus, tick goroutines, two-tier routing, budget enforcement, tool execution                                                        | 04, 05            | L      | shipped     |
+| 08     | Player-tier scripting                       | Sandboxed Lua, instruction/memory budgets, ACL-restricted world API                                                                     | 05                | M      | not started |
+| 09     | X/Y/ZModem spinoff libraries                | Three MIT-licensed Go modules, engine integration                                                                                       | 06                | L      | not started |
+| 10     | TLS configuration                           | Shared `self-signed` / `files` / `autocert` provider for the telnet TLS port and the HTTPS file-transfer port                           | 01, 06            | S      | not started |
+| 11     | End-to-end integration testing              | Living scenario suite; each milestone appends its scenario wishlist as it ships                                                         | (all)             | M      | not started |
 
 ### Sequencing
 
@@ -186,7 +188,9 @@ github.com/vaelen/go-zmodem
  │     │
  │     └── 10 (depends on 01 + 06; can land any time after 06)
  │
- └── 05.5 (independent QoL pass; depends only on 01)
+ ├── 05.5 (independent QoL pass; depends only on 01)
+ ├── 06.5 (ANSI terminal detection; depends on 01 + 06.3.1)
+ └── 06.6 (login hardening; depends on 01)
 
 11 is a living document tracking every other milestone's end-to-end scenarios.
 ```
