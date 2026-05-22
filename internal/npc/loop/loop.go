@@ -30,6 +30,25 @@ type Broadcaster interface {
 	NPCSay(npcID events.ObjectID, text string) error
 }
 
+// Tools is the minimum surface the loop needs to look up and invoke a
+// tool by name. The production *lua.ToolRegistry is wrapped by a small
+// adapter in main.go that satisfies this interface; keeping it as an
+// interface here means internal/npc/loop has no compile-time
+// dependency on internal/script/lua.
+type Tools interface {
+	Get(name string) ToolMeta
+	Invoke(ctx context.Context, name string, args map[string]any) (map[string]any, error)
+}
+
+// ToolMeta is the subset of a registered tool's metadata the response
+// model needs to know about (the fields filled into an llm.ToolDef). A
+// zero-value ToolMeta (Name == "") means "no such tool".
+type ToolMeta struct {
+	Name        string
+	Description string
+	Schema      map[string]any
+}
+
 // Loop is one NPC's tick goroutine. Construct with the required fields
 // filled in and call Run from a goroutine. Leave Tick nil to use the
 // production dispatch path (gate-model decision; response in later M7
@@ -59,9 +78,20 @@ type Loop struct {
 	// observe the broadcast end-to-end; production always wires it.
 	World Broadcaster
 
+	// Tools is the per-NPC tool registry surface. Nil suppresses the
+	// ToolDefs sent to the response model (no tools advertised); a
+	// well-behaved model will then never return a ToolCall, but if it
+	// does the call fails with a "registry not configured" error fed
+	// back via a RoleTool message.
+	Tools Tools
+
+	// ToolNames is the NPC's allow-list: only these tool names are
+	// exposed to the response model and accepted from ToolCall replies.
+	// An empty list disables tools for this NPC.
+	ToolNames []string
+
 	// MaxToolDepth caps the number of nested tool-call rounds before the
-	// response is broadcast as-is. Task 8 uses this; Task 7 just stores
-	// it.
+	// response is broadcast as-is.
 	MaxToolDepth int
 
 	Logger *slog.Logger

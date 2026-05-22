@@ -7,9 +7,11 @@ package loop
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/vaelen/wintermute/internal/llm"
 	"github.com/vaelen/wintermute/internal/llm/fake"
 	"github.com/vaelen/wintermute/internal/world/events"
 )
@@ -287,6 +289,173 @@ func TestLoop_GateYes_BroadcastsResponse(t *testing.T) {
 	}
 	if calls := fb.Calls("gate"); calls != 1 {
 		t.Fatalf("gate model called %d times; want 1", calls)
+	}
+}
+
+// stubTools is the minimal Tools implementation the loop's tool-call
+// tests need: it records each invocation in order and serves
+// pre-canned results.
+type stubTools struct {
+	metas   map[string]ToolMeta
+	invoked []string
+	results map[string]map[string]any
+}
+
+func (s *stubTools) Get(name string) ToolMeta { return s.metas[name] }
+
+func (s *stubTools) Invoke(_ context.Context, name string, _ map[string]any) (map[string]any, error) {
+	s.invoked = append(s.invoked, name)
+	return s.results[name], nil
+}
+
+func TestLoop_ToolCallRoundTrip(t *testing.T) {
+	bus := events.NewMemBus()
+	defer bus.Close()
+
+	fakeLLM, err := fake.New(map[string]any{
+		"models": map[string]any{
+			"gate": map[string]any{"default": "YES"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fb := fakeLLM.(*fake.Fake)
+
+	// Round 1: response model returns a ToolCall.
+	fb.Queue("response", llm.Response{
+		ToolCalls: []llm.ToolCall{
+			{ID: "call-1", Name: "serve_drink", Arguments: map[string]any{"drink": "beer"}},
+		},
+		UsageIn: 10, UsageOut: 5,
+	})
+	// Round 2: response model returns plain content (no more tool calls).
+	fb.Queue("response", llm.Response{
+		Content: "Here you go.",
+		UsageIn: 8, UsageOut: 4,
+	})
+
+	tools := &stubTools{
+		metas: map[string]ToolMeta{
+			"serve_drink": {Name: "serve_drink", Description: "serve a drink"},
+		},
+		results: map[string]map[string]any{
+			"serve_drink": {"ok": true, "drink": "beer"},
+		},
+	}
+	bcast := newStubBroadcaster()
+
+	done := make(chan struct{}, 1)
+	l := &Loop{
+		RoomID:       1,
+		Bus:          bus,
+		Debounce:     20 * time.Millisecond,
+		NPCID:        100,
+		NPCName:      "Bartender",
+		Persona:      "tend the bar",
+		LLM:          fakeLLM,
+		ChatModel:    "response",
+		GateModel:    "gate",
+		World:        bcast,
+		Tools:        tools,
+		ToolNames:    []string{"serve_drink"},
+		MaxToolDepth: 3,
+	}
+	l.Tick = func(ctx context.Context, obs []events.Event) {
+		l.defaultTick(ctx, obs)
+		done <- struct{}{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go l.Run(ctx)
+	time.Sleep(10 * time.Millisecond)
+
+	bus.Publish(events.Event{Kind: events.KindSay, RoomID: 1, Text: "I'll have a beer"})
+	<-done
+
+	if got := len(tools.invoked); got != 1 || tools.invoked[0] != "serve_drink" {
+		t.Fatalf("tools.invoked=%v want [serve_drink]", tools.invoked)
+	}
+	select {
+	case s := <-bcast.said:
+		if s.text != "Here you go." {
+			t.Fatalf("broadcast text=%q want %q", s.text, "Here you go.")
+		}
+	default:
+		t.Fatal("no broadcast received")
+	}
+	if calls := fb.Calls("response"); calls != 2 {
+		t.Fatalf("response model called %d times; want 2", calls)
+	}
+}
+
+func TestLoop_ToolCallDepthBound(t *testing.T) {
+	bus := events.NewMemBus()
+	defer bus.Close()
+
+	fakeLLM, err := fake.New(map[string]any{
+		"models": map[string]any{
+			"gate": map[string]any{"default": "YES"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fb := fakeLLM.(*fake.Fake)
+
+	// Every response model call returns a ToolCall — infinite recursion
+	// is only prevented by MaxToolDepth=2.
+	for i := 0; i < 10; i++ {
+		fb.Queue("response", llm.Response{
+			ToolCalls: []llm.ToolCall{
+				{ID: fmt.Sprintf("c%d", i), Name: "noop", Arguments: nil},
+			},
+		})
+	}
+
+	tools := &stubTools{
+		metas:   map[string]ToolMeta{"noop": {Name: "noop"}},
+		results: map[string]map[string]any{"noop": {"ok": true}},
+	}
+	bcast := newStubBroadcaster()
+	done := make(chan struct{}, 1)
+
+	l := &Loop{
+		RoomID:       1,
+		Bus:          bus,
+		Debounce:     20 * time.Millisecond,
+		NPCID:        100,
+		NPCName:      "T",
+		Persona:      "p",
+		LLM:          fakeLLM,
+		ChatModel:    "response",
+		GateModel:    "gate",
+		World:        bcast,
+		Tools:        tools,
+		ToolNames:    []string{"noop"},
+		MaxToolDepth: 2,
+	}
+	l.Tick = func(ctx context.Context, obs []events.Event) {
+		l.defaultTick(ctx, obs)
+		done <- struct{}{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go l.Run(ctx)
+	time.Sleep(10 * time.Millisecond)
+
+	bus.Publish(events.Event{Kind: events.KindSay, RoomID: 1, Text: "go"})
+	<-done
+
+	// depth=0 -> Chat #1 returns ToolCall -> invoke -> depth=1
+	// depth=1 -> Chat #2 returns ToolCall -> invoke -> depth=2
+	// depth=2 -> Chat #3 returns ToolCall -> depth>=MaxToolDepth -> bail
+	// Total Chat calls: 3; tool invocations: 2.
+	if calls := fb.Calls("response"); calls != 3 {
+		t.Fatalf("response calls=%d want 3", calls)
+	}
+	if got := len(tools.invoked); got != 2 {
+		t.Fatalf("tool invocations=%d want 2", got)
 	}
 }
 

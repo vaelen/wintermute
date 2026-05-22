@@ -5,6 +5,7 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -192,17 +193,97 @@ func (l *Loop) recordOwnReplyToShortTerm(reply string) {
 }
 
 // toolDefs returns the ToolDef list the response model receives for
-// this NPC. Task 8 implements the real registry lookup; for now this
-// returns nil (no tools), which is the safe choice and exercises the
-// "no tool calls returned" branch.
+// this NPC. Tools the NPC hasn't opted into (via ToolNames) are not
+// exposed.
 func (l *Loop) toolDefs() []llm.ToolDef {
-	return nil
+	if l.Tools == nil || len(l.ToolNames) == 0 {
+		return nil
+	}
+	out := make([]llm.ToolDef, 0, len(l.ToolNames))
+	for _, name := range l.ToolNames {
+		meta := l.Tools.Get(name)
+		if meta.Name == "" {
+			continue
+		}
+		out = append(out, llm.ToolDef{
+			Name:        meta.Name,
+			Description: meta.Description,
+			Schema:      meta.Schema,
+		})
+	}
+	return out
 }
 
-// callChatWithTools issues a Chat call and (in Task 8) loops on
-// returned ToolCalls. For Task 7, the implementation is a single Chat
-// call; Task 8 will wrap this with the tool-dispatch loop.
+// callChatWithTools issues a Chat call and loops on ToolCalls until
+// the model returns plain content (no ToolCalls) or MaxToolDepth is
+// reached. Each tool call is dispatched via Tools.Invoke; the result
+// is appended as a RoleTool message before the next Chat round.
 func (l *Loop) callChatWithTools(ctx context.Context, msgs []llm.Message, tools []llm.ToolDef, depth int) (llm.Response, error) {
-	_ = depth
-	return l.LLM.Chat(ctx, msgs, tools, llm.ChatOpts{Model: l.ChatModel})
+	for {
+		resp, err := l.LLM.Chat(ctx, msgs, tools, llm.ChatOpts{Model: l.ChatModel})
+		if err != nil {
+			return resp, err
+		}
+		if len(resp.ToolCalls) == 0 {
+			return resp, nil
+		}
+		if depth >= l.MaxToolDepth {
+			l.Logger.Warn("npc loop: tool-call depth exceeded",
+				"npc", l.NPCName, "depth", depth)
+			return resp, nil
+		}
+		msgs = append(msgs, llm.Message{
+			Role:      llm.RoleAssistant,
+			Content:   resp.Content,
+			ToolCalls: resp.ToolCalls,
+		})
+		for _, tc := range resp.ToolCalls {
+			result, invErr := l.invokeTool(ctx, tc)
+			msgs = append(msgs, llm.Message{
+				Role:       llm.RoleTool,
+				Name:       tc.Name,
+				ToolCallID: tc.ID,
+				Content:    encodeToolResult(result, invErr),
+			})
+		}
+		depth++
+	}
+}
+
+// invokeTool dispatches a single ToolCall through the configured Tools
+// registry after validating it against the NPC's allow-list. Returns a
+// descriptive error if the tool isn't permitted or the registry is
+// unconfigured — these are surfaced back to the response model via
+// encodeToolResult so the model can adapt rather than receiving a
+// silent failure.
+func (l *Loop) invokeTool(ctx context.Context, tc llm.ToolCall) (map[string]any, error) {
+	if l.Tools == nil {
+		return nil, fmt.Errorf("npc loop: tool registry not configured")
+	}
+	allowed := false
+	for _, name := range l.ToolNames {
+		if name == tc.Name {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return nil, fmt.Errorf("npc loop: tool %q not in NPC allow-list", tc.Name)
+	}
+	return l.Tools.Invoke(ctx, tc.Name, tc.Arguments)
+}
+
+// encodeToolResult formats either an invocation result or an error as
+// the JSON string that goes back to the response model as a RoleTool
+// message body. The model only ever sees a JSON object, so it can be
+// parsed uniformly on the model side.
+func encodeToolResult(result map[string]any, invErr error) string {
+	if invErr != nil {
+		return fmt.Sprintf(`{"ok":false,"error":%q}`, invErr.Error())
+	}
+	out, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Sprintf(`{"ok":false,"error":"marshal: %s"}`, err.Error())
+	}
+	return string(out)
 }

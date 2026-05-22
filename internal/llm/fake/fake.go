@@ -47,6 +47,12 @@ type Fake struct {
 
 	mu           sync.Mutex
 	callsByModel map[string]int
+	// queues holds per-model FIFOs of pre-scripted responses. When a
+	// queue for the active ChatOpts.Model is non-empty, Chat returns the
+	// next queued response verbatim (no substring matching, no Usage
+	// auto-population) and pops it. After the queue drains, the
+	// substring/default path resumes.
+	queues map[string][]llm.Response
 }
 
 // New builds a Fake from an opts map. Recognised keys:
@@ -67,6 +73,7 @@ func New(opts map[string]any) (llm.LLM, error) {
 		embeddingDim: defaultEmbeddingDim,
 		models:       map[string]*modelResponses{},
 		callsByModel: map[string]int{},
+		queues:       map[string][]llm.Response{},
 	}
 
 	if raw, ok := opts["responses"]; ok {
@@ -152,6 +159,16 @@ func New(opts map[string]any) (llm.LLM, error) {
 }
 
 func (f *Fake) Chat(_ context.Context, msgs []llm.Message, _ []llm.ToolDef, opts llm.ChatOpts) (llm.Response, error) {
+	f.mu.Lock()
+	if q := f.queues[opts.Model]; len(q) > 0 {
+		resp := q[0]
+		f.queues[opts.Model] = q[1:]
+		f.callsByModel[opts.Model]++
+		f.mu.Unlock()
+		return resp, nil
+	}
+	f.mu.Unlock()
+
 	last := lastUserContent(msgs)
 
 	keys := f.keys
@@ -182,6 +199,17 @@ func (f *Fake) Chat(_ context.Context, msgs []llm.Message, _ []llm.ToolDef, opts
 		UsageIn:  roughTokenCount(msgs),
 		UsageOut: roughWordCount(reply),
 	}, nil
+}
+
+// Queue enqueues a pre-scripted response to be returned by the next
+// Chat call for the given model. Multiple Queue calls form a FIFO; the
+// fake's substring/default path resumes once the queue drains.
+// Usage fields are returned verbatim — the caller is responsible for
+// setting UsageIn/UsageOut if budget-realism matters in the test.
+func (f *Fake) Queue(model string, resp llm.Response) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.queues[model] = append(f.queues[model], resp)
 }
 
 func (f *Fake) Embed(_ context.Context, text string) ([]float32, error) {
