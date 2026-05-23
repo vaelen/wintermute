@@ -76,6 +76,10 @@ type Loop struct {
 	NPCName string
 	Persona string
 
+	// Backend is the name of the LLM backend (e.g. "ollama", "fake").
+	// Included in structured log fields per project convention.
+	Backend string
+
 	LLM       llm.LLM
 	ChatModel string
 	GateModel string
@@ -225,10 +229,14 @@ func (l *Loop) Run(ctx context.Context) {
 
 // shouldDropEvent reports whether the loop should ignore e. Two cases
 // drop:
-//   - self-actor: KindSay / KindEmote whose Actor is this NPC. The
-//     world publishes a KindSay for the NPC's own broadcast (so admin
-//     scripts and other NPCs can observe it); without this filter the
-//     loop would echo on its own output and recurse.
+//   - NPC-originated speech: KindSay / KindEmote whose Actor is any
+//     NPC (including self). The world publishes a KindSay for the
+//     NPC's own broadcast so admin scripts can observe it; without
+//     the self-filter the loop would echo on its own output. Beyond
+//     that, cross-NPC reactions are explicitly out of M7 scope: two
+//     NPCs in the same room would otherwise cascade through unbounded
+//     response calls. Tagging NPC speech via Extra["actor_kind"]="npc"
+//     in world.NPCSay lets every NPC loop drop it cheaply.
 //   - engagement filter: when the NPC is currently engaged with someone
 //     other than the event's Actor, say events are dropped (the
 //     brush-off line is emitted by the npc registry's SayObserver
@@ -236,9 +244,13 @@ func (l *Loop) Run(ctx context.Context) {
 //     not filtered: the NPC should still be aware of room state
 //     changes during an engagement.
 func (l *Loop) shouldDropEvent(e events.Event) bool {
-	if l.NPCID != 0 && e.Actor == l.NPCID &&
-		(e.Kind == events.KindSay || e.Kind == events.KindEmote) {
-		return true
+	if e.Kind == events.KindSay || e.Kind == events.KindEmote {
+		if l.NPCID != 0 && e.Actor == l.NPCID {
+			return true
+		}
+		if kind, _ := e.Extra["actor_kind"].(string); kind == "npc" {
+			return true
+		}
 	}
 	if l.Engage == nil {
 		return false

@@ -525,6 +525,56 @@ func TestLoop_BudgetExhausted_SkipsResponse(t *testing.T) {
 	}
 }
 
+func TestLoop_DropsOtherNPCSpeech(t *testing.T) {
+	bus := events.NewMemBus()
+	defer bus.Close()
+	fakeLLM, err := fake.New(map[string]any{
+		"models": map[string]any{
+			"gate":     map[string]any{"default": "YES"},
+			"response": map[string]any{"default": "should not fire"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fb := fakeLLM.(*fake.Fake)
+
+	done := make(chan struct{}, 1)
+	l := &Loop{
+		RoomID: 1, Bus: bus, Debounce: 30 * time.Millisecond,
+		NPCID: 200, NPCName: "Listener", Persona: "p",
+		LLM: fakeLLM, ChatModel: "response", GateModel: "gate",
+	}
+	l.Tick = func(ctx context.Context, obs []events.Event) {
+		l.defaultTick(ctx, obs)
+		done <- struct{}{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go l.Run(ctx)
+	time.Sleep(10 * time.Millisecond)
+
+	// Publish an NPC-originated say from a different NPC (Actor=100).
+	bus.Publish(events.Event{
+		Kind: events.KindSay, RoomID: 1, Actor: 100,
+		Text: "I am another NPC", At: time.Now(),
+		Extra: map[string]any{"actor_kind": "npc"},
+	})
+
+	// Also publish a player say to verify the tick still fires for player input.
+	time.Sleep(60 * time.Millisecond) // let any NPC-event tick attempt fire
+	bus.Publish(events.Event{
+		Kind: events.KindSay, RoomID: 1, Actor: 50,
+		Text: "I am a player", At: time.Now(),
+	})
+
+	<-done
+
+	if calls := fb.Calls("gate"); calls != 1 {
+		t.Fatalf("gate called %d times; want 1 (only the player say should reach the loop)", calls)
+	}
+}
+
 func TestFirstToken(t *testing.T) {
 	cases := map[string]string{
 		"YES":          "YES",

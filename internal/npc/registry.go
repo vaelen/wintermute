@@ -336,6 +336,7 @@ func (r *Registry) rebuild(ctx context.Context) error {
 				NPCID:        events.ObjectID(n.ObjectID),
 				NPCName:      n.Name,
 				Persona:      n.Persona,
+				Backend:      n.Backend,
 				LLM:          n.llm,
 				ChatModel:    n.Model,
 				GateModel:    gateModel,

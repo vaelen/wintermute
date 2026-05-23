@@ -427,7 +427,9 @@ func (w *World) NPCSay(npcID ObjectID, text string) error {
 	flush(pending)
 	// NPC speech intentionally uses KindSay (not a distinct KindNPCSay) so
 	// subscribers process all room speech uniformly; distinguishing player
-	// vs. NPC happens via Actor lookup in the world cache.
+	// vs. NPC happens via Extra["actor_kind"] so consumers (notably the
+	// per-NPC loop's shouldDropEvent) can filter NPC speech without a
+	// world cache lookup.
 	if bus != nil {
 		bus.Publish(events.Event{
 			Kind:   events.KindSay,
@@ -435,6 +437,7 @@ func (w *World) NPCSay(npcID ObjectID, text string) error {
 			Actor:  int64(npcID),
 			Text:   text,
 			At:     time.Now(),
+			Extra:  map[string]any{"actor_kind": "npc"},
 		})
 	}
 	return nil

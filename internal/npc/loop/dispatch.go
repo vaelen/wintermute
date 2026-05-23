@@ -31,6 +31,12 @@ const responseBudgetEstimate = 256
 // would not accommodate the next Chat. respond logs and swallows it.
 var errBudgetExhausted = errors.New("npc loop: budget exhausted")
 
+// dispatchTimeout bounds a single Chat round-trip (gate or response,
+// including any tool-call iterations). Generous enough to absorb a
+// cold Ollama model load; tight enough that a hung backend cannot
+// pin Manager.Stop indefinitely.
+const dispatchTimeout = 120 * time.Second
+
 // gatePrompt is the system message sent to the gate model. Kept short
 // because the gate model is tiny (e.g. llama3.2:1b); we parse its
 // reply as the first significant token, expecting "YES" or "NO".
@@ -49,7 +55,7 @@ func (l *Loop) defaultTick(ctx context.Context, obs []events.Event) {
 	}
 	if l.Budget != nil && !l.Budget.Allow(world.ObjectID(l.NPCID), gateBudgetEstimate) {
 		l.Logger.Warn("npc loop: budget exhausted, skipping tick",
-			"npc", l.NPCName)
+			"npc", l.NPCName, "backend", l.Backend)
 		l.recordObservationsToShortTerm(obs)
 		return
 	}
@@ -64,12 +70,14 @@ func (l *Loop) defaultTick(ctx context.Context, obs []events.Event) {
 func (l *Loop) gateAllows(ctx context.Context, obs []events.Event) bool {
 	prompt := fmt.Sprintf(gatePrompt,
 		l.NPCName, l.Persona, renderObservations(obs), l.NPCName)
-	resp, err := l.LLM.Chat(ctx, []llm.Message{
+	callCtx, cancel := context.WithTimeout(ctx, dispatchTimeout)
+	defer cancel()
+	resp, err := l.LLM.Chat(callCtx, []llm.Message{
 		{Role: llm.RoleSystem, Content: prompt},
 	}, nil, llm.ChatOpts{Model: l.GateModel, Temperature: 0})
 	if err != nil {
 		l.Logger.Warn("npc loop: gate call failed, defaulting to YES",
-			"npc", l.NPCName, "err", err)
+			"npc", l.NPCName, "backend", l.Backend, "err", err)
 		return true
 	}
 	if l.Budget != nil {
@@ -134,7 +142,7 @@ func (l *Loop) respond(ctx context.Context, obs []events.Event) {
 		mems, err := l.Memory.Retrieve(ctx, 0, 5, 0.7)
 		if err != nil {
 			l.Logger.Warn("npc loop: memory retrieve failed",
-				"npc", l.NPCName, "err", err)
+				"npc", l.NPCName, "backend", l.Backend, "err", err)
 		} else if len(mems) > 0 {
 			memCtx = renderMemoryContext(mems)
 		}
@@ -157,7 +165,7 @@ func (l *Loop) respond(ctx context.Context, obs []events.Event) {
 	if err != nil {
 		if !errors.Is(err, errBudgetExhausted) {
 			l.Logger.Warn("npc loop: response model failed",
-				"npc", l.NPCName, "err", err)
+				"npc", l.NPCName, "backend", l.Backend, "err", err)
 		}
 		l.recordObservationsToShortTerm(obs)
 		return
@@ -171,7 +179,7 @@ func (l *Loop) respond(ctx context.Context, obs []events.Event) {
 	if l.World != nil {
 		if err := l.World.NPCSay(l.NPCID, reply); err != nil {
 			l.Logger.Warn("npc loop: NPCSay failed",
-				"npc", l.NPCName, "err", err)
+				"npc", l.NPCName, "backend", l.Backend, "err", err)
 		}
 	}
 	l.recordLastReplyForSnapshot(reply)
@@ -253,7 +261,12 @@ func (l *Loop) callChatWithTools(ctx context.Context, msgs []llm.Message, tools 
 		if l.Budget != nil && !l.Budget.Allow(world.ObjectID(l.NPCID), responseBudgetEstimate) {
 			return llm.Response{}, errBudgetExhausted
 		}
-		resp, err := l.LLM.Chat(ctx, msgs, tools, llm.ChatOpts{Model: l.ChatModel})
+		// cancel() is called inline (not deferred) because we're in a
+		// loop: a deferred cancel would accumulate one undisposed
+		// context per iteration until callChatWithTools returns.
+		callCtx, cancel := context.WithTimeout(ctx, dispatchTimeout)
+		resp, err := l.LLM.Chat(callCtx, msgs, tools, llm.ChatOpts{Model: l.ChatModel})
+		cancel()
 		if err != nil {
 			return resp, err
 		}
@@ -265,7 +278,7 @@ func (l *Loop) callChatWithTools(ctx context.Context, msgs []llm.Message, tools 
 		}
 		if depth >= l.MaxToolDepth {
 			l.Logger.Warn("npc loop: tool-call depth exceeded",
-				"npc", l.NPCName, "depth", depth)
+				"npc", l.NPCName, "backend", l.Backend, "depth", depth)
 			return resp, nil
 		}
 		msgs = append(msgs, llm.Message{
