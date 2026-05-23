@@ -650,17 +650,43 @@ func TestLoop_EmptyGateModel_StillRunsGate(t *testing.T) {
 	}
 }
 
-func TestFirstToken(t *testing.T) {
-	cases := map[string]string{
-		"YES":          "YES",
-		"  YES":        "YES",
-		"YES.":         "YES",
-		"YES, please.": "YES",
-		"":             "",
+func TestGateDecision(t *testing.T) {
+	cases := []struct {
+		name       string
+		reply      string
+		wantAllow  bool
+		wantParsed bool
+	}{
+		{"plain YES", "YES", true, true},
+		{"plain NO", "NO", false, true},
+		{"trailing punctuation", "YES.", true, true},
+		{"mixed case", "yes", true, true},
+		{"chat template prefix YES",
+			"<|start_header_id|>assistant<|end_header_id|>\n\nYES",
+			true, true},
+		{"chat template prefix NO",
+			"<|start_header_id|>assistant<|end_header_id|>\n\nNO",
+			false, true},
+		{"answer with explanation",
+			"YES, the bartender should respond.", true, true},
+		{"negative with explanation",
+			"NO — not addressed.", false, true},
+		{"both present, YES wins",
+			"Some might say NO, but YES.", true, true},
+		{"unparseable", "I'm not sure", true, false},
+		{"empty", "", true, false},
+		{"NO does not match within NORM",
+			"Returning to the norm.", true, false},
 	}
-	for in, want := range cases {
-		if got := firstToken(in); got != want {
-			t.Errorf("firstToken(%q)=%q want %q", in, got, want)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, parsed := gateDecision(tc.reply)
+			if got != tc.wantAllow {
+				t.Errorf("allow = %v, want %v", got, tc.wantAllow)
+			}
+			if parsed != tc.wantParsed {
+				t.Errorf("parsed = %v, want %v", parsed, tc.wantParsed)
+			}
+		})
 	}
 }
