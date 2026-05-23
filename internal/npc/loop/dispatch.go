@@ -23,6 +23,11 @@ import (
 // leak into the assistant's reply. Stripped before YES/NO parsing.
 var chatTemplateRE = regexp.MustCompile(`<\|[^|]*\|>`)
 
+// gateAnswerRE finds standalone YES / NO tokens (case-insensitive,
+// word-bounded) in a gate reply. Word boundaries keep "norm" /
+// "not" / "yesterday" from being misclassified.
+var gateAnswerRE = regexp.MustCompile(`(?i)\b(yes|no)\b`)
+
 // gateBudgetEstimate is the rough token cost of one gate-model call.
 // Sized small so a single gate decision fits even in a near-exhausted
 // minute window — gating must never be skipped while the response
@@ -135,43 +140,19 @@ func renderObservations(obs []events.Event) string {
 // wins over NO if both appear.
 func gateDecision(reply string) (allow, parsed bool) {
 	cleaned := chatTemplateRE.ReplaceAllString(reply, "")
-	if hasWord(cleaned, "YES") {
-		return true, true
+	sawNO := false
+	for _, m := range gateAnswerRE.FindAllStringSubmatch(cleaned, -1) {
+		switch strings.ToUpper(m[1]) {
+		case "YES":
+			return true, true
+		case "NO":
+			sawNO = true
+		}
 	}
-	if hasWord(cleaned, "NO") {
+	if sawNO {
 		return false, true
 	}
 	return true, false
-}
-
-// hasWord reports whether word appears in s as a standalone token,
-// case-insensitive. Word boundaries are defined as non-letter,
-// non-digit characters (matching the practical behaviour of \b in
-// ASCII regex without pulling in the regexp engine for every check).
-func hasWord(s, word string) bool {
-	lo := strings.ToLower(s)
-	w := strings.ToLower(word)
-	for offset := 0; ; {
-		i := strings.Index(lo[offset:], w)
-		if i < 0 {
-			return false
-		}
-		i += offset
-		end := i + len(w)
-		prevOK := i == 0 || !isWordChar(rune(lo[i-1]))
-		nextOK := end == len(lo) || !isWordChar(rune(lo[end]))
-		if prevOK && nextOK {
-			return true
-		}
-		offset = end
-	}
-}
-
-func isWordChar(r rune) bool {
-	return r == '_' ||
-		(r >= 'a' && r <= 'z') ||
-		(r >= 'A' && r <= 'Z') ||
-		(r >= '0' && r <= '9')
 }
 
 // respond drives the response-model path: retrieve relevant long-term
