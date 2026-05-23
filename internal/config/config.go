@@ -49,9 +49,6 @@ type LoopConfig struct {
 	DefaultMinuteLimit int `toml:"default_minute_limit"`
 	DefaultHourLimit   int `toml:"default_hour_limit"`
 	DefaultDayLimit    int `toml:"default_day_limit"`
-	// DefaultGateModel is the fallback gate model name when an NPC has
-	// no gate_model column set in npc_config.
-	DefaultGateModel string `toml:"default_gate_model"`
 }
 
 // SecurityConfig configures the M6.6 login-hardening defences: the
@@ -233,7 +230,6 @@ func Default() *Config {
 				DefaultMinuteLimit: 5000,
 				DefaultHourLimit:   100000,
 				DefaultDayLimit:    1000000,
-				DefaultGateModel:   "llama3.2:1b",
 			},
 		},
 	}

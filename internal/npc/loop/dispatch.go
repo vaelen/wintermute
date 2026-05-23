@@ -38,8 +38,12 @@ var errBudgetExhausted = errors.New("npc loop: budget exhausted")
 const dispatchTimeout = 120 * time.Second
 
 // gatePrompt is the system message sent to the gate model. Kept short
-// because the gate model is tiny (e.g. llama3.2:1b); we parse its
-// reply as the first significant token, expecting "YES" or "NO".
+// because the gate model is typically tiny (e.g. llama3.2:1b); we
+// parse its reply as the first significant token, expecting "YES" or
+// "NO". The gate always runs on every tick: when no gate model is
+// resolved for an NPC, ChatOpts.Model is left empty and the backend
+// falls back to its default chat model (see the Ollama backend's
+// model fallback in Chat).
 const gatePrompt = `You are a relevance filter for the NPC %q.
 Persona: %s
 Recent events:
@@ -60,7 +64,7 @@ func (l *Loop) defaultTick(ctx context.Context, obs []events.Event) {
 		return
 	}
 	l.recordObservationsForSnapshot(obs)
-	if l.GateModel != "" && !l.gateAllows(ctx, obs) {
+	if !l.gateAllows(ctx, obs) {
 		l.recordObservationsToShortTerm(obs)
 		return
 	}

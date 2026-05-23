@@ -190,9 +190,8 @@ func run(cfgPath string) error {
 		World:  worldBroadcaster{w: w},
 		Tools:  toolsAdapter,
 		Config: npc.LoopConfig{
-			Debounce:         time.Duration(cfg.NPC.Loop.DebounceMs) * time.Millisecond,
-			MaxToolDepth:     cfg.NPC.Loop.MaxToolDepth,
-			DefaultGateModel: cfg.NPC.Loop.DefaultGateModel,
+			Debounce:     time.Duration(cfg.NPC.Loop.DebounceMs) * time.Millisecond,
+			MaxToolDepth: cfg.NPC.Loop.MaxToolDepth,
 		},
 	})
 	if err != nil {

@@ -120,7 +120,7 @@ for {
 
 ### Two-tier model configuration
 
-Each NPC has both `chat_model` and `gate_model` columns (M3 introduced these). Defaults come from the LLM config block. The gate model can be omitted to disable gating (i.e. always call the response model) — useful for VIP NPCs.
+Each NPC has both `chat_model` and `gate_model` columns (M3 introduced these). Resolution order for the gate model is: (1) per-NPC `npc_config.gate_model` column, (2) `[llm.default.opts].gate_model` from the LLM config block (or a per-NPC `backend_opts` JSON override of the same key), (3) empty — in which case the LLM backend falls back to its configured default chat model. The gate always runs; there is no opt-out.
 
 ### Budgets
 
@@ -249,7 +249,7 @@ CREATE INDEX idx_npc_goals_fire ON npc_goals(fire_at);
 
 ## Risks & open questions
 
-- **Gate model accuracy**: tiny models can give noisy YES/NO. Mitigations: (a) use a temperature of 0; (b) log gate decisions for offline review; (c) allow an admin to bypass the gate per-NPC (`gate_model = ""` means always call response model).
+- **Gate model accuracy**: tiny models can give noisy YES/NO. Mitigations: (a) use a temperature of 0; (b) log gate decisions for offline review. The gate runs on every tick; operators who want maximum responsiveness can set `gate_model` to the same model as `chat_model` (the gate prompt is short, so the cost is only the wrapper tokens).
 - **Tool-call format compatibility**: Ollama's tool-calling support varies by model. Document the supported models in `plan.md` and gate features per model capability if needed.
 - **Event ordering across NPCs**: if NPC A's tool call emits an event, NPC B in the same room observes it on the next debounce. This can produce cascades. Mitigations: a small per-NPC cooldown after each tick (e.g. 2 seconds minimum between ticks).
 - **Tool-call infinite loops**: bounded depth (3) prevents this. Tools should be idempotent; document this in the M5 tool registration API.

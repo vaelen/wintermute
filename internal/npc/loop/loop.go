@@ -82,6 +82,10 @@ type Loop struct {
 
 	LLM       llm.LLM
 	ChatModel string
+	// GateModel is the model name passed to the gate Chat call. Empty
+	// no longer disables gating: the gate always runs, and an empty
+	// GateModel causes the backend to fall back to its configured
+	// default chat model (see the Ollama backend's model fallback).
 	GateModel string
 
 	// Memory is the per-NPC short+long-term memory wrapper. Nil disables
