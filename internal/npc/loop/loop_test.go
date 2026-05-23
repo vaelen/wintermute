@@ -575,6 +575,81 @@ func TestLoop_DropsOtherNPCSpeech(t *testing.T) {
 	}
 }
 
+// TestLoop_EmptyGateModel_StillRunsGate verifies that GateModel == ""
+// no longer disables gating: the gate Chat call still fires (with an
+// empty ChatOpts.Model, which the LLM backend resolves to its default
+// model), and a YES decision allows the response path to broadcast.
+//
+// In production, this is what happens when no gate model is configured
+// anywhere: per-NPC column empty, [llm.default.opts].gate_model empty.
+// The Ollama backend falls back to its configured chat model; with the
+// fake backend, an empty ChatOpts.Model routes to the top-level
+// responses/defaultReply table.
+func TestLoop_EmptyGateModel_StillRunsGate(t *testing.T) {
+	bus := events.NewMemBus()
+	defer bus.Close()
+
+	fakeLLM, err := fake.New(map[string]any{
+		// Top-level default is what the gate sees when ChatOpts.Model
+		// is empty — i.e. the fake's analog of Ollama's chat-model
+		// fallback.
+		"default": "YES",
+		"models": map[string]any{
+			"response": map[string]any{"default": "Hello there."},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fb := fakeLLM.(*fake.Fake)
+
+	bcast := newStubBroadcaster()
+	done := make(chan struct{}, 1)
+	l := &Loop{
+		RoomID:    1,
+		Bus:       bus,
+		Debounce:  20 * time.Millisecond,
+		NPCID:     100,
+		NPCName:   "Tester",
+		Persona:   "tester",
+		LLM:       fakeLLM,
+		ChatModel: "response",
+		GateModel: "",
+		World:     bcast,
+	}
+	l.Tick = func(ctx context.Context, obs []events.Event) {
+		l.defaultTick(ctx, obs)
+		done <- struct{}{}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go l.Run(ctx)
+	time.Sleep(10 * time.Millisecond)
+	bus.Publish(events.Event{Kind: events.KindSay, RoomID: 1, Text: "hello"})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Tick never fired")
+	}
+
+	if calls := fb.Calls(""); calls != 1 {
+		t.Errorf("gate call with empty model = %d, want 1 (gate must fire even with empty GateModel)", calls)
+	}
+	if calls := fb.Calls("response"); calls != 1 {
+		t.Errorf("response model called %d times; want 1 (gate said YES)", calls)
+	}
+	select {
+	case s := <-bcast.said:
+		if s.text != "Hello there." {
+			t.Errorf("broadcast text = %q, want %q", s.text, "Hello there.")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("NPCSay was not called")
+	}
+}
+
 func TestFirstToken(t *testing.T) {
 	cases := map[string]string{
 		"YES":          "YES",

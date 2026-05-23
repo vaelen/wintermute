@@ -177,6 +177,13 @@ func startServerWithNPC(t *testing.T, defaults config.LLMBackend) *testServer {
 // responses keyed off "someone said" — the loop renders observations as
 // "- someone said: <text>" so any incoming utterance routes to
 // bartenderReply via the substring match.
+//
+// The default is "YES" because the gate now always runs even with an
+// empty resolved gate model: the gate Chat call sends only a system
+// message, so the fake's last-user-content lookup is empty, no
+// substring matches, and the default reply is used. A "YES" default
+// lets the gate pass through to the response call, which sends user
+// content "- someone said: <text>" and matches the substring above.
 func bartenderFakeDefaults(bartenderReply string) config.LLMBackend {
 	return config.LLMBackend{
 		Backend: "fake",
@@ -184,7 +191,7 @@ func bartenderFakeDefaults(bartenderReply string) config.LLMBackend {
 			"responses": map[string]any{
 				"someone said": bartenderReply,
 			},
-			"default": "*the bartender shrugs*",
+			"default": "YES",
 		},
 	}
 }

@@ -30,6 +30,14 @@ const bartenderResponse = "the bartender nods slowly."
 // backend with a deterministic response keyed off "someone said". The
 // loop renders observations as "- someone said: <text>" so any incoming
 // utterance routes to bartenderResponse via the substring match.
+//
+// The default is "YES" because the gate now always runs (even with an
+// empty resolved gate model): with no per-NPC gate_model or
+// [llm.default.opts].gate_model set, the gate Chat call lands here
+// with ChatOpts.Model == "" and only a system message — last user
+// content is empty, no substring matches, and the default reply is
+// used. The bartender's chat call lands here too with user content
+// "- someone said: <text>" which matches "someone said".
 func fakeDefaults() config.LLMBackend {
 	return config.LLMBackend{
 		Backend: "fake",
@@ -37,7 +45,7 @@ func fakeDefaults() config.LLMBackend {
 			"responses": map[string]any{
 				"someone said": bartenderResponse,
 			},
-			"default": "(no idea)",
+			"default": "YES",
 		},
 	}
 }
@@ -288,6 +296,68 @@ func TestLoopRespondsViaBus(t *testing.T) {
 		t.Fatalf("Say: %v", err)
 	}
 	alice.waitFor(t, bartenderResponse, 3*time.Second)
+}
+
+// TestLoopGateModelFallsBackToOpts proves that when an NPC's
+// npc_config.gate_model column is empty, the loop's resolved GateModel
+// is taken from the defaults map's "gate_model" opt (i.e. from
+// [llm.default.opts] in TOML). This is the secondary fallback layer
+// after the per-NPC column and before the LLM backend's own model
+// fallback.
+func TestLoopGateModelFallsBackToOpts(t *testing.T) {
+	defaults := fakeDefaults()
+	defaults.Opts["gate_model"] = "small-model"
+	e := newEnv(t, true, defaults, true)
+	id := e.bartenderID(t)
+
+	// Sanity check the seeded npc_config: the fake-backend test path
+	// resets backend_opts to '{}' but does not touch the gate_model
+	// column, so we explicitly clear it to exercise the fallback path.
+	mustWrite(t, e.db, `UPDATE npc_config SET gate_model = '' WHERE object_id = ?`, int64(id))
+	if err := e.reg.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	e.reg.mu.RLock()
+	mgr := e.reg.loopMgr
+	e.reg.mu.RUnlock()
+	if mgr == nil {
+		t.Fatal("loopMgr is nil; bus was supposed to be wired")
+	}
+	l := mgr.Get(events.ObjectID(id))
+	if l == nil {
+		t.Fatalf("no loop registered for bartender %d", id)
+	}
+	if l.GateModel != "small-model" {
+		t.Errorf("loop.GateModel = %q, want %q (fallback to opts[gate_model])",
+			l.GateModel, "small-model")
+	}
+}
+
+// TestLoopGateModelPerNPCColumnWinsOverOpts proves the per-NPC
+// gate_model column takes precedence over the opts-level fallback.
+func TestLoopGateModelPerNPCColumnWinsOverOpts(t *testing.T) {
+	defaults := fakeDefaults()
+	defaults.Opts["gate_model"] = "small-model"
+	e := newEnv(t, true, defaults, true)
+	id := e.bartenderID(t)
+
+	mustWrite(t, e.db, `UPDATE npc_config SET gate_model = 'per-npc-model' WHERE object_id = ?`, int64(id))
+	if err := e.reg.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	e.reg.mu.RLock()
+	mgr := e.reg.loopMgr
+	e.reg.mu.RUnlock()
+	l := mgr.Get(events.ObjectID(id))
+	if l == nil {
+		t.Fatalf("no loop registered for bartender %d", id)
+	}
+	if l.GateModel != "per-npc-model" {
+		t.Errorf("loop.GateModel = %q, want %q (per-NPC column should win)",
+			l.GateModel, "per-npc-model")
+	}
 }
 
 func TestReloadRebuildsAfterPersonaUpdate(t *testing.T) {
