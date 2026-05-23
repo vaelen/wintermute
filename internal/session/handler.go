@@ -46,12 +46,13 @@ var ErrSilentDrop = errors.New("session: silent drop")
 // Handler holds the dependencies a connection handler needs. One Handler
 // is created at engine startup and reused for every accepted connection.
 type Handler struct {
-	Auth   *auth.Store
-	World  *world.World
-	NPC    worldcmd.NPCReloader
-	Admin  *worldcmd.AdminBackend
-	Logger *slog.Logger
-	MOTD   string
+	Auth     *auth.Store
+	World    *world.World
+	NPC      worldcmd.NPCReloader
+	NPCDebug worldcmd.NPCDebugger
+	Admin    *worldcmd.AdminBackend
+	Logger   *slog.Logger
+	MOTD     string
 
 	// EngageRegistry is the process-wide engagement registry. nil-safe
 	// for tests; when nil, modal dispatch falls through to the world parser.

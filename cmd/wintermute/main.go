@@ -29,10 +29,13 @@ import (
 	"github.com/vaelen/wintermute/internal/ftn/msgid"
 	ftnnetworks "github.com/vaelen/wintermute/internal/ftn/networks"
 	wintermutehttp "github.com/vaelen/wintermute/internal/http"
+	"github.com/vaelen/wintermute/internal/llm/budget"
 	_ "github.com/vaelen/wintermute/internal/llm/ollama"
 	"github.com/vaelen/wintermute/internal/mail"
 	wnettls "github.com/vaelen/wintermute/internal/net/tls"
 	"github.com/vaelen/wintermute/internal/npc"
+	npcmemory "github.com/vaelen/wintermute/internal/npc/memory"
+	"github.com/vaelen/wintermute/internal/npc/schedule"
 	scriptlua "github.com/vaelen/wintermute/internal/script/lua"
 	"github.com/vaelen/wintermute/internal/security"
 	"github.com/vaelen/wintermute/internal/session"
@@ -42,6 +45,7 @@ import (
 	worldcmd "github.com/vaelen/wintermute/internal/world/cmd"
 	"github.com/vaelen/wintermute/internal/world/engage"
 	"github.com/vaelen/wintermute/internal/world/engage/menu"
+	"github.com/vaelen/wintermute/internal/world/events"
 )
 
 func main() {
@@ -119,6 +123,8 @@ func run(cfgPath string) error {
 	if err != nil {
 		return fmt.Errorf("load world: %w", err)
 	}
+	bus := events.NewMemBus()
+	w.SetBus(bus)
 
 	// Rename boots every live session for the renamed account so the
 	// in-memory s.account.Username cannot drift from the DB. Runs after
@@ -138,7 +144,57 @@ func run(cfgPath string) error {
 		return err
 	})
 
-	npcReg, err := npc.Load(ctx, db, w, cfg.LLM.Default, logger)
+	// wg tracks BOTH the accept-loop goroutines and every per-session
+	// goroutine, plus every long-lived background worker (budget flush,
+	// scheduler, janitors, decay job). On shutdown we Wait on it before
+	// letting `defer db.Close()` run, so a session or worker that's
+	// mid-write to the DB won't race with the writer goroutine shutting
+	// down ("send on closed channel" panic). Declared early so the M7
+	// background workers below can Add to it.
+	var wg sync.WaitGroup
+
+	// M7: per-NPC token budget manager. Load reads persisted usage from
+	// npc_budgets; the flush loop persists fresh usage on a 30s cadence
+	// and on shutdown via RunFlushLoop's ctx-done path.
+	//
+	// The flush goroutine is tracked in wg so wg.Wait() at shutdown
+	// drains its final Flush (which calls db.Write) before db.Close
+	// runs. Without this tracking the final flush can race db.Close and
+	// panic on send-to-closed-channel inside the writer.
+	budgetMgr := budget.NewManager(db, budget.Defaults{
+		Minute: cfg.NPC.Loop.DefaultMinuteLimit,
+		Hour:   cfg.NPC.Loop.DefaultHourLimit,
+		Day:    cfg.NPC.Loop.DefaultDayLimit,
+	})
+	if err := budgetMgr.Load(ctx); err != nil {
+		return fmt.Errorf("budget: load: %w", err)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := budgetMgr.RunFlushLoop(ctx, 30*time.Second, logger); err != nil {
+			logger.Warn("budget: final flush failed", "err", err)
+		}
+	}()
+
+	// M7: lua tool registry + late-bound pool adapter. The adapter is
+	// constructed BEFORE npc.Load so the per-NPC loop goroutines have a
+	// stable Tools interface; the actual *Pool is wired in below after
+	// luaPool is constructed.
+	toolsRegistry := scriptlua.NewToolRegistry()
+	toolsAdapter := &luaToolsAdapter{reg: toolsRegistry}
+
+	npcReg, err := npc.Load(ctx, db, w, cfg.LLM.Default, logger, npc.LoopDeps{
+		Bus:    bus,
+		Budget: budgetMgr,
+		World:  worldBroadcaster{w: w},
+		Tools:  toolsAdapter,
+		Config: npc.LoopConfig{
+			Debounce:         time.Duration(cfg.NPC.Loop.DebounceMs) * time.Millisecond,
+			MaxToolDepth:     cfg.NPC.Loop.MaxToolDepth,
+			DefaultGateModel: cfg.NPC.Loop.DefaultGateModel,
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("load npc registry: %w", err)
 	}
@@ -146,6 +202,17 @@ func run(cfgPath string) error {
 		npcReg.HandleSay(roomID, speakerID, speakerName, text)
 	})
 	logger.Info("npc registry loaded")
+
+	// M7: scheduler fires npc_goals as KindSched events into the per-room
+	// bus. The per-NPC loops observe them through their normal subscription.
+	// Tracked in wg so its reschedule / delete db.Write calls cannot
+	// race db.Close at shutdown.
+	sch := schedule.New(db, w, bus, logger)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sch.Run(ctx)
+	}()
 
 	// Engagement primitive (M5.7): registry of live engagements, in-memory
 	// host cache, and a handler factory that maps host kind to the right
@@ -167,9 +234,13 @@ func run(cfgPath string) error {
 	adminAPI.Boards = boardsSvc
 	adminAPI.Files = filesSvc
 	adminAPI.Security = secSvc
-	luaAPI := scriptlua.NewAPI(adminAPI, nil, ctx)
+	luaAPI := scriptlua.NewAPI(adminAPI, toolsRegistry, ctx)
 	luaPool := scriptlua.NewPool(scriptlua.PoolConfig{Size: 4, API: luaAPI})
 	defer luaPool.Close()
+	// Now that the pool is alive, wire it into the tools adapter so the
+	// per-NPC loops constructed by npcReg can actually invoke registered
+	// tools.
+	toolsAdapter.setPool(luaPool)
 	scripts := scriptlua.NewScriptStore(db)
 	adminBackend := &worldcmd.AdminBackend{
 		API:     adminAPI,
@@ -298,13 +369,6 @@ func run(cfgPath string) error {
 		return nil
 	}
 
-	// wg tracks BOTH the accept-loop goroutines and every per-session
-	// goroutine. On shutdown we Wait on it before letting `defer db.Close()`
-	// run, so a session that's mid-write to the DB won't race with the
-	// writer goroutine shutting down ("send on closed channel" panic).
-	// Declared early so the BeforeDeleteObserver below can add to it.
-	var wg sync.WaitGroup
-
 	// Force-close any live engagement whose host object is being deleted.
 	// The hook fires inside w.mu.Lock, so the close is dispatched to a
 	// goroutine to avoid deadlocking against OnClose's BroadcastToRoom
@@ -332,6 +396,7 @@ func run(cfgPath string) error {
 	}
 
 	handler := session.DefaultHandler(authStore, w, npcReg, logger, motd)
+	handler.NPCDebug = npcDebugAdapter{r: npcReg}
 	handler.Admin = adminBackend
 	handler.HistorySize = cfg.Session.HistorySize
 	handler.EngageRegistry = engageReg
@@ -429,6 +494,21 @@ func run(cfgPath string) error {
 		}
 	}()
 
+	// M7 Task 13: daily memory-salience decay job. Multiplies every
+	// npc_memories.salience by DecayFactor (0.95) once per 24h so
+	// unreferenced memories drift toward DecayFloor (0.1) and become
+	// eligible for the @gc-memories admin sweep. The first tick fires
+	// after a full interval — startup is not a decay event.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		(&npcmemory.DecayJob{
+			DB:       db,
+			Logger:   logger,
+			Interval: 24 * time.Hour,
+		}).Run(ctx)
+	}()
+
 	// M6.6: security janitor — purge expired temporary ip_denials rows
 	// from both the cache and the DB on a tunable interval.
 	wg.Add(1)
@@ -490,6 +570,12 @@ func run(cfgPath string) error {
 	case <-time.After(5 * time.Second):
 		logger.Warn("npc dispatch / memory did not drain within 5s")
 	}
+	// Close the event bus only after NPC dispatch has fully drained.
+	// Per-NPC tick loops Subscribe to the bus and may Publish during
+	// their final shutdown drain; closing the bus first would tear
+	// down subscribers (and panic on send-after-close) before the last
+	// NPC events were emitted.
+	bus.Close()
 	return nil
 }
 

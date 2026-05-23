@@ -172,7 +172,7 @@ A daily job runs `UPDATE npc_memories SET salience = salience * 0.95;`. Memories
 
 ## Schema changes
 
-`internal/store/migrations/0014_budgets.sql`:
+`internal/store/migrations/0024_npc_budgets.sql`:
 
 ```sql
 -- Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
@@ -192,7 +192,7 @@ CREATE TABLE npc_budgets (
 );
 ```
 
-`internal/store/migrations/0015_goals.sql`:
+`internal/store/migrations/0025_npc_goals.sql`:
 
 ```sql
 -- Copyright (c) 2026 Andrew C. Young <andrew@vaelen.org>
@@ -212,7 +212,7 @@ CREATE INDEX idx_npc_goals_fire ON npc_goals(fire_at);
 
 ## Implementation tasks
 
-1. Add migrations 0012 and 0013.
+1. Add migrations 0024 and 0025.
 2. Implement `internal/world/events`. Replace M2's subscriber slices with `events.Bus`. Verify M2 integration tests still pass.
 3. Implement `internal/npc/loop`: subscription, observation buffer, debounce, gate→response flow.
 4. Implement `internal/llm/budget`. Wire into the loop and into `npc.HandleSay` from M3 (so addressed responses also consume budget).

@@ -6,6 +6,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/vaelen/wintermute/internal/auth"
@@ -19,6 +20,55 @@ import (
 // package (and the LLM/sqlite chain) into the world cmd package.
 type NPCReloader interface {
 	Reload(ctx context.Context) error
+}
+
+// NPCDebugger is the subset of the npc.Registry surface @npc-debug and
+// @gc-memories rely on: name lookup, live-loop snapshot, budget window
+// inspection, and a raw store handle for the memory GC SQL. Wired
+// optionally on Handler.NPCDebug so tests that don't need the feature
+// can leave it nil.
+type NPCDebugger interface {
+	LookupByName(name string) (NPCInfo, bool)
+	LoopSnapshot(npcID world.ObjectID) (NPCSnapshot, bool)
+	BudgetFor(npcID world.ObjectID) (NPCBudgetWindow, NPCBudgetWindow, NPCBudgetWindow, bool)
+	GCMemories(ctx context.Context, salienceFloor float64) (int64, error)
+	SalienceFloor() float64
+}
+
+// NPCInfo is the @npc-debug-facing slice of an NPC's static config.
+// Keeping the cmd package decoupled from internal/npc means we copy
+// just the fields the command prints.
+type NPCInfo struct {
+	ObjectID  world.ObjectID
+	Name      string
+	Persona   string
+	Model     string
+	GateModel string
+	ToolNames []string
+}
+
+// NPCSnapshot mirrors loop.Snapshot in plain types so cmd doesn't need
+// to import internal/npc/loop. The npc registry adapter populates it
+// from loop.Snapshot.
+type NPCSnapshot struct {
+	NPCName      string
+	RoomID       int64
+	Observations []NPCEvent
+	LastReply    string
+}
+
+// NPCEvent is the cmd-side view of an events.Event. Only the fields
+// the @npc-debug output renders are included.
+type NPCEvent struct {
+	Kind  string
+	Actor int64
+	Text  string
+}
+
+// NPCBudgetWindow mirrors budget.Window for the cmd-package boundary.
+type NPCBudgetWindow struct {
+	Limit int
+	Used  int
 }
 
 // EngageBackend bundles the engage dependencies the world cmd handler
@@ -38,6 +88,10 @@ type Handler struct {
 	// NPC is the npc registry, used by admin commands. May be nil
 	// (e.g. in tests where NPC reactivity isn't exercised).
 	NPC NPCReloader
+	// NPCDebug is the debug-tier surface used by @npc-debug and
+	// @gc-memories. Optional; nil means those commands degrade to
+	// OutcomeUnknown (invisible to non-admins).
+	NPCDebug NPCDebugger
 	// Admin bundles the dependencies the admin @-commands need
 	// (world API, scripts table access, Lua pool, tool registry).
 	// May be nil; affected commands then return OutcomeUnknown so
@@ -146,6 +200,10 @@ func (h *Handler) Dispatch(ctx context.Context, line string) Outcome {
 		outcome = OutcomeContinue
 	case "@npcreload":
 		outcome = h.cmdNPCReload(ctx)
+	case "@npc-debug":
+		outcome = h.cmdNPCDebug(rest)
+	case "@gc-memories":
+		outcome = h.cmdGCMemories(ctx)
 	case "@create-room":
 		outcome = h.cmdCreateRoom(ctx, rest)
 	case "@dig":
@@ -368,6 +426,101 @@ func (h *Handler) cmdNPCReload(ctx context.Context) Outcome {
 	return OutcomeContinue
 }
 
+// cmdNPCDebug prints persona, models, tool allow-list, budget windows,
+// recent observations, and the last broadcast reply for the named
+// NPC. Admin-only; hidden from non-admins via OutcomeUnknown.
+func (h *Handler) cmdNPCDebug(rest string) Outcome {
+	if h.NPCDebug == nil {
+		return OutcomeUnknown
+	}
+	if h.Presence == nil || h.Presence.Account == nil ||
+		h.Presence.Account.AccessLevel != auth.AccessAdmin {
+		return OutcomeUnknown
+	}
+	name := strings.TrimSpace(rest)
+	if name == "" {
+		_ = h.Presence.Write("Usage: @npc-debug <name>\r\n")
+		return OutcomeContinue
+	}
+	info, ok := h.NPCDebug.LookupByName(name)
+	if !ok {
+		_ = h.Presence.Write("Unknown NPC: " + name + "\r\n")
+		return OutcomeContinue
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "NPC: %s (id=%d)\r\n", info.Name, info.ObjectID)
+	fmt.Fprintf(&b, "  Persona: %s\r\n", truncate(info.Persona, 200))
+	fmt.Fprintf(&b, "  Chat model: %s   Gate model: %s\r\n",
+		emptyAs(info.Model, "(default)"), emptyAs(info.GateModel, "(none)"))
+	if len(info.ToolNames) == 0 {
+		b.WriteString("  Tools: (none)\r\n")
+	} else {
+		fmt.Fprintf(&b, "  Tools: %s\r\n", strings.Join(info.ToolNames, ", "))
+	}
+	if w1, w2, w3, ok := h.NPCDebug.BudgetFor(info.ObjectID); ok {
+		fmt.Fprintf(&b, "  Budget: minute=%d/%d, hour=%d/%d, day=%d/%d\r\n",
+			w1.Used, w1.Limit, w2.Used, w2.Limit, w3.Used, w3.Limit)
+	} else {
+		b.WriteString("  Budget: (no record yet)\r\n")
+	}
+	if snap, ok := h.NPCDebug.LoopSnapshot(info.ObjectID); ok {
+		fmt.Fprintf(&b, "  Last reply: %q\r\n", truncate(snap.LastReply, 200))
+		if len(snap.Observations) > 0 {
+			b.WriteString("  Recent observations:\r\n")
+			for _, e := range snap.Observations {
+				fmt.Fprintf(&b, "    [%s] actor=%d text=%q\r\n",
+					e.Kind, e.Actor, truncate(e.Text, 80))
+			}
+		} else {
+			b.WriteString("  Recent observations: (none)\r\n")
+		}
+	} else {
+		b.WriteString("  (no loop running)\r\n")
+	}
+	_ = h.Presence.Write(b.String())
+	return OutcomeContinue
+}
+
+// cmdGCMemories deletes npc_memories rows whose salience has dropped
+// below the registry's salience floor. Admin-only.
+func (h *Handler) cmdGCMemories(ctx context.Context) Outcome {
+	if h.NPCDebug == nil {
+		return OutcomeUnknown
+	}
+	if h.Presence == nil || h.Presence.Account == nil ||
+		h.Presence.Account.AccessLevel != auth.AccessAdmin {
+		return OutcomeUnknown
+	}
+	floor := h.NPCDebug.SalienceFloor()
+	deleted, err := h.NPCDebug.GCMemories(ctx, floor)
+	if err != nil {
+		_ = h.Presence.Write("GC failed: " + err.Error() + "\r\n")
+		return OutcomeContinue
+	}
+	_ = h.Presence.Write(fmt.Sprintf(
+		"gc-memories: deleted %d rows below salience %.2f\r\n",
+		deleted, floor))
+	return OutcomeContinue
+}
+
+// truncate clips s to at most n bytes, appending an ellipsis when it
+// trims. Used by @npc-debug output so a long persona doesn't fill the
+// terminal.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// emptyAs returns fallback when s is empty, otherwise s.
+func emptyAs(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
 func (h *Handler) cmdHelp() {
 	lines := []string{
 		"Commands available:",
@@ -427,6 +580,8 @@ func (h *Handler) adminHelpLines() []string {
 		"  @create-npc <slug> \"<name>\" \"<persona>\" — spawn an NPC here",
 		"  @persona <npc-slug> \"<persona>\"         — replace an NPC's persona",
 		"  @npcreload                              — re-read npc_config from disk",
+		"  @npc-debug <name>                       — show NPC persona, budgets, recent observations",
+		"  @gc-memories                            — delete low-salience memories",
 		"",
 		"Scripts and tools (admin):",
 		"  @script <slug>                          — show a stored script's source",

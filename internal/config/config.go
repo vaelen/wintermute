@@ -25,6 +25,33 @@ type Config struct {
 	FTN      FTNConfig      `toml:"ftn"`
 	Files    FilesConfig    `toml:"files"`
 	Security SecurityConfig `toml:"security"`
+	NPC      NPCConfig      `toml:"npc"`
+}
+
+// NPCConfig groups M7's NPC-runtime tuning knobs. Currently this is just
+// the autonomous tick loop's settings; future NPC-wide knobs land here.
+type NPCConfig struct {
+	Loop LoopConfig `toml:"loop"`
+}
+
+// LoopConfig governs the per-NPC autonomous tick loop introduced in M7.
+// Zero fields fall back to defaults inside the npc.Load / budget.Defaults
+// layers; the Default() helper below seeds these so a freshly-loaded
+// Config never has zero values for callers that read them directly.
+type LoopConfig struct {
+	// DebounceMs is how long the loop waits after the last observation
+	// before firing a tick. 0 -> 800ms.
+	DebounceMs int `toml:"debounce_ms"`
+	// MaxToolDepth caps nested tool-call rounds per tick. 0 -> 3.
+	MaxToolDepth int `toml:"max_tool_depth"`
+	// DefaultMinuteLimit, DefaultHourLimit, DefaultDayLimit seed
+	// budget.Manager when no per-NPC override exists.
+	DefaultMinuteLimit int `toml:"default_minute_limit"`
+	DefaultHourLimit   int `toml:"default_hour_limit"`
+	DefaultDayLimit    int `toml:"default_day_limit"`
+	// DefaultGateModel is the fallback gate model name when an NPC has
+	// no gate_model column set in npc_config.
+	DefaultGateModel string `toml:"default_gate_model"`
 }
 
 // SecurityConfig configures the M6.6 login-hardening defences: the
@@ -197,6 +224,16 @@ func Default() *Config {
 			Filter: SecurityFilterConfig{
 				Enabled: false,
 				Address: "127.0.0.1:1234",
+			},
+		},
+		NPC: NPCConfig{
+			Loop: LoopConfig{
+				DebounceMs:         800,
+				MaxToolDepth:       3,
+				DefaultMinuteLimit: 5000,
+				DefaultHourLimit:   100000,
+				DefaultDayLimit:    1000000,
+				DefaultGateModel:   "llama3.2:1b",
 			},
 		},
 	}

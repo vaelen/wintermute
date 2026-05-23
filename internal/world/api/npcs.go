@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/vaelen/wintermute/internal/world"
 )
@@ -146,6 +147,38 @@ func (a *API) SetNPCPersona(ctx context.Context, slug, persona string) error {
 	}
 	if a.NPCs != nil {
 		_ = a.NPCs.Reload(ctx)
+	}
+	return nil
+}
+
+// ScheduleNPCGoal inserts a row into npc_goals for the given NPC. The
+// scheduler goroutine picks it up at or after fire_at and publishes a
+// KindSched event into the NPC's current room.
+//
+// recurring is one of "", "daily", "hourly". Other values are stored
+// verbatim and treated as one-shots at fire time.
+func (a *API) ScheduleNPCGoal(ctx context.Context, npcID world.ObjectID, fireAt time.Time, goal, recurring string) error {
+	if goal == "" {
+		return errorf(CodeInvalidArgument, "schedule npc goal: goal required")
+	}
+	if npcID == 0 {
+		return errorf(CodeInvalidArgument, "schedule npc goal: npc id required")
+	}
+	o, err := a.World.Object(npcID)
+	if err != nil {
+		return translateWorldErr("npc", "", err)
+	}
+	if o.Kind != world.KindNPC {
+		return errorf(CodeInvalidArgument, "object %d is not an NPC", int64(npcID))
+	}
+	if err := a.DB.Write(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO npc_goals (npc_id, fire_at, goal, recurring, created_at)
+			   VALUES (?, ?, ?, NULLIF(?, ''), ?)`,
+			int64(npcID), fireAt.Unix(), goal, recurring, time.Now().Unix())
+		return err
+	}); err != nil {
+		return errorf(CodeInternal, "insert npc_goal: %v", err)
 	}
 	return nil
 }
