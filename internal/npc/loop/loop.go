@@ -63,9 +63,9 @@ type ToolMeta struct {
 
 // Loop is one NPC's tick goroutine. Construct with the required fields
 // filled in and call Run from a goroutine. Leave Tick nil to use the
-// production dispatch path (gate-model decision; response in later M7
-// tasks); set Tick explicitly only for tests that want to intercept the
-// buffered batch.
+// production dispatch path (budget check, gate-model decision, response
+// model with tool-call round-trips, broadcast, memory ingest); set Tick
+// explicitly only for tests that want to intercept the buffered batch.
 type Loop struct {
 	RoomID   events.RoomID
 	Bus      events.Bus

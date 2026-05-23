@@ -571,10 +571,10 @@ func run(cfgPath string) error {
 		logger.Warn("npc dispatch / memory did not drain within 5s")
 	}
 	// Close the event bus only after NPC dispatch has fully drained.
-	// In M7 Task 10 NPC tick loops will Subscribe to the bus and may
-	// Publish during their final shutdown drain; closing the bus first
-	// would tear down subscribers (and panic on send-after-close) before
-	// the last NPC events were emitted.
+	// Per-NPC tick loops Subscribe to the bus and may Publish during
+	// their final shutdown drain; closing the bus first would tear
+	// down subscribers (and panic on send-after-close) before the last
+	// NPC events were emitted.
 	bus.Close()
 	return nil
 }
