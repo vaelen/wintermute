@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,6 +17,11 @@ import (
 	"github.com/vaelen/wintermute/internal/world"
 	"github.com/vaelen/wintermute/internal/world/events"
 )
+
+// chatTemplateRE matches chat-template control tokens like
+// "<|start_header_id|>" that some small models (notably llama3.2:1b)
+// leak into the assistant's reply. Stripped before YES/NO parsing.
+var chatTemplateRE = regexp.MustCompile(`<\|[^|]*\|>`)
 
 // gateBudgetEstimate is the rough token cost of one gate-model call.
 // Sized small so a single gate decision fits even in a near-exhausted
@@ -39,11 +45,12 @@ const dispatchTimeout = 120 * time.Second
 
 // gatePrompt is the system message sent to the gate model. Kept short
 // because the gate model is typically tiny (e.g. llama3.2:1b); we
-// parse its reply as the first significant token, expecting "YES" or
-// "NO". The gate always runs on every tick: when no gate model is
-// resolved for an NPC, ChatOpts.Model is left empty and the backend
-// falls back to its default chat model (see the Ollama backend's
-// model fallback in Chat).
+// parse its reply by scanning for a word-bounded YES/NO (see
+// gateDecision), tolerant of chat-template noise that small models
+// sometimes leak. The gate always runs on every tick: when no gate
+// model is resolved for an NPC, ChatOpts.Model is left empty and the
+// backend falls back to its default chat model (see the Ollama
+// backend's model fallback in Chat).
 const gatePrompt = `You are a relevance filter for the NPC %q.
 Persona: %s
 Recent events:
@@ -87,7 +94,12 @@ func (l *Loop) gateAllows(ctx context.Context, obs []events.Event) bool {
 	if l.Budget != nil {
 		l.Budget.Record(world.ObjectID(l.NPCID), resp.UsageIn, resp.UsageOut)
 	}
-	return strings.EqualFold(firstToken(resp.Content), "YES")
+	allow, parsed := gateDecision(resp.Content)
+	if !parsed {
+		l.Logger.Warn("npc loop: gate reply unparseable, defaulting to YES",
+			"npc", l.NPCName, "backend", l.Backend, "reply", resp.Content)
+	}
+	return allow
 }
 
 // renderObservations formats the buffered events as a short bulleted
@@ -113,14 +125,53 @@ func renderObservations(obs []events.Event) string {
 	return b.String()
 }
 
-func firstToken(s string) string {
-	s = strings.TrimSpace(s)
-	for i, r := range s {
-		if r == ' ' || r == '\n' || r == '\t' || r == '.' || r == ',' {
-			return s[:i]
-		}
+// gateDecision parses the gate model's reply into (allow, parsed).
+// allow is the YES/NO decision; parsed is false when neither YES nor
+// NO could be found, in which case the caller should fail open
+// (return YES) and log.
+//
+// The reply may carry chat-template noise from small models, so this
+// strips <|...|> tokens before scanning for word-bounded YES/NO. YES
+// wins over NO if both appear.
+func gateDecision(reply string) (allow, parsed bool) {
+	cleaned := chatTemplateRE.ReplaceAllString(reply, "")
+	if hasWord(cleaned, "YES") {
+		return true, true
 	}
-	return s
+	if hasWord(cleaned, "NO") {
+		return false, true
+	}
+	return true, false
+}
+
+// hasWord reports whether word appears in s as a standalone token,
+// case-insensitive. Word boundaries are defined as non-letter,
+// non-digit characters (matching the practical behaviour of \b in
+// ASCII regex without pulling in the regexp engine for every check).
+func hasWord(s, word string) bool {
+	lo := strings.ToLower(s)
+	w := strings.ToLower(word)
+	for offset := 0; ; {
+		i := strings.Index(lo[offset:], w)
+		if i < 0 {
+			return false
+		}
+		i += offset
+		end := i + len(w)
+		prevOK := i == 0 || !isWordChar(rune(lo[i-1]))
+		nextOK := end == len(lo) || !isWordChar(rune(lo[end]))
+		if prevOK && nextOK {
+			return true
+		}
+		offset = end
+	}
+}
+
+func isWordChar(r rune) bool {
+	return r == '_' ||
+		(r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') ||
+		(r >= '0' && r <= '9')
 }
 
 // respond drives the response-model path: retrieve relevant long-term
