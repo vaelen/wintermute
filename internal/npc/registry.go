@@ -296,11 +296,24 @@ func (r *Registry) rebuild(ctx context.Context) error {
 	// after the memory workers so a Stop on the loops cannot race with
 	// a hot worker queue: the worker drain in the SAME rebuild already
 	// handled that boundary.
-	if r.loopMgr != nil {
-		r.loopMgr.Stop()
-	}
+	//
+	// Swap the loopMgr field under r.mu so concurrent readers
+	// (LoopSnapshot, Shutdown) cannot see a torn value. The Stop on the
+	// old manager and the Add calls on the new one happen OUTSIDE the
+	// lock — Stop can block on goroutine drain, and we never want to
+	// hold r.mu across that.
+	var newMgr *loop.Manager
 	if r.loopDeps.Bus != nil {
-		r.loopMgr = loop.NewManager(r.rootCtx)
+		newMgr = loop.NewManager(r.rootCtx)
+	}
+	r.mu.Lock()
+	oldMgr := r.loopMgr
+	r.loopMgr = newMgr
+	r.mu.Unlock()
+	if oldMgr != nil {
+		oldMgr.Stop()
+	}
+	if newMgr != nil {
 		engAdapter := engagementAdapter{r: r}
 		for id, n := range byID {
 			if n.llm == nil {
@@ -335,7 +348,7 @@ func (r *Registry) rebuild(ctx context.Context) error {
 				Engage:       engAdapter,
 				Logger:       r.logger.With("npc", n.Name),
 			}
-			r.loopMgr.Add(l)
+			newMgr.Add(l)
 		}
 	}
 
@@ -475,9 +488,14 @@ func (r *Registry) Wait() {
 // the deadline expires before the work completes.
 func (r *Registry) Shutdown(ctx context.Context) error {
 	// Step 1: stop loops first so no new dispatches land on the memory
-	// worker queue while it's being drained.
-	if r.loopMgr != nil {
-		r.loopMgr.Stop()
+	// worker queue while it's being drained. Read the field under r.mu
+	// so a concurrent rebuild (theoretical at shutdown but cheap to
+	// guard against) cannot tear the pointer.
+	r.mu.RLock()
+	mgr := r.loopMgr
+	r.mu.RUnlock()
+	if mgr != nil {
+		mgr.Stop()
 	}
 
 	// Step 2: bounded wait for observer-spawned drain goroutines. If

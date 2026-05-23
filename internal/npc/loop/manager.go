@@ -42,6 +42,13 @@ func NewManager(parent context.Context) *Manager {
 // Add starts l on a goroutine derived from the manager's parent ctx.
 // If an existing loop is already registered for the same NPCID, its
 // ctx is cancelled first.
+//
+// wg.Add must happen INSIDE the mutex: Stop also holds the mutex while
+// draining the map, so once Stop sees the new entry it is guaranteed to
+// also see the incremented wg counter when it calls wg.Wait. If we did
+// the Add after Unlock, a Stop racing between Unlock and wg.Add(1)
+// could observe a zero counter and return before the new goroutine
+// even started, orphaning it past shutdown.
 func (m *Manager) Add(l *Loop) {
 	m.mu.Lock()
 	if prev, ok := m.loops[l.NPCID]; ok {
@@ -49,9 +56,9 @@ func (m *Manager) Add(l *Loop) {
 	}
 	ctx, cancel := context.WithCancel(m.parent)
 	m.loops[l.NPCID] = &loopEntry{loop: l, cancel: cancel}
+	m.wg.Add(1)
 	m.mu.Unlock()
 
-	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
 		l.Run(ctx)

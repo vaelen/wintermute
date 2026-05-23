@@ -144,9 +144,23 @@ func run(cfgPath string) error {
 		return err
 	})
 
+	// wg tracks BOTH the accept-loop goroutines and every per-session
+	// goroutine, plus every long-lived background worker (budget flush,
+	// scheduler, janitors, decay job). On shutdown we Wait on it before
+	// letting `defer db.Close()` run, so a session or worker that's
+	// mid-write to the DB won't race with the writer goroutine shutting
+	// down ("send on closed channel" panic). Declared early so the M7
+	// background workers below can Add to it.
+	var wg sync.WaitGroup
+
 	// M7: per-NPC token budget manager. Load reads persisted usage from
 	// npc_budgets; the flush loop persists fresh usage on a 30s cadence
 	// and on shutdown via RunFlushLoop's ctx-done path.
+	//
+	// The flush goroutine is tracked in wg so wg.Wait() at shutdown
+	// drains its final Flush (which calls db.Write) before db.Close
+	// runs. Without this tracking the final flush can race db.Close and
+	// panic on send-to-closed-channel inside the writer.
 	budgetMgr := budget.NewManager(db, budget.Defaults{
 		Minute: cfg.NPC.Loop.DefaultMinuteLimit,
 		Hour:   cfg.NPC.Loop.DefaultHourLimit,
@@ -155,7 +169,9 @@ func run(cfgPath string) error {
 	if err := budgetMgr.Load(ctx); err != nil {
 		return fmt.Errorf("budget: load: %w", err)
 	}
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		if err := budgetMgr.RunFlushLoop(ctx, 30*time.Second, logger); err != nil {
 			logger.Warn("budget: final flush failed", "err", err)
 		}
@@ -189,8 +205,14 @@ func run(cfgPath string) error {
 
 	// M7: scheduler fires npc_goals as KindSched events into the per-room
 	// bus. The per-NPC loops observe them through their normal subscription.
+	// Tracked in wg so its reschedule / delete db.Write calls cannot
+	// race db.Close at shutdown.
 	sch := schedule.New(db, w, bus, logger)
-	go sch.Run(ctx)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sch.Run(ctx)
+	}()
 
 	// Engagement primitive (M5.7): registry of live engagements, in-memory
 	// host cache, and a handler factory that maps host kind to the right
@@ -346,13 +368,6 @@ func run(cfgPath string) error {
 		}
 		return nil
 	}
-
-	// wg tracks BOTH the accept-loop goroutines and every per-session
-	// goroutine. On shutdown we Wait on it before letting `defer db.Close()`
-	// run, so a session that's mid-write to the DB won't race with the
-	// writer goroutine shutting down ("send on closed channel" panic).
-	// Declared early so the BeforeDeleteObserver below can add to it.
-	var wg sync.WaitGroup
 
 	// Force-close any live engagement whose host object is being deleted.
 	// The hook fires inside w.mu.Lock, so the close is dispatched to a
